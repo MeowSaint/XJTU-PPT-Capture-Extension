@@ -81,7 +81,7 @@ async function main() {
     const worker = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker');
     const extensionOrigin = worker.url().replace('/background.js', '');
     const courseName = '传感网络与大数据技术', expectedFilename = courseName + '-2026-09-07-15-30-00.pdf';
-    // Simulate a pre-v2.3 database: migration preserves existing screenshots.
+    // Simulate a pre-v2.3.0 database: migration preserves existing screenshots.
     await worker.evaluate(data => new Promise((resolve, reject) => {
       const request = indexedDB.open('course-ppt', 1);
       request.onupgradeneeded = () => request.result.createObjectStore('pages', {keyPath: 'id', autoIncrement: true});

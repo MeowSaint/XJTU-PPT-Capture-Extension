@@ -1,4 +1,4 @@
-课程 PPT 截取与 PDF 导出 — v2.3
+课程 PPT 截取与 PDF 导出 — v2.3.0
 
 更新：读取课程名称、上课日期和开始时间，按课程名称-年-月-日-时-分-秒.pdf 下载。
 例如：传感网络与大数据技术-2026-09-07-15-30-00.pdf。
@@ -6,7 +6,7 @@
 根目录仅保留最新版 ppt-capture.zip，历史 ZIP 存入 last-release；npm run release 自动打包归档。
 保留 about:blank / srcdoc 和沙箱 iframe 的 postMessage 来源修复。
 保留手动筛选视频及截取完成后先筛选页面、再手动下载的流程。
-新增“释放视频缓存”：卸载视频，保留截图、命名信息和 PDF 导出能力，版本仍为 v2.3。
+新增“释放视频缓存”：卸载视频，保留截图、命名信息和 PDF 导出能力，版本仍为 v2.3.0。
 
 更新 / 安装（电脑端 Chrome 或 Edge）：
 1. 已安装旧版：在 chrome://extensions 或 edge://extensions 中点击本插件的“重新加载”。

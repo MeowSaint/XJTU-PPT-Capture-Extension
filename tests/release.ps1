@@ -27,7 +27,7 @@ Set-FixtureVersion '1.0.0'
 $latest = Join-Path $fixture 'ppt-capture.zip'
 $oldHash = File-Hash $latest
 Copy-Item -LiteralPath $latest -Destination (Join-Path $fixture 'legacy.zip')
-Set-FixtureVersion '2.3'
+Set-FixtureVersion '2.3.0'
 & $release -Root $fixture
 $archive = Join-Path $fixture 'last-release/ppt-capture-v1.0.0.zip'
 if ((File-Hash $archive) -ne $oldHash) { throw 'Old release changed during archival' }
@@ -41,7 +41,7 @@ $zip = [System.IO.Compression.ZipFile]::OpenRead($latest)
 try {
   $reader = New-Object System.IO.StreamReader($zip.GetEntry('manifest.json').Open())
   try { $version = ($reader.ReadToEnd() | ConvertFrom-Json).version } finally { $reader.Dispose() }
-  if ($version -ne '2.3' -or -not $zip.GetEntry('course.js')) { throw 'Latest package has wrong contents' }
+  if ($version -ne '2.3.0' -or -not $zip.GetEntry('course.js')) { throw 'Latest package has wrong contents' }
   if ($zip.Entries.FullName -match '^(tests|\.git|last-release|node_modules)/') { throw 'Development/private data leaked into ZIP' }
 } finally { $zip.Dispose() }
 $beforeFailure = File-Hash $latest

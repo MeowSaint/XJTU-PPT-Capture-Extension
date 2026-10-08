@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "课程 PPT 截取与 PDF 导出",
-  "version": "2.3",
+  "version": "2.3.0",
   "minimum_chrome_version": "114",
   "description": "手动选择课程视频，快速截取 PPT 并去重，检查页面后导出 PDF。",
   "permissions": ["storage", "webRequest", "scripting", "activeTab", "declarativeNetRequestWithHostAccess"],
