@@ -1,0 +1,17 @@
+{
+  "name": "xjtu-ppt-capture-extension",
+  "version": "2.1.1",
+  "private": true,
+  "description": "Browser extension for extracting slide images from XJTU course videos and exporting reviewed pages to PDF.",
+  "scripts": {
+    "test": "node --test tests/core.test.cjs",
+    "test:bridge": "node tests/bridge.cjs",
+    "test:integration": "node tests/integration.cjs"
+  },
+  "engines": {"node": ">=20"},
+  "devDependencies": {
+    "pdf-lib": "1.17.1",
+    "playwright": "1.62.1",
+    "sharp": "0.35.4"
+  }
+}

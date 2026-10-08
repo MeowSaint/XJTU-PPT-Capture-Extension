@@ -1,0 +1,28 @@
+# Generated captures, PDFs, browser fixtures and release archives
+.test-output/
+output/
+tmp/
+*.zip
+*.pdf
+*.mp4
+*.m4v
+*.webm
+*.mov
+*.ts
+*.m3u8
+
+# Local dependencies, credentials and editor/OS state
+node_modules/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.log
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+coverage/
+playwright-report/
+test-results/
