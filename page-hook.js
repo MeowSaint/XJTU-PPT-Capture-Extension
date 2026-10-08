@@ -1,11 +1,16 @@
-/* MAIN-world response observer; retains media URLs, never credentials or bodies. */
+/* MAIN-world response observer; retains media URLs and course labels, never bodies. */
 (() => {
   const core = globalThis.PPTCore;
   if (!core) return;
   if (window.__pptMediaHook) return;
   window.__pptMediaHook = true;
-  const found = new Set(); let page = location.href;
+  const found = new Set(); let page = location.href, course = {};
+  function resetPage() { if (page !== location.href) { found.clear(); course = {}; page = location.href; } }
   function collect(value, depth = 0) {
+    if (depth === 0) {
+      resetPage();
+      if (window === window.top && globalThis.PPTCourse) course = {...course, ...PPTCourse.fromJSON(value, location.href)};
+    }
     if (depth > 12 || found.size > 300) return;
     if (typeof value === 'string') {
       const info = core.mediaInfo(value, document.baseURI || location.href);
@@ -14,12 +19,14 @@
     else if (value && typeof value === 'object') Object.values(value).slice(0, 2000).forEach(x => collect(x, depth + 1));
   }
   function emit() {
-    if (page !== location.href) { found.clear(); page = location.href; }
-    if (found.size) core.postLocalMessage(window, {type: 'PPT_CAPTURE_MEDIA_V2', urls: [...found]});
+    resetPage();
+    if (found.size || Object.keys(course).length) core.postLocalMessage(window, {type: 'PPT_CAPTURE_MEDIA_V2', urls: [...found], course, page});
   }
   const originalFetch = window.fetch;
   window.fetch = function (...args) {
+    const requestedPage = location.href;
     return originalFetch.apply(this, args).then(response => {
+      if (location.href !== requestedPage) return response;
       collect(response.url);
       const type = response.headers.get('content-type') || '';
       const size = Number(response.headers.get('content-length'));
@@ -33,7 +40,7 @@
           }
           const bytes = new Uint8Array(length); let offset = 0;
           for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
-          collect(JSON.parse(new TextDecoder().decode(bytes))); emit();
+          if (location.href === requestedPage) { collect(JSON.parse(new TextDecoder().decode(bytes))); emit(); }
         })().catch(() => {});
       }
       emit(); return response;
@@ -41,7 +48,9 @@
   };
   const open = XMLHttpRequest.prototype.open;
   XMLHttpRequest.prototype.open = function (...args) {
+    const requestedPage = location.href;
     this.addEventListener('load', () => {
+      if (location.href !== requestedPage) return;
       collect(this.responseURL);
       try {
         if (this.responseType === 'json') collect(this.response);

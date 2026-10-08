@@ -5,18 +5,68 @@ let db, pages = [], ready = false, sourceReady = false, stream = null, hls = nul
 let crop = {x: 0, y: 0, w: 1, h: 1}, drag = null, cropEditing = false, task = null, sourceName = '', sources = [], pendingOrigins = [], pendingURL = '';
 let realtimeTimer = null, realtimeBusy = false, candidate = null, candidateSince = 0, last = null, coursePage = '';
 const referrerRule = 16220;
+let sourceCourse = {}, sourceCoursePage = '', namingPage = '', namingManual = false, namingSave = Promise.resolve(), discoverySerial = 0;
 const dbReady = new Promise((resolve, reject) => {
-  const request = indexedDB.open('course-ppt', 1);
-  request.onupgradeneeded = () => request.result.createObjectStore('pages', {keyPath: 'id', autoIncrement: true});
+  const request = indexedDB.open('course-ppt', 2);
+  request.onupgradeneeded = () => {
+    if (!request.result.objectStoreNames.contains('pages')) request.result.createObjectStore('pages', {keyPath: 'id', autoIncrement: true});
+    if (!request.result.objectStoreNames.contains('settings')) request.result.createObjectStore('settings');
+  };
   request.onerror = () => reject(request.error);
+  request.onblocked = () => status('本地存储升级正在等待：请关闭其他旧版截取工具页，再重新打开此工具。');
   request.onsuccess = () => {
     db = request.result;
-    const read = db.transaction('pages').objectStore('pages').getAll();
-    read.onerror = () => reject(read.error);
-    read.onsuccess = () => { pages = read.result; ready = true; render(); controls(); resolve(); };
+    const tx = db.transaction(['pages', 'settings']), read = tx.objectStore('pages').getAll(), naming = tx.objectStore('settings').get('exportNaming');
+    tx.onerror = () => reject(tx.error);
+    tx.oncomplete = () => {
+      pages = read.result; ready = true;
+      if (pages.length) {
+        const saved = naming.result;
+        namingManual = !!saved?.manual;
+        setNaming(saved?.course || pages[0].course || {}, saved?.page || pages[0].coursePage || '');
+      } else setNaming(sourceCourse, sourceCoursePage);
+      render(); controls(); resolve();
+    };
   };
 });
 dbReady.then(() => status('本地截图已恢复。请选择课程视频或导入本地视频。')).catch(e => status('本地存储不可用：' + e.message));
+function namingInfo() { return PPTCourse.normalize({name: $('course-name').value, date: $('course-date').value, start: $('course-start').value}); }
+function previewName() {
+  const name = PPTCourse.filename(namingInfo());
+  $('filename-preview').textContent = name ? `下载文件名：${name}` : '尚未获得完整的课程名称、上课日期和开始时间。请刷新课程页 / 视频列表，或手动补填后下载。';
+}
+function setNaming(info, page) {
+  info = PPTCourse.normalize(info); namingPage = page;
+  $('course-name').value = info.name || ''; $('course-date').value = info.date || ''; $('course-start').value = info.start || '';
+  previewName();
+}
+function persistNaming() {
+  const snapshot = {course: namingInfo(), page: namingPage, manual: namingManual};
+  namingSave = namingSave.catch(() => {}).then(async () => {
+    await dbReady;
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction('settings', 'readwrite'); tx.objectStore('settings').put(snapshot, 'exportNaming');
+      tx.oncomplete = resolve; tx.onerror = () => reject(tx.error); tx.onabort = () => reject(tx.error);
+    });
+  });
+  namingSave.catch(e => status('命名信息保存失败：' + e.message));
+  return namingSave;
+}
+function acceptCourse(info, page) {
+  if (sourceCoursePage !== page) sourceCourse = {};
+  sourceCoursePage = page; sourceCourse = {...sourceCourse, ...PPTCourse.normalize(info)};
+  dbReady.then(() => {
+    if (sourceCoursePage !== page) return;
+    // A different selected tab must never rename screenshots already retained.
+    if (!namingManual && (!pages.length || pages.every(p => p.coursePage === page))) {
+      setNaming(sourceCourse, page); persistNaming();
+    }
+  }).catch(() => {});
+}
+for (const id of ['course-name', 'course-date', 'course-start']) $(id).oninput = () => {
+  namingManual = true; namingPage = pages[0]?.coursePage || coursePage;
+  previewName(); persistNaming();
+};
 function write(action, value) {
   return new Promise((resolve, reject) => {
     const tx = db.transaction('pages', 'readwrite'), request = tx.objectStore('pages')[action](value);
@@ -32,7 +82,7 @@ function timecode(seconds) {
 }
 function controls() {
   const active = !!task || !!realtimeTimer || realtimeBusy;
-  for (const id of ['load-url', 'file', 'share', 'sources', 'course', 'mode', 'diff', 'dedupe', 'full']) $(id).disabled = active;
+  for (const id of ['load-url', 'file', 'share', 'sources', 'course', 'discover', 'mode', 'diff', 'dedupe', 'full', 'course-name', 'course-date', 'course-start']) $(id).disabled = active;
   $('load').disabled = active || !$('sources').value;
   $('full').disabled = active || !sourceReady;
   $('crop-select').disabled = active || !sourceReady;
@@ -44,6 +94,7 @@ function controls() {
   $('clear').disabled = active || !ready || !pages.length;
   $('pdf').disabled = active || !pages.length;
   $('end').disabled = !stream || active;
+  $('release-cache').disabled = active || !(sourceReady || objectURL || hls || stream);
   video.controls = sourceReady && !active && !stream;
   overlay.style.pointerEvents = active || !sourceReady || !cropEditing ? 'none' : 'auto';
 }
@@ -55,7 +106,11 @@ function addCard(page, index) {
   article.title = page.sourceName || '历史截图'; button.textContent = '删除';
   button.onclick = async () => {
     if (task || realtimeTimer || realtimeBusy) return;
-    try { await write('delete', page.id); pages = pages.filter(x => x.id !== page.id); last = null; render(); controls(); }
+    try {
+      await write('delete', page.id); pages = pages.filter(x => x.id !== page.id); last = null;
+      if (!pages.length) { namingManual = false; setNaming(sourceCourse, sourceCoursePage); await persistNaming(); }
+      render(); controls();
+    }
     catch (e) { status('删除失败：' + e.message); }
   };
   article.append(image, label, button); $('pages').append(article);
@@ -109,7 +164,8 @@ function frame(sourceTime = video.currentTime) {
 async function save(f) {
   await dbReady;
   if (pages.length >= 1000) throw Error('已达 1000 页，请先导出 PDF，再清空继续');
-  const page = {data: f.canvas.toDataURL('image/jpeg', 0.95), w: f.canvas.width, h: f.canvas.height, time: Date.now(), sourceTime: f.sourceTime, sourceName, sig: f.sig};
+  if (!pages.length) await persistNaming();
+  const page = {data: f.canvas.toDataURL('image/jpeg', 0.95), w: f.canvas.width, h: f.canvas.height, time: Date.now(), sourceTime: f.sourceTime, sourceName, sig: f.sig, course: {...sourceCourse}, coursePage};
   page.id = await write('add', page); pages.push(page); last = f.sig;
   addCard(page, pages.length - 1); $('count').textContent = `共 ${pages.length} 页`;
 }
@@ -117,9 +173,18 @@ function releaseSource() {
   if (stream) { stream.getTracks().forEach(track => { track.onended = null; track.stop(); }); stream = null; }
   hls?.destroy(); hls = null; video.pause(); video.srcObject = null; video.removeAttribute('src'); video.load();
   if (objectURL) URL.revokeObjectURL(objectURL); objectURL = null; sourceReady = false;
-  crop = {x: 0, y: 0, w: 1, h: 1}; cropEditing = false; last = null; controls(); draw();
+  crop = {x: 0, y: 0, w: 1, h: 1}; cropEditing = false; drag = null; candidate = null; candidateSince = 0; last = null; controls(); draw();
   return window.chrome?.declarativeNetRequest?.updateSessionRules({removeRuleIds: [referrerRule]}).catch(() => {});
 }
+$('release-cache').onclick = async () => {
+  if (task || realtimeTimer || realtimeBusy || !(sourceReady || objectURL || hls || stream)) return;
+  task = new AbortController(); controls();
+  try {
+    await releaseSource();
+    status('已卸载视频并释放本工具持有的视频缓存，截图和命名信息已保留，可继续筛选、下载 PDF。预览或补截请重新加载视频；浏览器自身的网络缓存不受影响。');
+  } catch (e) { status('视频缓存释放失败：' + e.message + '。截图和命名信息未删除，可关闭工具页释放剩余资源。'); }
+  finally { task = null; controls(); }
+};
 async function setCourseReferrer(origins) {
   if (!coursePage || !window.chrome?.declarativeNetRequest) return;
   await chrome.declarativeNetRequest.updateSessionRules({removeRuleIds: [referrerRule], addRules: [{
@@ -241,9 +306,10 @@ $('file').onchange = async () => {
 };
 function exportPDF() {
   if (!pages.length) throw Error('还没有截图');
+  const name = PPTCourse.filename(namingInfo());
+  if (!name) throw Error('请先补填课程名称、有效的上课日期和开始时间，再下载 PDF');
   const blob = makePDF(pages), url = URL.createObjectURL(blob), link = document.createElement('a');
-  const name = (sourceName || '课程PPT').replace(/\.[^.]+$/, '').replace(/[\\/:*?"<>|]/g, '_');
-  link.href = url; link.download = `${name}_PPT_${new Date().toLocaleDateString('sv-SE')}.pdf`;
+  link.href = url; link.download = name;
   document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 60000);
 }
 $('pdf').onclick = () => { try { exportPDF(); status(`已生成 ${pages.length} 页 PDF，下载由浏览器处理。`); } catch (e) { status('导出失败：' + e.message); } };
@@ -294,7 +360,10 @@ $('shot').onclick = async () => {
 $('clear').onclick = async () => {
   if (task || realtimeTimer || realtimeBusy || !ready || !confirm('清空所有已保存截图？请先下载需要保留的 PDF。')) return;
   task = new AbortController(); controls();
-  try { await write('clear'); pages = []; last = null; render(); status('已清空截图。'); }
+  try {
+    await write('clear'); pages = []; last = null; namingManual = false;
+    setNaming(sourceCourse, sourceCoursePage); await persistNaming(); render(); status('已清空截图。');
+  }
   catch (e) { status('清空失败：' + e.message); }
   finally { task = null; controls(); }
 };
@@ -313,23 +382,35 @@ $('share').onclick = async () => {
 $('end').onclick = () => { stopRealtime(); releaseSource(); status('共享已结束，截图已保留。'); };
 async function discover() {
   if (!window.chrome?.tabs) { $('source-status').textContent = '请通过浏览器扩展打开此工具。也可以导入本地视频。'; return; }
+  const revision = ++discoverySerial;
   try {
     const selected = $('course').value || new URLSearchParams(location.search).get('tab');
     const tabs = await chrome.tabs.query({url: 'https://rms-v5.xjtu.edu.cn/*'});
+    if (revision !== discoverySerial) return;
     $('course').replaceChildren();
     for (const tab of tabs) { const option = document.createElement('option'); option.value = String(tab.id); option.textContent = tab.title || tab.url; $('course').append(option); }
     if (tabs.some(t => String(t.id) === selected)) $('course').value = selected;
-    if (!tabs.length) { sources = []; updateSources(); $('source-status').textContent = '未找到课程标签页，请先在此浏览器打开课程网站并登录。'; return; }
-    const id = Number($('course').value); coursePage = tabs.find(t => t.id === id)?.url || '';
-    try { await chrome.tabs.sendMessage(id, {type: 'PPT_DISCOVER'}); }
+    if (!tabs.length) { coursePage = ''; acceptCourse({}, ''); sources = []; updateSources(); $('source-status').textContent = '未找到课程标签页，请先在此浏览器打开课程网站并登录。'; return; }
+    const id = Number($('course').value), nextPage = tabs.find(t => t.id === id)?.url || '';
+    // A previously loaded video belongs to the old course, not the new selector.
+    if (coursePage && coursePage !== nextPage && sourceReady && !task && !realtimeTimer) await releaseSource();
+    if (revision !== discoverySerial) return;
+    coursePage = nextPage;
+    acceptCourse({}, coursePage);
+    let discovered;
+    try { discovered = await chrome.tabs.sendMessage(id, {type: 'PPT_DISCOVER'}, {frameId: 0}); }
     catch {
-      await chrome.scripting.executeScript({target: {tabId: id, allFrames: true}, world: 'MAIN', files: ['media.js', 'page-hook.js']});
-      await chrome.scripting.executeScript({target: {tabId: id, allFrames: true}, files: ['media.js', 'content.js']});
-      await chrome.tabs.sendMessage(id, {type: 'PPT_DISCOVER'});
+      await chrome.scripting.executeScript({target: {tabId: id, allFrames: true}, world: 'MAIN', files: ['media.js', 'course.js', 'page-hook.js']});
+      await chrome.scripting.executeScript({target: {tabId: id, allFrames: true}, files: ['media.js', 'course.js', 'content.js']});
+      discovered = await chrome.tabs.sendMessage(id, {type: 'PPT_DISCOVER'}, {frameId: 0});
     }
+    if (revision !== discoverySerial) return;
     const key = 'media-' + id;
     const entry = (await chrome.storage.session.get(key))[key];
+    if (revision !== discoverySerial) return;
     sources = entry?.page === tabs.find(t => t.id === id)?.url ? entry.items : [];
+    if (entry?.page === coursePage) acceptCourse(entry.course, coursePage);
+    if (discovered?.page === coursePage) acceptCourse(discovered.course, coursePage);
     updateSources();
     $('source-status').textContent = sources.length ? `已发现 ${sources.length} 个视频地址，请自行筛选后加载。地址只保留到浏览器会话结束。` : '尚未发现视频地址，请刷新课程页并播放视频，然后再点刷新视频列表。';
   } catch (e) { $('source-status').textContent = '发现视频失败：' + e.message + '。请刷新课程页，或使用手动地址 / 本地视频。'; }
@@ -351,7 +432,7 @@ function updateSources() {
 $('discover').onclick = discover; $('course').onchange = discover; $('sources').onchange = controls;
 if (window.chrome?.storage?.onChanged) chrome.storage.onChanged.addListener((changes, area) => {
   const value = changes['media-' + $('course').value]?.newValue;
-  if (area === 'session' && value) { sources = value.items; updateSources(); $('source-status').textContent = `已发现 ${sources.length} 个视频地址，请自行筛选后加载。`; }
+  if (area === 'session' && value?.page === coursePage) { sources = value.items; acceptCourse(value.course, value.page); updateSources(); $('source-status').textContent = `已发现 ${sources.length} 个视频地址，请自行筛选后加载。`; }
 });
-controls(); discover();
+controls(); previewName(); discover();
 window.addEventListener('beforeunload', event => { if (task || realtimeTimer) { event.preventDefault(); event.returnValue = ''; } });

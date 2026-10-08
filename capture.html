@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>课程 PPT 截取</title><link rel="stylesheet" href="style.css"></head>
 <body><main>
-  <h1>课程 PPT 截取 <small>2.1.1</small></h1>
+  <h1>课程 PPT 截取 <small>2.3</small></h1>
   <p>选择课程视频，快速跳转提取幻灯片，检查页面后导出 PDF。截图和视频处理均在本机完成。</p>
   <section class="panel">
     <h2>1 · 选择视频</h2>
@@ -10,7 +10,7 @@
     <p class="note">先在课程页登录并播放一次。首次更新插件后请刷新课程页。请自行筛选视频地址，加载后通过预览确认内容。</p>
     <div class="bar"><label class="grow">已发现视频 <select id="sources"><option value="">等待发现视频</option></select></label><button id="load">加载选中视频</button></div>
     <details><summary>手动视频地址 / 本地视频</summary><div class="bar"><input id="url" type="url" placeholder="粘贴 MP4、WebM 或 m3u8 视频地址" aria-label="视频地址"><button id="load-url">加载地址</button></div><label>本地视频 <input id="file" type="file" accept="video/*,.mp4,.m4v,.webm,.mov"></label></details>
-    <p id="source-status" class="note">只读取课程页的视频资源地址。</p>
+    <p id="source-status" class="note">读取课程页的视频地址、课程名称和上课开始时间。</p>
   </section>
   <section class="panel">
     <h2>2 · 快速提取</h2>
@@ -20,10 +20,14 @@
       <label><input id="dedupe" type="checkbox" checked> 去除重复页</label>
     </div>
     <p class="note">采样不按原速播放。检测到翻页后细查该时间段，并检查画面稳定性。短于采样间隔的页面可能漏截；动画、鼠标和小文字变化仍需复核。点击“框选 PPT 区域”后拖动，也可保留整个视频画面。</p>
-    <div class="bar"><button id="run" disabled>开始快速提取</button><button id="stop" disabled>停止并保留结果</button><button id="shot" disabled>保存当前页</button><button id="crop-select" disabled>框选 PPT 区域</button><button id="full" disabled>使用完整画面</button></div>
+    <div class="bar"><button id="run" disabled>开始快速提取</button><button id="stop" disabled>停止并保留结果</button><button id="shot" disabled>保存当前页</button><button id="crop-select" disabled>框选 PPT 区域</button><button id="full" disabled>使用完整画面</button><button id="release-cache" disabled title="卸载当前视频，保留截图和命名信息">释放视频缓存</button></div>
+    <p class="note">筛选或导出后可释放视频缓存，截图和命名信息不会删除。加载 / 截取期间请先停止再释放；继续预览或补截需重新加载视频。此按钮不清除浏览器自身的网络缓存。</p>
     <progress id="progress" value="0" max="1"></progress><p id="status" role="status" aria-live="polite">正在恢复本地截图…</p>
     <div id="preview"><video id="video" muted playsinline preload="auto" controls></video><canvas id="overlay"></canvas></div>
     <details><summary>兼容模式：实时共享画面</summary><p class="note">地址无法读取时使用此模式。需要实时播放并框选 PPT 区域，不能快速扫描。</p><div class="bar"><button id="share">选择共享标签页</button><button id="end" disabled>结束共享</button></div><label>画面稳定时间 <input id="stable" type="number" min="0.5" max="10" step="0.5" value="1.5"> 秒</label></details>
   </section>
-  <section id="results" class="panel"><h2>3 · 筛选页面后下载</h2><p id="review-notice" class="note">请先检查下方缩略图，删除不需要的页面，再点击“下载 PDF”。截取完成后不会自动下载文件。</p><div class="bar"><button id="pdf" disabled>下载 PDF</button><button id="clear" disabled>清空截图</button><span id="count">共 0 页</span></div><p class="note">截图会自动保存。新课程会追加到现有结果；换课前请先导出并清空。</p><section id="pages"></section></section>
-</main><script src="vendor/hls.min.js"></script><script src="media.js"></script><script src="pdf.js"></script><script src="scanner.js"></script><script src="capture.js"></script></body></html>
+  <section id="results" class="panel"><h2>3 · 筛选页面后下载</h2><p id="review-notice" class="note">请先检查下方缩略图，删除不需要的页面，再点击“下载 PDF”。截取完成后不会自动下载文件。</p>
+    <div class="bar"><label class="grow">课程名称 <input id="course-name" type="text" maxlength="120" placeholder="自动读取，可手动修改"></label><label>上课日期 <input id="course-date" type="date"></label><label>开始时间 <input id="course-start" type="time" step="1"></label></div>
+    <p id="filename-preview" class="note" aria-live="polite"></p>
+    <div class="bar"><button id="pdf" disabled>下载 PDF</button><button id="clear" disabled>清空截图</button><span id="count">共 0 页</span></div><p class="note">课程时间不是下载时间。未识别完整时请补填命名信息。截图与命名信息会自动保存；换课前请先导出并清空，避免混合课程。</p><section id="pages"></section></section>
+</main><script src="vendor/hls.min.js"></script><script src="media.js"></script><script src="course.js"></script><script src="pdf.js"></script><script src="scanner.js"></script><script src="capture.js"></script></body></html>

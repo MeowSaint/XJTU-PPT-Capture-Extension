@@ -24,7 +24,7 @@ async function main() {
         Object.defineProperty(window, 'chrome', {configurable: true, value: {runtime: {id: 'bridge-test', sendMessage: async message => { window.__testMessages.push(message); }, onMessage: {addListener: listener => { window.__testDiscover = listener; }}}}});
         window.fetch = async () => new Response(JSON.stringify({data: {video: videoURL}}), {headers: {'content-type': 'application/json'}});
       }, video);
-      for (const script of ['media.js', 'page-hook.js', 'content.js']) await frame.addScriptTag({content: fs.readFileSync(path.join(root, script), 'utf8')});
+      for (const script of ['media.js', 'course.js', 'page-hook.js', 'content.js']) await frame.addScriptTag({content: fs.readFileSync(path.join(root, script), 'utf8')});
       assert.deepEqual(errors, [], id + ': bridge must not throw on initialization');
       await frame.evaluate(async () => { await fetch('/fixture.json'); });
       await frame.waitForFunction(url => window.__testMessages.some(m => m.urls?.includes(url)), video, {timeout: 6000});
