@@ -4,6 +4,7 @@ const status = message => { $('status').textContent = message; };
 let db, pages = [], ready = false, sourceReady = false, stream = null, hls = null, objectURL = null;
 let crop = {x: 0, y: 0, w: 1, h: 1}, drag = null, cropEditing = false, task = null, sourceName = '', sources = [], pendingOrigins = [], pendingURL = '';
 let realtimeTimer = null, realtimeBusy = false, candidate = null, candidateSince = 0, last = null, coursePage = '';
+let draggedPageId = null;
 const referrerRule = 16220;
 let sourceCourse = {}, sourceCoursePage = '', namingPage = '', namingManual = false, namingSave = Promise.resolve(), discoverySerial = 0;
 const dbReady = new Promise((resolve, reject) => {
@@ -19,13 +20,17 @@ const dbReady = new Promise((resolve, reject) => {
     const tx = db.transaction(['pages', 'settings']), read = tx.objectStore('pages').getAll(), naming = tx.objectStore('settings').get('exportNaming');
     tx.onerror = () => reject(tx.error);
     tx.oncomplete = () => {
-      pages = read.result; ready = true;
+      pages = read.result.sort((a, b) => (Number.isFinite(a.order) ? a.order : a.id) - (Number.isFinite(b.order) ? b.order : b.id));
+      const needsOrderMigration = pages.some(page => !Number.isFinite(page.order));
+      if (needsOrderMigration) pages.forEach((page, index) => { page.order = (index + 1) * 1024; });
+      ready = true;
       if (pages.length) {
         const saved = naming.result;
         namingManual = !!saved?.manual;
         setNaming(saved?.course || pages[0].course || {}, saved?.page || pages[0].coursePage || '');
       } else setNaming(sourceCourse, sourceCoursePage);
-      render(); controls(); resolve();
+      render(); controls();
+      if (needsOrderMigration) putPages(pages).then(resolve, reject); else resolve();
     };
   };
 });
@@ -75,6 +80,17 @@ function write(action, value) {
     tx.oncomplete = () => resolve(result); tx.onerror = () => reject(tx.error); tx.onabort = () => reject(tx.error);
   });
 }
+function putPages(values) {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('pages', 'readwrite'), store = tx.objectStore('pages');
+    values.forEach(page => store.put(page));
+    tx.oncomplete = resolve; tx.onerror = () => reject(tx.error); tx.onabort = () => reject(tx.error);
+  });
+}
+function persistOrder() {
+  pages.forEach((page, index) => { page.order = (index + 1) * 1024; });
+  return putPages(pages);
+}
 function timecode(seconds) {
   if (!Number.isFinite(seconds)) return '';
   const s = Math.max(0, Math.floor(seconds));
@@ -100,10 +116,36 @@ function controls() {
 }
 function addCard(page, index) {
   const article = document.createElement('article'), image = document.createElement('img');
-  const label = document.createElement('span'), button = document.createElement('button');
-  image.src = page.data; image.alt = `第 ${index + 1} 页`; image.loading = 'lazy';
+  const handle = document.createElement('span'), label = document.createElement('span'), button = document.createElement('button');
+  article.dataset.pageId = String(page.id); article.draggable = true;
+  image.src = page.data; image.alt = `第 ${index + 1} 页`; image.loading = 'lazy'; image.draggable = false;
+  handle.className = 'drag-handle'; handle.textContent = '☷ 拖动排序';
   label.textContent = `${index + 1} · ${Number.isFinite(page.sourceTime) ? timecode(page.sourceTime) : new Date(page.time).toLocaleTimeString()}`;
-  article.title = page.sourceName || '历史截图'; button.textContent = '删除';
+  article.title = `${page.sourceName || '历史截图'}（拖动可调整 PDF 页序）`; button.textContent = '删除'; button.draggable = false;
+  article.ondragstart = event => {
+    if (task || realtimeTimer || realtimeBusy || event.target.closest('button')) { event.preventDefault(); return; }
+    draggedPageId = page.id; article.classList.add('dragging');
+    event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', String(page.id));
+  };
+  article.ondragover = event => {
+    if (draggedPageId === null || draggedPageId === page.id) return;
+    event.preventDefault(); event.dataTransfer.dropEffect = 'move';
+    const rect = article.getBoundingClientRect(), after = event.clientX >= rect.left + rect.width / 2;
+    article.classList.toggle('drop-before', !after); article.classList.toggle('drop-after', after);
+  };
+  article.ondragleave = () => article.classList.remove('drop-before', 'drop-after');
+  article.ondrop = async event => {
+    event.preventDefault(); article.classList.remove('drop-before', 'drop-after');
+    const from = pages.findIndex(item => item.id === draggedPageId);
+    if (from < 0 || page.id === draggedPageId) return;
+    const rect = article.getBoundingClientRect(), after = event.clientX >= rect.left + rect.width / 2;
+    const previous = pages.slice(), [moved] = pages.splice(from, 1);
+    let to = pages.findIndex(item => item.id === page.id); if (after) to++;
+    pages.splice(to, 0, moved); draggedPageId = null; render();
+    try { await persistOrder(); status(`已调整截图顺序：第 ${to + 1} 页。`); }
+    catch (e) { pages = previous; render(); status('顺序保存失败：' + e.message); }
+  };
+  article.ondragend = () => { draggedPageId = null; document.querySelectorAll('#pages article').forEach(card => card.classList.remove('dragging', 'drop-before', 'drop-after')); };
   button.onclick = async () => {
     if (task || realtimeTimer || realtimeBusy) return;
     try {
@@ -113,7 +155,7 @@ function addCard(page, index) {
     }
     catch (e) { status('删除失败：' + e.message); }
   };
-  article.append(image, label, button); $('pages').append(article);
+  article.append(handle, image, label, button); $('pages').append(article);
 }
 function render() {
   $('pages').replaceChildren(); pages.forEach(addCard); $('count').textContent = `共 ${pages.length} 页`;
@@ -166,8 +208,23 @@ async function save(f) {
   if (pages.length >= 1000) throw Error('已达 1000 页，请先导出 PDF，再清空继续');
   if (!pages.length) await persistNaming();
   const page = {data: f.canvas.toDataURL('image/jpeg', 0.95), w: f.canvas.width, h: f.canvas.height, time: Date.now(), sourceTime: f.sourceTime, sourceName, sig: f.sig, course: {...sourceCourse}, coursePage};
-  page.id = await write('add', page); pages.push(page); last = f.sig;
-  addCard(page, pages.length - 1); $('count').textContent = `共 ${pages.length} 页`;
+  let insertAt = pages.length, lastMatch = -1;
+  if (Number.isFinite(page.sourceTime)) {
+    for (let i = 0; i < pages.length; i++) {
+      const current = pages[i], sameTimeline = current.sourceName === page.sourceName && current.coursePage === page.coursePage && Number.isFinite(current.sourceTime);
+      if (!sameTimeline) continue;
+      lastMatch = i;
+      if (current.sourceTime > page.sourceTime) { insertAt = i; break; }
+    }
+    if (insertAt === pages.length && lastMatch >= 0) insertAt = lastMatch + 1;
+  }
+  const before = pages[insertAt - 1]?.order, after = pages[insertAt]?.order;
+  if (Number.isFinite(before) && Number.isFinite(after)) page.order = (before + after) / 2;
+  else if (Number.isFinite(before)) page.order = before + 1024;
+  else if (Number.isFinite(after)) page.order = after - 1024;
+  else page.order = 1024;
+  page.id = await write('add', page); pages.splice(insertAt, 0, page); last = f.sig;
+  render();
 }
 function releaseSource() {
   if (stream) { stream.getTracks().forEach(track => { track.onended = null; track.stop(); }); stream = null; }

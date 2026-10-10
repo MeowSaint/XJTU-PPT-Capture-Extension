@@ -81,7 +81,7 @@ async function main() {
     const worker = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker');
     const extensionOrigin = worker.url().replace('/background.js', '');
     const courseName = '传感网络与大数据技术', expectedFilename = courseName + '-2026-09-07-15-30-00.pdf';
-    // Simulate a pre-v2.3.0 database: migration preserves existing screenshots.
+    // Simulate a pre-v2.3.1 database: migration preserves existing screenshots.
     await worker.evaluate(data => new Promise((resolve, reject) => {
       const request = indexedDB.open('course-ppt', 1);
       request.onupgradeneeded = () => request.result.createObjectStore('pages', {keyPath: 'id', autoIncrement: true});
@@ -193,6 +193,16 @@ async function main() {
     await page.locator('#mode').selectOption('2'); await page.locator('#run').click();
     await page.waitForFunction(() => document.querySelector('#status').textContent.includes('提取完成'));
     assert.equal(await page.locator('#pages article').count(), 3, 'sparse endpoints can miss a brief page between identical frames');
+    const coarseIds = await page.evaluate(() => pages.map(item => item.id));
+    await page.locator('#mode').selectOption('0.5'); await page.locator('#run').click();
+    await page.waitForFunction(() => document.querySelector('#status').textContent.includes('提取完成'));
+    assert.equal(await page.locator('#pages article').count(), 4, 'fine scan adds the brief page missed by the coarse scan');
+    const merged = await page.evaluate(ids => ({
+      times: pages.map(item => item.sourceTime),
+      insertedAt: pages.findIndex(item => !ids.includes(item.id))
+    }), coarseIds);
+    assert.deepEqual(merged.times, [...merged.times].sort((a, b) => a - b), 'fine-scan pages are merged in video-time order');
+    assert(merged.insertedAt >= 0 && merged.insertedAt < merged.times.length - 1, 'the recovered middle page is inserted, not appended');
     // HLS uses random-access segments, preserving dense extraction.
     page.once('dialog', d => d.accept()); await page.locator('#clear').click();
     await page.waitForFunction(() => !document.querySelector('#load-url').disabled);
@@ -202,8 +212,18 @@ async function main() {
     await page.locator('#mode').selectOption('0.5'); await page.locator('#run').click();
     await page.waitForFunction(() => document.querySelector('#status').textContent.includes('提取完成'), {timeout: 30000});
     assert.equal(await page.locator('#pages article').count(), 4);
+    const originalOrder = await page.evaluate(() => pages.map(item => item.id));
+    const firstCard = page.locator('#pages article').first(), lastCard = page.locator('#pages article').last();
+    const lastBox = await lastCard.boundingBox();
+    await firstCard.dragTo(lastCard, {targetPosition: {x: lastBox.width - 4, y: 12}});
+    await page.waitForFunction(id => pages.at(-1)?.id === id, originalOrder[0]);
+    const draggedOrder = await page.evaluate(() => pages.map(item => item.id));
+    assert.deepEqual(draggedOrder, [...originalOrder.slice(1), originalOrder[0]], 'dragging changes the export order');
+    const orderCheck = await context.newPage(); await orderCheck.goto(extensionOrigin + '/capture.html');
+    await orderCheck.waitForFunction(expected => pages.length === expected.length && pages.every((item, index) => item.id === expected[index]), draggedOrder);
+    await orderCheck.close();
     assert(crossDomainHeaders > 0, 'cross-domain HLS segments must carry course Referer');
-    console.log('Cross-domain HLS scan: 4 unique slides; Referer, persistence, sparse-sampling boundary verified');
+    console.log('Cross-domain HLS scan: 4 unique slides; chronological fine-scan merge, drag order persistence and Referer verified');
     await page.locator('#course-name').fill('手动HLS课程'); await page.locator('#course-start').fill('08:05:00');
     await page.evaluate(() => namingSave);
     await verifyCacheRelease(page, 'HLS / manual naming');
