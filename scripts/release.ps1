@@ -6,7 +6,7 @@ $releaseRoot = (Resolve-Path -LiteralPath $Root).Path
 $history = Join-Path $releaseRoot 'last-release'
 $temporary = Join-Path $releaseRoot 'tmp'
 $latest = Join-Path $releaseRoot 'ppt-capture.zip'
-$files = @('manifest.json', 'background.js', 'media.js', 'course.js', 'content.js', 'page-hook.js', 'capture.html', 'capture.js', 'scanner.js', 'pdf.js', 'style.css', 'README.md', 'THIRD_PARTY_NOTICES.md')
+$files = @('manifest.json', 'background.js', 'media.js', 'course.js', 'batch.js', 'content.js', 'page-hook.js', 'capture.html', 'capture.js', 'scanner.js', 'pdf.js', 'style.css', 'README.md', 'THIRD_PARTY_NOTICES.md')
 # Resolve the Chinese filename without relying on Windows PowerShell's ANSI decoding.
 $instructions = ([char]0x4f7f).ToString() + [char]0x7528 + [char]0x8bf4 + [char]0x660e + '.txt'
 $files += $instructions

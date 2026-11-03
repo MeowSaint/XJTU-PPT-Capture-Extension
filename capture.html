@@ -2,13 +2,14 @@
 <html lang="zh-CN">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>课程 PPT 截取</title><link rel="stylesheet" href="style.css"></head>
 <body><main>
-  <h1>课程 PPT 截取 <small>2.3.1</small></h1>
+  <h1>课程 PPT 截取 <small>2.4.0</small></h1>
   <p>选择课程视频，快速跳转提取幻灯片，检查页面后导出 PDF。截图和视频处理均在本机完成。</p>
   <section class="panel">
     <h2>1 · 选择视频</h2>
     <div class="bar"><label>课程标签页 <select id="course"></select></label><button id="discover">刷新视频列表</button></div>
     <p class="note">先在课程页登录并播放一次。首次更新插件后请刷新课程页。请自行筛选视频地址，加载后通过预览确认内容。</p>
     <div class="bar"><label class="grow">已发现视频 <select id="sources"><option value="">等待发现视频</option></select></label><button id="load">加载选中视频</button></div>
+    <details id="batch-panel"><summary>批量模式：读取本课程全部录像</summary><p class="note">在课程录像列表页使用。自动读取已完成课次，并优先选择标记为 ENCODER、文件名以 2- 开头的 PPT 视频。视频会逐个处理，不会同时下载。若某节只有 0 路视频，会单独提示并让你加载该视频、框选 PPT 区域后再提取。</p><div class="bar"><button id="batch-discover">读取全部课次</button><button id="batch-select" disabled>全选 / 全不选</button><button id="batch-start" disabled>开始批量提取</button><span id="batch-count">未读取</span></div><div id="batch-jobs" class="batch-jobs"></div><p id="batch-status" class="note" aria-live="polite"></p></details>
     <details><summary>手动视频地址 / 本地视频</summary><div class="bar"><input id="url" type="url" placeholder="粘贴 MP4、WebM 或 m3u8 视频地址" aria-label="视频地址"><button id="load-url">加载地址</button></div><label>本地视频 <input id="file" type="file" accept="video/*,.mp4,.m4v,.webm,.mov"></label></details>
     <p id="source-status" class="note">读取课程页的视频地址、课程名称和上课开始时间。</p>
   </section>
@@ -30,4 +31,4 @@
     <div class="bar"><label class="grow">课程名称 <input id="course-name" type="text" maxlength="120" placeholder="自动读取，可手动修改"></label><label>上课日期 <input id="course-date" type="date"></label><label>开始时间 <input id="course-start" type="time" step="1"></label></div>
     <p id="filename-preview" class="note" aria-live="polite"></p>
     <div class="bar"><button id="pdf" disabled>下载 PDF</button><button id="clear" disabled>清空截图</button><span id="count">共 0 页</span></div><p class="note">课程时间不是下载时间。未识别完整时请补填命名信息。截图与命名信息会自动保存；换课前请先导出并清空，避免混合课程。</p><section id="pages"></section></section>
-</main><script src="vendor/hls.min.js"></script><script src="media.js"></script><script src="course.js"></script><script src="pdf.js"></script><script src="scanner.js"></script><script src="capture.js"></script></body></html>
+</main><script src="vendor/hls.min.js"></script><script src="media.js"></script><script src="course.js"></script><script src="batch.js"></script><script src="pdf.js"></script><script src="scanner.js"></script><script src="capture.js"></script></body></html>

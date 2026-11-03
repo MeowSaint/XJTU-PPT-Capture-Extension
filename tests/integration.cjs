@@ -69,7 +69,7 @@ async function main() {
   const origin = `http://127.0.0.1:${server.address().port}`;
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'ppt-capture-test-')), ext = path.join(temp, 'extension');
   fs.mkdirSync(ext);
-  for (const name of ['manifest.json', 'background.js', 'media.js', 'course.js', 'page-hook.js', 'content.js', 'capture.html', 'capture.js', 'scanner.js', 'style.css', 'pdf.js', 'vendor']) fs.cpSync(path.join(root, name), path.join(ext, name), {recursive: true});
+  for (const name of ['manifest.json', 'background.js', 'media.js', 'course.js', 'batch.js', 'page-hook.js', 'content.js', 'capture.html', 'capture.js', 'scanner.js', 'style.css', 'pdf.js', 'vendor']) fs.cpSync(path.join(root, name), path.join(ext, name), {recursive: true});
   const manifest = JSON.parse(fs.readFileSync(path.join(ext, 'manifest.json'), 'utf8'));
   // Grant only fixture server access in this test copy to avoid a headless permission dialog.
   manifest.host_permissions.push('http://127.0.0.1/*', 'http://localhost/*');
@@ -95,9 +95,21 @@ async function main() {
     // Fulfill the course page locally; no request is sent to the school.
     const course = await context.newPage();
     await course.route('https://rms-v5.xjtu.edu.cn/**', route => {
-      if (route.request().url().endsWith('/fixture.json')) return route.fulfill({contentType: 'application/json', body: JSON.stringify({data: {video: origin + '/lecture_2.mp4', courseId: 16220, captureId: 477014, courseName, startTime: '2026-09-07 15:30:00'}})});
-      if (route.request().url().endsWith('/sandbox-player')) return route.fulfill({contentType: 'text/html', body: `<!doctype html><video preload="none" src="${origin}/lecture_1.mp4"></video>`});
-      const changed = route.request().url().includes('/477015');
+      const requestURL = new URL(route.request().url()), pathname = requestURL.pathname;
+      if (pathname.endsWith('/fixture.json')) return route.fulfill({contentType: 'application/json', body: JSON.stringify({data: {video: origin + '/lecture_2.mp4', courseId: 16220, captureId: 477014, courseName, startTime: '2026-09-07 15:30:00'}})});
+      if (pathname.endsWith('/sandbox-player')) return route.fulfill({contentType: 'text/html', body: `<!doctype html><video preload="none" src="${origin}/lecture_1.mp4"></video>`});
+      if (pathname.endsWith('/study-capture-courses/16220/schedules')) return route.fulfill({contentType: 'application/json', body: JSON.stringify({data: [
+        {id: 700001, capture_code: 'batch-a', status: 'FINISHED', start_time: '2026-09-10T02:10:00+00:00', course: {name: courseName}},
+        {id: 700002, capture_code: 'batch-b', status: 'FINISHED', start_time: '2026-09-11T02:10:00+00:00', course: {name: courseName}},
+        {id: 700003, capture_code: 'batch-c', status: 'FINISHED', start_time: '2026-09-12T02:10:00+00:00', course: {name: courseName}},
+        {id: 700004, capture_code: null, status: 'TRANSCODING', start_time: '2026-09-13T02:10:00+00:00', course: {name: courseName}}
+      ]})});
+      const batchCode = pathname.match(/\/study-capture-courses\/16220\/captures\/(batch-[abc])$/)?.[1];
+      if (batchCode) return route.fulfill({contentType: 'application/json', body: JSON.stringify({data: {code: batchCode, lesson_videos: [
+        {label: 'INSTRUCTOR', file_key: `12345/0-${batchCode}.mp4`, download_url: origin + '/lecture_2.mp4'},
+        ...(batchCode === 'batch-c' ? [] : [{label: 'ENCODER', file_key: `12345/2-${batchCode}.mp4`, download_url: origin + '/lecture_2.mp4', size: 1024}])
+      ]}})});
+      const changed = pathname.includes('/477015');
       return route.fulfill({contentType: 'text/html; charset=utf-8', body: `<!doctype html><meta charset="utf-8"><title>资源管理平台</title>${changed ? '<h1 class="course-title">另一门课程</h1><p>2026.09.08 周二 08:00 - 09:40</p>' : ''}<video preload="none" src="${origin}/lecture_1.mp4"></video><video preload="none"></video><iframe sandbox="allow-scripts" src="https://rms-v5.xjtu.edu.cn/sandbox-player"></iframe><script>fetch('/fixture.json').then(r=>r.json());</script>`});
     });
     await course.goto('https://rms-v5.xjtu.edu.cn/my-capture-courses/16220/preview-detail/477014');
@@ -259,8 +271,35 @@ async function main() {
     await page.waitForFunction(() => document.querySelector('#status').textContent.includes('HTTP 404'));
     assert.equal(await page.locator('#pages article').count(), retained);
     assert.equal(await page.locator('#pdf').isEnabled(), true);
+    // Opening only the course list page supplies 2- PPT videos and preserves a manual crop path for 0-only lessons.
+    await course.goto('https://rms-v5.xjtu.edu.cn/my-capture-courses/16220/preview-detail');
+    await page.locator('#discover').click();
+    await page.waitForFunction(() => batchJobs.length === 3 && document.querySelector('#batch-status').textContent.includes('读取完成'));
+    assert.equal(await page.locator('#batch-jobs .batch-job').count(), 3);
+    assert.match(await page.locator('#batch-status').textContent(), /跳过 1 个未完成/);
+    assert.match(await page.locator('#batch-status').textContent(), /1 节只有 0 路视频/);
+    assert.equal(await page.locator('#batch-jobs button').filter({hasText: '加载 0 路并框选'}).count(), 1);
+    page.once('dialog', dialog => dialog.accept()); await page.locator('#clear').click();
+    await page.waitForFunction(() => pages.length === 0);
+    await page.locator('#mode').selectOption('0.5'); await page.locator('#batch-start').click();
+    await page.waitForFunction(() => !batchRunning && batchJobs.filter(job => !job.requiresCrop).every(job => job.state === 'done'), {timeout: 60000});
+    assert.deepEqual(await page.evaluate(() => batchJobs.map(job => pages.filter(item => item.batchJobId === job.id).length)), [4, 4, 0]);
+    assert.equal(await page.locator('#batch-jobs button').filter({hasText: '下载本节 PDF'}).count(), 3);
+    const fallbackRow = page.locator('#batch-jobs .batch-job[data-job-id="batch-c"]');
+    await fallbackRow.getByRole('button', {name: '加载 0 路并框选'}).click();
+    await page.waitForFunction(() => sourceReady && activeBatchJob?.id === 'batch-c' && cropEditing);
+    await page.locator('#run').click();
+    await page.waitForFunction(() => document.querySelector('#status').textContent.includes('请先在 0 路视频画面中'));
+    const fallbackBox = await page.locator('#overlay').boundingBox();
+    await page.mouse.move(fallbackBox.x + fallbackBox.width * 0.2, fallbackBox.y + fallbackBox.height * 0.2); await page.mouse.down();
+    await page.mouse.move(fallbackBox.x + fallbackBox.width * 0.8, fallbackBox.y + fallbackBox.height * 0.8); await page.mouse.up();
+    await page.locator('#run').click();
+    await page.waitForFunction(() => !task && batchJobs.find(job => job.id === 'batch-c')?.state === 'done', {timeout: 60000});
+    assert.equal(await page.evaluate(() => pages.filter(item => item.batchJobId === 'batch-c').length), 4);
+    page.once('dialog', dialog => dialog.accept()); await page.locator('#clear').click();
+    await page.waitForFunction(() => pages.length === 0 && batchJobs.filter(job => !job.requiresCrop).every(job => job.state === 'pending' && job.selected) && batchJobs.find(job => job.requiresCrop)?.state === 'needs-crop');
     assert.equal(errors.length, 0, errors.join('\n'));
-    console.log('JSON-only discovery, local import, stop, cropping, HTTP error preservation: passed; browser errors: 0');
+    console.log('JSON-only discovery, local import, stop, cropping, batch queue and HTTP error preservation: passed; browser errors: 0');
   } finally {
     await context.close(); await new Promise(resolve => server.close(resolve));
     if (path.dirname(temp) !== path.resolve(os.tmpdir()) || !path.basename(temp).startsWith('ppt-capture-test-')) throw Error('Unexpected test directory');
