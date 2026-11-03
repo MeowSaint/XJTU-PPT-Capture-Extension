@@ -5,6 +5,7 @@ let db, pages = [], ready = false, sourceReady = false, stream = null, hls = nul
 let crop = {x: 0, y: 0, w: 1, h: 1}, drag = null, cropEditing = false, task = null, sourceName = '', sources = [], pendingOrigins = [], pendingURL = '';
 let realtimeTimer = null, realtimeBusy = false, candidate = null, candidateSince = 0, last = null, coursePage = '';
 let draggedPageId = null;
+let batchJobs = [], batchPage = '', batchRunning = false, batchStopRequested = false, activeBatchJob = null;
 const referrerRule = 16220;
 let sourceCourse = {}, sourceCoursePage = '', namingPage = '', namingManual = false, namingSave = Promise.resolve(), discoverySerial = 0;
 const dbReady = new Promise((resolve, reject) => {
@@ -97,7 +98,7 @@ function timecode(seconds) {
   return `${Math.floor(s / 3600).toString().padStart(2, '0')}:${Math.floor(s / 60 % 60).toString().padStart(2, '0')}:${(s % 60).toString().padStart(2, '0')}`;
 }
 function controls() {
-  const active = !!task || !!realtimeTimer || realtimeBusy;
+  const active = !!task || !!realtimeTimer || realtimeBusy || batchRunning;
   for (const id of ['load-url', 'file', 'share', 'sources', 'course', 'discover', 'mode', 'diff', 'dedupe', 'full', 'course-name', 'course-date', 'course-start']) $(id).disabled = active;
   $('load').disabled = active || !$('sources').value;
   $('full').disabled = active || !sourceReady;
@@ -105,12 +106,20 @@ function controls() {
   $('crop-select').textContent = cropEditing ? '取消框选' : '框选 PPT 区域';
   $('run').disabled = active || !sourceReady || !ready;
   $('run').textContent = stream ? '开始实时截取' : '开始快速提取';
-  $('stop').disabled = !task && !realtimeTimer;
+  $('stop').disabled = !task && !realtimeTimer && !batchRunning;
   $('shot').disabled = active || !sourceReady || !ready;
   $('clear').disabled = active || !ready || !pages.length;
   $('pdf').disabled = active || !pages.length;
   $('end').disabled = !stream || active;
   $('release-cache').disabled = active || !(sourceReady || objectURL || hls || stream);
+  $('batch-discover').disabled = active;
+  $('batch-select').disabled = active || !batchJobs.length;
+  $('batch-start').disabled = active || !batchJobs.some(job => !job.requiresCrop && job.selected && job.state !== 'done');
+  document.querySelectorAll('#batch-jobs input').forEach(input => {
+    const job = batchJobs.find(item => item.id === input.closest('.batch-job')?.dataset.jobId);
+    input.disabled = active || !job || job.state === 'done' || job.requiresCrop;
+  });
+  document.querySelectorAll('#batch-jobs .batch-manual select, #batch-jobs .batch-manual button').forEach(control => { control.disabled = active; });
   video.controls = sourceReady && !active && !stream;
   overlay.style.pointerEvents = active || !sourceReady || !cropEditing ? 'none' : 'auto';
 }
@@ -151,7 +160,7 @@ function addCard(page, index) {
     try {
       await write('delete', page.id); pages = pages.filter(x => x.id !== page.id); last = null;
       if (!pages.length) { namingManual = false; setNaming(sourceCourse, sourceCoursePage); await persistNaming(); }
-      render(); controls();
+      render(); if (batchJobs.length) renderBatchJobs(); controls();
     }
     catch (e) { status('删除失败：' + e.message); }
   };
@@ -189,11 +198,11 @@ overlay.onpointermove = event => {
 overlay.onpointerup = () => {
   if (!drag) return; drag = null;
   if (crop.w < 0.03 || crop.h < 0.03) crop = {x: 0, y: 0, w: 1, h: 1};
-  last = null; cropEditing = false; controls(); draw(); status('截取范围已设置，可以开始提取。');
+  last = null; cropEditing = false; if (activeBatchJob?.requiresCrop) activeBatchJob.cropConfirmed = true; controls(); draw(); status('截取范围已设置，可以开始提取。');
 };
 overlay.onpointercancel = () => { drag = null; };
 $('crop-select').onclick = () => { cropEditing = !cropEditing; controls(); status(cropEditing ? '请在视频中拖动框选 PPT 区域。' : '已退出框选，可以操作视频播放控件。'); };
-$('full').onclick = () => { crop = {x: 0, y: 0, w: 1, h: 1}; last = null; cropEditing = false; controls(); draw(); status('将截取整个视频画面。'); };
+$('full').onclick = () => { crop = {x: 0, y: 0, w: 1, h: 1}; last = null; cropEditing = false; if (activeBatchJob?.requiresCrop) activeBatchJob.cropConfirmed = true; controls(); draw(); status('将截取整个视频画面。'); };
 function frame(sourceTime = video.currentTime) {
   if (video.readyState < 2 || !video.videoWidth) throw Error('视频画面尚未就绪');
   const canvas = document.createElement('canvas');
@@ -207,11 +216,11 @@ async function save(f) {
   await dbReady;
   if (pages.length >= 1000) throw Error('已达 1000 页，请先导出 PDF，再清空继续');
   if (!pages.length) await persistNaming();
-  const page = {data: f.canvas.toDataURL('image/jpeg', 0.95), w: f.canvas.width, h: f.canvas.height, time: Date.now(), sourceTime: f.sourceTime, sourceName, sig: f.sig, course: {...sourceCourse}, coursePage};
+  const page = {data: f.canvas.toDataURL('image/jpeg', 0.95), w: f.canvas.width, h: f.canvas.height, time: Date.now(), sourceTime: f.sourceTime, sourceName, sig: f.sig, course: {...sourceCourse}, coursePage, batchJobId: activeBatchJob?.id || ''};
   let insertAt = pages.length, lastMatch = -1;
   if (Number.isFinite(page.sourceTime)) {
     for (let i = 0; i < pages.length; i++) {
-      const current = pages[i], sameTimeline = current.sourceName === page.sourceName && current.coursePage === page.coursePage && Number.isFinite(current.sourceTime);
+      const current = pages[i], sameTimeline = current.sourceName === page.sourceName && current.coursePage === page.coursePage && current.batchJobId === page.batchJobId && Number.isFinite(current.sourceTime);
       if (!sameTimeline) continue;
       lastMatch = i;
       if (current.sourceTime > page.sourceTime) { insertAt = i; break; }
@@ -237,7 +246,7 @@ $('release-cache').onclick = async () => {
   if (task || realtimeTimer || realtimeBusy || !(sourceReady || objectURL || hls || stream)) return;
   task = new AbortController(); controls();
   try {
-    await releaseSource();
+    await releaseSource(); activeBatchJob = null; if (batchJobs.length) renderBatchJobs();
     status('已卸载视频并释放本工具持有的视频缓存，截图和命名信息已保留，可继续筛选、下载 PDF。预览或补截请重新加载视频；浏览器自身的网络缓存不受影响。');
   } catch (e) { status('视频缓存释放失败：' + e.message + '。截图和命名信息未删除，可关闭工具页释放剩余资源。'); }
   finally { task = null; controls(); }
@@ -311,20 +320,23 @@ async function inspectPlaylist(url, signal, visited = new Set(), depth = 0, orig
   await setCourseReferrer([...origins]);
   for (const child of children) await inspectPlaylist(child, signal, visited, depth + 1, origins);
 }
-async function loadRemote(raw) {
-  if (task || realtimeTimer) return;
+async function loadRemote(raw, options = {}) {
+  if (task || realtimeTimer) return false;
+  const batchJob = options.batchJob || null;
+  if (!batchJob) activeBatchJob = null;
   const info = PPTCore.mediaInfo(raw);
-  if (!info) { status('请输入完整的 HTTP(S) MP4、WebM 或 m3u8 视频地址'); return; }
-  if (info.kind === 'mpd') { status('当前不支持 DASH (.mpd)，请导入下载的 MP4 视频'); return; }
+  if (!info) { status('请输入完整的 HTTP(S) MP4、WebM 或 m3u8 视频地址'); return false; }
+  if (info.kind === 'mpd') { status('当前不支持 DASH (.mpd)，请导入下载的 MP4 视频'); return false; }
   if (pendingURL !== info.url) { pendingOrigins = []; pendingURL = info.url; }
   // Call synchronously from the click handler so Chrome retains the user gesture.
-  const approval = chrome.permissions.request({origins: [...new Set([originPattern(info.url), ...pendingOrigins])]});
+  const approval = options.permissionGranted ? Promise.resolve(true) : chrome.permissions.request({origins: [...new Set([originPattern(info.url), ...pendingOrigins])]});
+  let loaded = false;
   task = new AbortController(); const controller = task; controls();
   try {
     if (!await approval) throw Error('未获得该视频域名访问权限，可改用本地视频导入');
-    controller.signal.throwIfAborted(); await releaseSource(); task = controller; controls();
+    controller.signal.throwIfAborted(); await releaseSource(); task = controller; activeBatchJob = batchJob; controls();
     await setCourseReferrer([originPattern(info.url), ...pendingOrigins]);
-    sourceName = info.name; $('progress').value = 0;
+    sourceName = options.sourceName || info.name; $('progress').value = 0;
     if (info.kind === 'm3u8') {
       pendingOrigins = []; status('正在检查 HLS 播放列表与分片域名…');
       await inspectPlaylist(info.url, controller.signal);
@@ -342,17 +354,19 @@ async function loadRemote(raw) {
     if (!(video.duration > 0) || !Number.isFinite(video.duration)) throw Error('视频没有可用的完整时长，无法快速扫描');
     sourceReady = true; video.pause(); frame(0); draw(); $('progress').value = 0;
     status(`已加载 ${sourceName} · ${timecode(video.duration)} · ${video.videoWidth} × ${video.videoHeight}。可框选 PPT 或直接开始快速提取。`);
-    pendingOrigins = [];
+    pendingOrigins = []; loaded = true;
   } catch (e) {
     await releaseSource(); const reason = controller.signal.aborted ? controller.signal.reason : e;
+    if (activeBatchJob === batchJob) activeBatchJob = null;
     status(reason.name === 'AbortError' ? '视频加载已停止。可以重新加载。' : '加载失败：' + reason.message);
   } finally { task = null; controls(); }
+  return loaded;
 }
 $('load').onclick = () => { const source = sources.find(x => x.url === $('sources').value); if (source) loadRemote(source.url); else status('未发现可加载的视频，请先在课程页播放再刷新列表'); };
 $('load-url').onclick = () => loadRemote($('url').value.trim());
 $('file').onchange = async () => {
   const file = $('file').files[0]; if (!file || task || realtimeTimer) return;
-  releaseSource(); sourceName = file.name; task = new AbortController(); controls();
+  activeBatchJob = null; releaseSource(); sourceName = file.name; task = new AbortController(); controls();
   try {
     objectURL = URL.createObjectURL(file); video.src = objectURL; await awaitVideo(task.signal);
     if (!(video.duration > 0) || !Number.isFinite(video.duration)) throw Error('本地视频时长无效');
@@ -361,32 +375,163 @@ $('file').onchange = async () => {
   } catch (e) { releaseSource(); status(e.name === 'AbortError' ? '加载已停止。' : '加载失败：' + e.message); }
   finally { task = null; $('file').value = ''; controls(); }
 };
-function exportPDF() {
-  if (!pages.length) throw Error('还没有截图');
-  const name = PPTCourse.filename(namingInfo());
+function downloadPDF(list, course) {
+  if (!list.length) throw Error('还没有截图');
+  const name = PPTCourse.filename(course);
   if (!name) throw Error('请先补填课程名称、有效的上课日期和开始时间，再下载 PDF');
-  const blob = makePDF(pages), url = URL.createObjectURL(blob), link = document.createElement('a');
+  const blob = makePDF(list), url = URL.createObjectURL(blob), link = document.createElement('a');
   link.href = url; link.download = name;
   document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 60000);
 }
+function exportPDF() { downloadPDF(pages, namingInfo()); }
 $('pdf').onclick = () => { try { exportPDF(); status(`已生成 ${pages.length} 页 PDF，下载由浏览器处理。`); } catch (e) { status('导出失败：' + e.message); } };
 async function fastScan() {
-  if (task || !sourceReady || !ready) return;
-  task = new AbortController(); const controller = task, before = pages.length;
+  if (task || !sourceReady || !ready) return null;
+  task = new AbortController(); const controller = task, before = pages.length, manualJob = activeBatchJob?.requiresCrop && !batchRunning ? activeBatchJob : null;
+  let outcome = null;
   cropEditing = false; controls(); video.pause(); $('progress').value = 0;
   status('正在快速扫描，请保持工具页打开…');
   const started = performance.now();
   try {
     const scanner = new PPTScanner(video, frame);
     const result = await scanner.scan({step: Number($('mode').value), threshold: Math.max(0.2, Math.min(10, Number($('diff').value) || 1.2)), dedupe: $('dedupe').checked, signal: controller.signal, save,
-      previous: pages.map(p => p.sig),
+      previous: pages.filter(page => !activeBatchJob || page.batchJobId === activeBatchJob.id).map(p => p.sig),
       progress: p => { $('progress').value = p.ratio; status(`扫描 ${timecode(p.time)} / ${timecode(p.duration)} · ${(p.ratio * 100).toFixed(1)}% · 新增 ${p.saved} 页 · 耗时 ${((performance.now() - started) / 1000).toFixed(1)} 秒`); }
     });
     status(`提取完成：新增 ${result.saved} 页，共 ${pages.length} 页，耗时 ${((performance.now() - started) / 1000).toFixed(1)} 秒。${result.unstable ? `跳过 ${result.unstable} 个不稳定画面；可用细查模式复核。` : ''}\n请先筛选页面，删除不需要的截图，再点击“下载 PDF”。`);
-    $('results').scrollIntoView({behavior: 'smooth', block: 'start'});
+    outcome = result;
+    if (!batchRunning) $('results').scrollIntoView({behavior: 'smooth', block: 'start'});
   } catch (e) { status(e.name === 'AbortError' ? `已停止，保留新增 ${pages.length - before} 页。请先筛选页面，再手动下载 PDF；再次开始将从头扫描并按设置去重。` : '扫描中断，已有截图已保留：' + e.message); }
-  finally { task = null; video.pause(); controls(); }
+  finally {
+    task = null; video.pause();
+    if (manualJob) {
+      const count = batchPageCount(manualJob); manualJob.pages = count;
+      manualJob.state = outcome ? 'done' : count ? 'partial' : 'failed';
+      manualJob.error = outcome ? '' : $('status').textContent;
+      renderBatchJobs();
+      $('batch-status').textContent = outcome ? `已完成 ${manualJob.course.date} ${String(manualJob.course.start).slice(0, 5)} 的 0 路视频提取，共 ${count} 页；仍可调整框选区域后再次细查。` : `本节 0 路视频未完成，已保留 ${count} 页。`;
+    }
+    controls();
+  }
+  return outcome;
 }
+function batchPageCount(job) { return pages.filter(page => page.batchJobId === job.id).length; }
+function syncBatchJob(job) {
+  const count = batchPageCount(job);
+  if (!count && ['done', 'partial'].includes(job.state)) {
+    job.state = job.requiresCrop ? 'needs-crop' : 'pending'; job.selected = !job.requiresCrop; job.error = '';
+  }
+  return count;
+}
+function renderBatchJobs() {
+  const container = $('batch-jobs'); container.replaceChildren();
+  const labels = {'needs-crop': '需要手动框选', manual: '等待框选/提取', pending: '等待', loading: '下载中', scanning: '提取中', done: '已完成', partial: '部分完成', failed: '失败', stopped: '已停止'};
+  for (const job of batchJobs) {
+    const row = document.createElement('div'), choose = document.createElement('input'), title = document.createElement('span'), state = document.createElement('span'), download = document.createElement('button');
+    row.className = 'batch-job'; row.dataset.jobId = job.id;
+    choose.type = 'checkbox'; choose.checked = !!job.selected; choose.disabled = batchRunning || job.state === 'done' || job.requiresCrop;
+    choose.onchange = () => { job.selected = choose.checked; controls(); };
+    const size = job.size ? ` · ${(job.size / 1024 ** 2).toFixed(0)} MB` : '';
+    title.textContent = `${job.course.date || '未知日期'} ${String(job.course.start || '').slice(0, 5)} · ${job.sourceName}${size}${job.requiresCrop ? ' · 仅有 0 路视频' : ''}`;
+    const count = syncBatchJob(job);
+    state.className = `batch-state ${job.state}`; state.textContent = `${labels[job.state] || job.state} · ${count} 页`;
+    if (job.error) state.title = job.error;
+    download.textContent = '下载本节 PDF'; download.disabled = batchRunning || !count;
+    download.onclick = () => { try { downloadPDF(pages.filter(page => page.batchJobId === job.id), job.course); } catch (error) { $('batch-status').textContent = '导出失败：' + error.message; } };
+    row.append(choose, title, state);
+    if (job.requiresCrop) {
+      const manual = document.createElement('span'), select = document.createElement('select'), prepare = document.createElement('button');
+      manual.className = 'batch-manual';
+      for (const item of job.options) { const option = document.createElement('option'); option.value = item.url; option.textContent = item.sourceName; select.append(option); }
+      select.value = job.url; select.disabled = batchRunning || !!task;
+      select.onchange = () => { const item = job.options.find(candidate => candidate.url === select.value); if (item) Object.assign(job, item); renderBatchJobs(); };
+      prepare.textContent = count ? '继续用 0 路处理' : '加载 0 路并框选'; prepare.disabled = batchRunning || !!task;
+      prepare.onclick = () => prepareManualBatchJob(job, chrome.permissions.request({origins: [originPattern(job.url)]}));
+      manual.append(select, prepare); row.append(manual);
+    }
+    row.append(download); container.append(row);
+  }
+  const selected = batchJobs.filter(job => !job.requiresCrop && job.selected && job.state !== 'done').length, manual = batchJobs.filter(job => job.requiresCrop).length;
+  $('batch-count').textContent = batchJobs.length ? `共 ${batchJobs.length} 节，自动 ${selected} 节${manual ? `，需框选 ${manual} 节` : ''}` : '未读取';
+  controls();
+}
+async function discoverBatch(tabId = Number($('course').value), automatic = false) {
+  if (batchRunning || !tabId) return;
+  $('batch-panel').open = true; $('batch-status').textContent = automatic ? '检测到课程列表页，正在读取全部课次…' : '正在读取课程列表和录像信息…';
+  try {
+    const result = await chrome.tabs.sendMessage(tabId, {type: 'PPT_BATCH_DISCOVER'}, {frameId: 0});
+    if (!result?.ok) throw Error(result?.error || '课程页没有返回批量数据');
+    batchPage = result.page;
+    batchJobs = result.jobs.map(job => {
+      const existing = batchJobs.find(old => old.id === job.id), count = pages.filter(page => page.batchJobId === job.id).length;
+      return {...job, selected: job.requiresCrop ? false : existing?.selected ?? !count, state: count ? (existing?.state === 'done' ? 'done' : 'partial') : job.requiresCrop ? 'needs-crop' : 'pending', error: count ? existing?.error || '' : ''};
+    });
+    renderBatchJobs();
+    const skipped = result.total - result.eligible, missing = result.failures?.length || 0, manual = batchJobs.filter(job => job.requiresCrop).length;
+    $('batch-status').textContent = `读取完成：${result.total} 个课次，找到 ${batchJobs.length} 个视频${skipped ? `，跳过 ${skipped} 个未完成/转码中课次` : ''}${missing ? `，${missing} 个录像缺少可用视频` : ''}${manual ? `。其中 ${manual} 节只有 0 路视频，请逐节选择并框选 PPT 区域` : ''}。`;
+  } catch (error) {
+    batchJobs = []; renderBatchJobs(); $('batch-status').textContent = '批量读取失败：' + error.message;
+  }
+}
+async function prepareManualBatchJob(job, permission) {
+  if (batchRunning || task) return;
+  job.state = 'loading'; job.error = ''; renderBatchJobs();
+  $('batch-status').textContent = `正在加载 ${job.course.date} ${String(job.course.start).slice(0, 5)} 的 0 路视频…`;
+  try {
+    if (!await permission) throw Error('未获得该视频域名访问权限');
+    sourceCourse = {...job.course}; sourceCoursePage = coursePage;
+    const loaded = await loadRemote(job.url, {permissionGranted: true, sourceName: job.sourceName, batchJob: job});
+    if (!loaded) throw Error($('status').textContent || '视频加载失败');
+    job.state = 'manual'; job.cropConfirmed = false; cropEditing = true; renderBatchJobs(); controls(); draw();
+    const prompt = '本节没有 2 路 PPT 视频，已加载 0 路视频。请在预览画面中拖动框选 PPT 区域，然后选择采样模式并点击“开始快速提取”。';
+    status(prompt); $('batch-status').textContent = prompt;
+  } catch (error) {
+    job.state = batchPageCount(job) ? 'partial' : 'failed'; job.error = error.message;
+    if (activeBatchJob === job) activeBatchJob = null;
+    renderBatchJobs(); $('batch-status').textContent = '0 路视频未就绪：' + error.message;
+  }
+}
+async function runBatch(permission) {
+  const selected = batchJobs.filter(job => !job.requiresCrop && job.selected && job.state !== 'done');
+  if (!selected.length || batchRunning) return;
+  batchRunning = true; batchStopRequested = false; controls();
+  let startupError = '';
+  try {
+    if (!await permission) throw Error('未获得视频域名访问权限');
+    for (let index = 0; index < selected.length; index++) {
+      if (batchStopRequested) break;
+      const job = selected[index]; activeBatchJob = job; job.state = 'loading'; job.error = ''; renderBatchJobs();
+      $('batch-status').textContent = `第 ${index + 1} / ${selected.length} 节：正在加载 ${job.course.date} ${String(job.course.start).slice(0, 5)}…`;
+      sourceCourse = {...job.course}; sourceCoursePage = coursePage;
+      const loaded = await loadRemote(job.url, {permissionGranted: true, sourceName: job.sourceName, batchJob: job});
+      if (!loaded) { job.state = batchStopRequested ? 'stopped' : 'failed'; job.error = $('status').textContent; renderBatchJobs(); continue; }
+      if (batchStopRequested) { job.state = 'stopped'; await releaseSource(); renderBatchJobs(); break; }
+      job.state = 'scanning'; renderBatchJobs();
+      $('batch-status').textContent = `第 ${index + 1} / ${selected.length} 节：正在提取 PPT…`;
+      const result = await fastScan(); job.pages = batchPageCount(job);
+      if (!result) { job.state = batchStopRequested ? 'stopped' : 'failed'; job.error = $('status').textContent; }
+      else job.state = 'done';
+      await releaseSource(); renderBatchJobs();
+    }
+  } catch (error) { startupError = error.message; }
+  finally {
+    if (sourceReady || objectURL || hls || stream) await releaseSource();
+    activeBatchJob = null; batchRunning = false;
+    const done = batchJobs.filter(job => job.state === 'done').length, failed = batchJobs.filter(job => job.state === 'failed').length;
+    $('batch-status').textContent = startupError ? `批量任务未启动：${startupError}` : batchStopRequested ? `批量任务已停止；已完成 ${done} 节，截图均已保留。` : `批量任务结束：完成 ${done} 节${failed ? `，失败 ${failed} 节` : ''}。可逐节检查并下载 PDF。`;
+    batchStopRequested = false; renderBatchJobs(); controls();
+  }
+}
+$('batch-discover').onclick = () => discoverBatch();
+$('batch-select').onclick = () => {
+  const selectable = batchJobs.filter(job => !job.requiresCrop && job.state !== 'done'), choose = selectable.some(job => !job.selected);
+  selectable.forEach(job => { job.selected = choose; }); renderBatchJobs();
+};
+$('batch-start').onclick = () => {
+  const origins = [...new Set(batchJobs.filter(job => !job.requiresCrop && job.selected && job.state !== 'done').map(job => originPattern(job.url)))];
+  const permission = origins.length ? chrome.permissions.request({origins}) : Promise.resolve(false);
+  runBatch(permission);
+};
 function stopRealtime() { clearInterval(realtimeTimer); realtimeTimer = null; candidate = null; controls(); }
 async function realTick() {
   if (realtimeBusy || !realtimeTimer) return;
@@ -403,10 +548,19 @@ async function realTick() {
   finally { realtimeBusy = false; controls(); }
 }
 $('run').onclick = () => {
+  if (activeBatchJob?.requiresCrop && !activeBatchJob.cropConfirmed) {
+    cropEditing = true; controls(); draw();
+    const prompt = '请先在 0 路视频画面中拖动框选 PPT 区域；若 PPT 占满画面，可明确点击“使用完整画面”。';
+    status(prompt); $('batch-status').textContent = prompt; return;
+  }
   if (stream) { realtimeTimer = setInterval(realTick, 350); controls(); status('正在实时截取，请保持课程视频播放。'); }
   else fastScan();
 };
-$('stop').onclick = () => { task?.abort(); stopRealtime(); if (!task) status('已停止实时截取，截图已保留。'); };
+$('stop').onclick = () => {
+  if (batchRunning) batchStopRequested = true;
+  task?.abort(); stopRealtime();
+  if (!task) status(batchRunning ? '正在停止批量任务，已完成的截图会保留。' : '已停止实时截取，截图已保留。');
+};
 $('shot').onclick = async () => {
   if (task || realtimeTimer) return;
   task = new AbortController(); controls();
@@ -419,13 +573,14 @@ $('clear').onclick = async () => {
   task = new AbortController(); controls();
   try {
     await write('clear'); pages = []; last = null; namingManual = false;
-    setNaming(sourceCourse, sourceCoursePage); await persistNaming(); render(); status('已清空截图。');
+    setNaming(sourceCourse, sourceCoursePage); await persistNaming(); render(); if (batchJobs.length) renderBatchJobs(); status('已清空截图。');
   }
   catch (e) { status('清空失败：' + e.message); }
   finally { task = null; controls(); }
 };
 $('share').onclick = async () => {
   if (task || realtimeTimer) return;
+  activeBatchJob = null;
   task = new AbortController(); controls();
   try {
     const selected = await navigator.mediaDevices.getDisplayMedia({video: {frameRate: 5}, audio: false});
@@ -453,12 +608,13 @@ async function discover() {
     if (coursePage && coursePage !== nextPage && sourceReady && !task && !realtimeTimer) await releaseSource();
     if (revision !== discoverySerial) return;
     coursePage = nextPage;
+    if (batchPage && batchPage !== coursePage) { batchPage = ''; batchJobs = []; renderBatchJobs(); }
     acceptCourse({}, coursePage);
     let discovered;
     try { discovered = await chrome.tabs.sendMessage(id, {type: 'PPT_DISCOVER'}, {frameId: 0}); }
     catch {
       await chrome.scripting.executeScript({target: {tabId: id, allFrames: true}, world: 'MAIN', files: ['media.js', 'course.js', 'page-hook.js']});
-      await chrome.scripting.executeScript({target: {tabId: id, allFrames: true}, files: ['media.js', 'course.js', 'content.js']});
+      await chrome.scripting.executeScript({target: {tabId: id, allFrames: true}, files: ['media.js', 'course.js', 'batch.js', 'content.js']});
       discovered = await chrome.tabs.sendMessage(id, {type: 'PPT_DISCOVER'}, {frameId: 0});
     }
     if (revision !== discoverySerial) return;
@@ -470,6 +626,7 @@ async function discover() {
     if (discovered?.page === coursePage) acceptCourse(discovered.course, coursePage);
     updateSources();
     $('source-status').textContent = sources.length ? `已发现 ${sources.length} 个视频地址，请自行筛选后加载。地址只保留到浏览器会话结束。` : '尚未发现视频地址，请刷新课程页并播放视频，然后再点刷新视频列表。';
+    if (PPTBatch.courseId(coursePage) && batchPage !== coursePage) await discoverBatch(id, true);
   } catch (e) { $('source-status').textContent = '发现视频失败：' + e.message + '。请刷新课程页，或使用手动地址 / 本地视频。'; }
 }
 function updateSources() {

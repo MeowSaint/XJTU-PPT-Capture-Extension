@@ -3,6 +3,8 @@ const assert = require('node:assert/strict');
 const vm = require('node:vm');
 const fs = require('node:fs');
 const core = require('../media.js');
+global.PPTCourse = require('../course.js');
+const batch = require('../batch.js');
 test('parses video URLs equally without filename preference; excludes segments', () => {
   const a = core.mediaInfo('https://cdn.example/course_1.mp4?sign=abc');
   const b = core.mediaInfo('https://cdn.example/course_2.mp4?sign=xyz');
@@ -19,6 +21,28 @@ test('timestamps cover first and last frame without exceeding duration', () => {
   assert.deepEqual(core.sampleTimes(4, 2), [0, 2, 3.95]);
   assert.equal(core.sampleTimes(0.02, 2).at(-1), 0.01);
   assert.throws(() => core.sampleTimes(Infinity, 2)); assert.throws(() => core.sampleTimes(3, 0));
+});
+test('course-list batch discovery selects the ENCODER 2- video and skips unfinished lessons', () => {
+  assert.equal(batch.courseId('https://rms-v5.xjtu.edu.cn/my-capture-courses/16220/preview-detail'), '16220');
+  assert.equal(batch.courseId('https://rms-v5.xjtu.edu.cn/my-capture-courses/16220/preview-detail/477014'), '');
+  const schedule = {id: 593018, capture_code: 'abc', status: 'FINISHED', start_time: '2026-10-20T02:10:00+00:00', course: {name: '传感网络与大数据技术'}};
+  assert.equal(batch.eligible(schedule), true);
+  assert.equal(batch.eligible({...schedule, capture_code: null, status: 'TRANSCODING'}), false);
+  const capture = {data: {lesson_videos: [
+    {label: 'INSTRUCTOR', file_key: '12345/0-class.mp4', download_url: 'https://cdn.example/0-class.mp4'},
+    {label: 'ENCODER', file_key: '12345/2-class.mp4', download_url: 'https://cdn.example/2-class.mp4', size: 123}
+  ]}};
+  assert.equal(batch.selectVideo(capture).label, 'ENCODER');
+  const job = batch.job(schedule, capture);
+  assert.equal(job.url, 'https://cdn.example/2-class.mp4');
+  assert.deepEqual(job.course, {name: '传感网络与大数据技术', date: '2026-10-20', start: '10:10:00'});
+  const fallback = batch.job({...schedule, capture_code: 'only-zero'}, {data: {lesson_videos: [
+    {label: 'INSTRUCTOR', file_key: '12345/0-only-zero.mp4', download_url: 'https://cdn.example/0-only-zero.mp4'}
+  ]}});
+  assert.equal(fallback.requiresCrop, true);
+  assert.equal(fallback.selected, false);
+  assert.equal(fallback.state, 'needs-crop');
+  assert.equal(fallback.options[0].sourceName, '12345/0-only-zero.mp4');
 });
 test('message bridge handles inherited and opaque origins, rejecting other windows', () => {
   const calls = [], frame = {origin: 'https://rms-v5.xjtu.edu.cn', location: {origin: 'null'}, postMessage: (...args) => calls.push(args)};
