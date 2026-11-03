@@ -38,58 +38,90 @@
     </section>
 
     <div class="workbench-grid">
-      <section class="panel" id="panel-source">
-        <div class="panel-head">
-          <h2>选择视频</h2>
-          <span class="panel-meta">课程嗅探与批量队列</span>
-        </div>
-        <div class="subpanel">
-          <div class="source-row">
-            <label for="course">课程标签页</label>
-            <select id="course"></select>
-            <button id="discover" type="button">刷新视频列表</button>
+      <div class="source-column">
+        <section class="panel" id="panel-source">
+          <div class="panel-head">
+            <h2>选择视频</h2>
+            <span class="panel-meta">课程嗅探与批量队列</span>
           </div>
-          <div class="source-row">
-            <label for="sources">已发现视频</label>
-            <select id="sources"><option value="">等待发现视频</option></select>
-            <button id="load" type="button" disabled>加载选中视频</button>
+          <div class="subpanel">
+            <div class="source-row">
+              <label for="course">课程标签页</label>
+              <select id="course"></select>
+              <button id="discover" type="button">刷新视频列表</button>
+            </div>
+            <div class="source-row">
+              <label for="sources">已发现视频</label>
+              <select id="sources"><option value="">等待发现视频</option></select>
+              <button id="load" type="button" disabled>加载选中视频</button>
+            </div>
+            <p id="source-status" class="status-line">请通过浏览器扩展打开此工具，也可以导入本地视频。</p>
           </div>
-          <p id="source-status" class="status-line">请通过浏览器扩展打开此工具，也可以导入本地视频。</p>
-        </div>
-        <div class="subpanel subpanel-stack">
-          <details id="batch-panel" class="drawer">
-            <summary>批量模式：读取本课程全部录像</summary>
-            <div class="drawer-body">
-              <div class="bar">
-                <button id="batch-discover" type="button">读取本课节列表</button>
-                <button id="batch-select" type="button" disabled>全选</button>
-                <button id="batch-start" type="button" disabled>开始批量提取</button>
-                <span id="batch-count">已选 0 / 0 节</span>
+          <div class="subpanel subpanel-stack">
+            <details id="batch-panel" class="drawer">
+              <summary>批量模式：读取本课程全部录像</summary>
+              <div class="drawer-body">
+                <div class="bar">
+                  <button id="batch-discover" type="button">读取本课节列表</button>
+                  <button id="batch-select" type="button" disabled>全选</button>
+                  <button id="batch-start" type="button" disabled>开始批量提取</button>
+                  <span id="batch-count">已选 0 / 0 节</span>
+                </div>
+                <div id="batch-jobs" class="batch-jobs" role="list"></div>
+                <p id="batch-status" class="note" aria-live="polite">请先打开课程页面的课节列表，再点击“读取本课节列表”。</p>
               </div>
-              <div id="batch-jobs" class="batch-jobs" role="list"></div>
-              <p id="batch-status" class="note" aria-live="polite">请先打开课程页面的课节列表，再点击“读取本课节列表”。</p>
-            </div>
-          </details>
-          <details class="drawer">
-            <summary>手动视频地址 / 本地视频</summary>
-            <div class="drawer-body">
-              <div class="bar">
-                <input id="url" type="url" placeholder="粘贴视频直链或 m3u8 地址" aria-label="视频地址">
-                <button id="load-url" type="button">加载地址</button>
+            </details>
+            <details class="drawer">
+              <summary>手动视频地址 / 本地视频</summary>
+              <div class="drawer-body">
+                <div class="bar">
+                  <input id="url" type="url" placeholder="粘贴视频直链或 m3u8 地址" aria-label="视频地址">
+                  <button id="load-url" type="button">加载地址</button>
+                </div>
+                <div class="bar">
+                  <label class="field-inline"><span>本地视频</span><input id="file" type="file" accept="video/*,.mp4,.m4v,.webm,.mov"></label>
+                </div>
               </div>
-              <div class="bar">
-                <label class="field-inline"><span>本地视频</span><input id="file" type="file" accept="video/*,.mp4,.m4v,.webm,.mov"></label>
+            </details>
+            <details class="drawer help-drawer">
+              <summary>使用说明与注意事项</summary>
+              <div class="drawer-body">
+                <p class="note">先在课程页登录并播放一次。首次更新插件后请刷新课程页。请自行筛选视频地址，加载后通过预览确认内容。采样不按原速播放；检测到翻页后细查该时间段并检查画面稳定性。释放视频缓存不会删除已截取页面和命名信息。</p>
+              </div>
+            </details>
+          </div>
+        </section>
+
+        <section class="panel export-panel">
+          <div class="panel-head">
+            <h2>导出设置</h2>
+          </div>
+          <div class="subpanel export-bar">
+            <div class="meta-grid">
+              <label class="field-stack">
+                <span>课程名称</span>
+                <input id="course-name" type="text" maxlength="120" placeholder="自动读取，可手动修改">
+              </label>
+              <label class="field-stack">
+                <span>上课日期</span>
+                <input id="course-date" type="date">
+              </label>
+              <label class="field-stack">
+                <span>开始时间</span>
+                <input id="course-start" type="time" step="1">
+              </label>
+            </div>
+            <div class="export-actions">
+              <p id="filename-preview" class="status-line" aria-live="polite">导出文件名预览：课程 PPT.pdf</p>
+              <div class="action-cluster">
+                <span id="count" class="count-pill">共 0 页</span>
+                <button id="clear" class="btn-danger-outline" type="button" disabled>清空截图</button>
+                <button id="pdf" class="btn-primary" type="button" disabled>下载 PDF</button>
               </div>
             </div>
-          </details>
-          <details class="drawer help-drawer">
-            <summary>使用说明与注意事项</summary>
-            <div class="drawer-body">
-              <p class="note">先在课程页登录并播放一次。首次更新插件后请刷新课程页。请自行筛选视频地址，加载后通过预览确认内容。采样不按原速播放；检测到翻页后细查该时间段并检查画面稳定性。释放视频缓存不会删除已截取页面和命名信息。</p>
-            </div>
-          </details>
-        </div>
-      </section>
+          </div>
+        </section>
+      </div>
 
       <section class="panel" id="panel-capture">
         <div class="panel-head">
@@ -162,30 +194,6 @@
         <span class="panel-meta">幻灯片印样校对与 PDF 导出</span>
       </div>
       <p id="review-notice" class="notice">提取已完成，尚未生成 PDF。请先删除不需要的页面或拖动排序，确认无误后点击“下载 PDF”。</p>
-      <div class="subpanel export-bar">
-        <div class="meta-grid">
-          <label class="field-stack">
-            <span>课程名称</span>
-            <input id="course-name" type="text" maxlength="120" placeholder="自动读取，可手动修改">
-          </label>
-          <label class="field-stack">
-            <span>上课日期</span>
-            <input id="course-date" type="date">
-          </label>
-          <label class="field-stack">
-            <span>开始时间</span>
-            <input id="course-start" type="time" step="1">
-          </label>
-        </div>
-        <div class="export-actions">
-          <p id="filename-preview" class="status-line" aria-live="polite">导出文件名预览：课程 PPT.pdf</p>
-          <div class="action-cluster">
-            <span id="count" class="count-pill">共 0 页</span>
-            <button id="clear" class="btn-danger-outline" type="button" disabled>清空截图</button>
-            <button id="pdf" class="btn-primary" type="button" disabled>下载 PDF</button>
-          </div>
-        </div>
-      </div>
       <div class="subpanel sheet-subpanel">
         <div class="sheet-header">
           <span class="sheet-hint">可拖动卡片调整 PDF 页序，或删除不需要的过渡帧；再次细查新增的页面会按视频时间插回原序列。</span>
