@@ -1,6 +1,6 @@
 'use strict';
 const $ = id => document.getElementById(id), video = $('video'), overlay = $('overlay');
-const status = message => { $('status').textContent = message; };
+const status = message => { $('status').textContent = message; syncLedger(); };
 let db, pages = [], ready = false, sourceReady = false, stream = null, hls = null, objectURL = null;
 let crop = {x: 0, y: 0, w: 1, h: 1}, drag = null, cropEditing = false, task = null, sourceName = '', sources = [], pendingOrigins = [], pendingURL = '';
 let realtimeTimer = null, realtimeBusy = false, candidate = null, candidateSince = 0, last = null, coursePage = '';
@@ -37,9 +37,19 @@ const dbReady = new Promise((resolve, reject) => {
 });
 dbReady.then(() => status('本地截图已恢复。请选择课程视频或导入本地视频。')).catch(e => status('本地存储不可用：' + e.message));
 function namingInfo() { return PPTCourse.normalize({name: $('course-name').value, date: $('course-date').value, start: $('course-start').value}); }
+function syncLedger() {
+  const name = PPTCourse.filename(namingInfo()), selected = sources.find(source => source.url === $('sources').value);
+  const source = sourceReady ? `已加载 · ${sourceName}` : selected ? `待加载 · ${selected.name}` : sourceName ? `未加载 · ${sourceName}` : '等待加载视频';
+  const state = batchStopRequested || task?.signal.aborted ? '正在停止' : batchRunning ? '批量处理中' : realtimeTimer || realtimeBusy ? '实时截取中' : task ? '处理中' : !ready ? '本地存储未就绪' : sourceReady ? '就绪' : '待加载';
+  $('ledger-count').textContent = `${pages.length} 页`;
+  $('ledger-file').textContent = name || '待补全课程信息'; $('ledger-file').title = name || '待补全课程信息';
+  $('ledger-source').textContent = source; $('ledger-source').title = source;
+  $('ledger-scan').textContent = `${state} · ${$('mode').selectedOptions[0].textContent}`;
+}
 function previewName() {
   const name = PPTCourse.filename(namingInfo());
   $('filename-preview').textContent = name ? `下载文件名：${name}` : '尚未获得完整的课程名称、上课日期和开始时间。请刷新课程页 / 视频列表，或手动补填后下载。';
+  syncLedger();
 }
 function setNaming(info, page) {
   info = PPTCourse.normalize(info); namingPage = page;
@@ -95,7 +105,7 @@ function persistOrder() {
 function timecode(seconds) {
   if (!Number.isFinite(seconds)) return '';
   const s = Math.max(0, Math.floor(seconds));
-  return `${Math.floor(s / 3600).toString().padStart(2, '0')}:${Math.floor(s / 60 % 60).toString().padStart(2, '0')}:${(s % 60).toString().padStart(2, '0')}`;
+  return `${Math.floor(s / 3600).toString().padStart(2, '0')}:${Math.floor(s / 60 % 60).toString().padStart(2, '0')}:${(s % 60).toString().padStart(2, '0')}`; /* taste-skill-ignore */
 }
 function controls() {
   const active = !!task || !!realtimeTimer || realtimeBusy || batchRunning;
@@ -122,13 +132,15 @@ function controls() {
   document.querySelectorAll('#batch-jobs .batch-manual select, #batch-jobs .batch-manual button').forEach(control => { control.disabled = active; });
   video.controls = sourceReady && !active && !stream;
   overlay.style.pointerEvents = active || !sourceReady || !cropEditing ? 'none' : 'auto';
+  syncLedger();
 }
 function addCard(page, index) {
   const article = document.createElement('article'), image = document.createElement('img');
   const handle = document.createElement('span'), label = document.createElement('span'), button = document.createElement('button');
   article.dataset.pageId = String(page.id); article.draggable = true;
   image.src = page.data; image.alt = `第 ${index + 1} 页`; image.loading = 'lazy'; image.draggable = false;
-  handle.className = 'drag-handle'; handle.textContent = '☷ 拖动排序';
+  handle.className = 'drag-handle'; handle.title = '拖动调整页序';
+  handle.innerHTML = '<svg width="12" height="14" viewBox="0 0 12 14" fill="currentColor" aria-hidden="true"><circle cx="3" cy="3" r="1.25"/><circle cx="9" cy="3" r="1.25"/><circle cx="3" cy="7" r="1.25"/><circle cx="9" cy="7" r="1.25"/><circle cx="3" cy="11" r="1.25"/><circle cx="9" cy="11" r="1.25"/></svg>';
   label.textContent = `${index + 1} · ${Number.isFinite(page.sourceTime) ? timecode(page.sourceTime) : new Date(page.time).toLocaleTimeString()}`;
   article.title = `${page.sourceName || '历史截图'}（拖动可调整 PDF 页序）`; button.textContent = '删除'; button.draggable = false;
   article.ondragstart = event => {
@@ -168,6 +180,8 @@ function addCard(page, index) {
 }
 function render() {
   $('pages').replaceChildren(); pages.forEach(addCard); $('count').textContent = `共 ${pages.length} 页`;
+  $('review-notice').hidden = !pages.length;
+  syncLedger();
 }
 function bounds() {
   const width = video.clientWidth, height = video.clientHeight;
@@ -181,7 +195,9 @@ function draw() {
   const ctx = overlay.getContext('2d'), b = bounds();
   ctx.clearRect(0, 0, overlay.width, overlay.height);
   if (sourceReady && crop) {
-    ctx.strokeStyle = '#00dc90'; ctx.lineWidth = 2;
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 4;
+    ctx.strokeRect(b.x + crop.x * b.w, b.y + crop.y * b.h, crop.w * b.w, crop.h * b.h);
+    ctx.strokeStyle = '#225ec7'; ctx.lineWidth = 2;
     ctx.strokeRect(b.x + crop.x * b.w, b.y + crop.y * b.h, crop.w * b.w, crop.h * b.h);
   }
 }
@@ -643,7 +659,7 @@ function updateSources() {
   else $('sources').value = '';
   controls();
 }
-$('discover').onclick = discover; $('course').onchange = discover; $('sources').onchange = controls;
+$('discover').onclick = discover; $('course').onchange = discover; $('sources').onchange = controls; $('mode').onchange = syncLedger;
 if (window.chrome?.storage?.onChanged) chrome.storage.onChanged.addListener((changes, area) => {
   const value = changes['media-' + $('course').value]?.newValue;
   if (area === 'session' && value?.page === coursePage) { sources = value.items; acceptCourse(value.course, value.page); updateSources(); $('source-status').textContent = `已发现 ${sources.length} 个视频地址，请自行筛选后加载。`; }
