@@ -1,6 +1,6 @@
 'use strict';
 const $ = id => document.getElementById(id), video = $('video'), overlay = $('overlay');
-const status = message => { $('status').textContent = message; syncLedger(); };
+const status = message => { $('status').textContent = message; syncWorkspace(); };
 let db, pages = [], ready = false, sourceReady = false, stream = null, hls = null, objectURL = null;
 let crop = {x: 0, y: 0, w: 1, h: 1}, drag = null, cropEditing = false, task = null, sourceName = '', sources = [], pendingOrigins = [], pendingURL = '';
 let realtimeTimer = null, realtimeBusy = false, candidate = null, candidateSince = 0, last = null, coursePage = '';
@@ -37,19 +37,25 @@ const dbReady = new Promise((resolve, reject) => {
 });
 dbReady.then(() => status('本地截图已恢复。请选择课程视频或导入本地视频。')).catch(e => status('本地存储不可用：' + e.message));
 function namingInfo() { return PPTCourse.normalize({name: $('course-name').value, date: $('course-date').value, start: $('course-start').value}); }
-function syncLedger() {
-  const name = PPTCourse.filename(namingInfo()), selected = sources.find(source => source.url === $('sources').value);
+function syncWorkspace() {
+  const selected = sources.find(source => source.url === $('sources').value);
   const source = sourceReady ? `已加载 · ${sourceName}` : selected ? `待加载 · ${selected.name}` : sourceName ? `未加载 · ${sourceName}` : '等待加载视频';
-  const state = batchStopRequested || task?.signal.aborted ? '正在停止' : batchRunning ? '批量处理中' : realtimeTimer || realtimeBusy ? '实时截取中' : task ? '处理中' : !ready ? '本地存储未就绪' : sourceReady ? '就绪' : '待加载';
-  $('ledger-count').textContent = `${pages.length} 页`;
-  $('ledger-file').textContent = name || '待补全课程信息'; $('ledger-file').title = name || '待补全课程信息';
   $('ledger-source').textContent = source; $('ledger-source').title = source;
-  $('ledger-scan').textContent = `${state} · ${$('mode').selectedOptions[0].textContent}`;
+  document.body.classList.toggle('has-pages', pages.length > 0);
 }
+const workspaceTools = $('workspace-tools'), compactWorkspace = matchMedia('(max-width: 980px)');
+function syncToolsLayout() {
+  const focused = document.activeElement, summary = workspaceTools.querySelector('summary');
+  workspaceTools.open = !compactWorkspace.matches;
+  if (!workspaceTools.open && workspaceTools.contains(focused)) summary.focus({preventScroll: true});
+  else if (workspaceTools.open && focused === summary) $('course').focus({preventScroll: true});
+}
+compactWorkspace.addEventListener('change', syncToolsLayout);
+syncToolsLayout();
 function previewName() {
   const name = PPTCourse.filename(namingInfo());
   $('filename-preview').textContent = name ? `下载文件名：${name}` : '尚未获得完整的课程名称、上课日期和开始时间。请刷新课程页 / 视频列表，或手动补填后下载。';
-  syncLedger();
+  syncWorkspace();
 }
 function setNaming(info, page) {
   info = PPTCourse.normalize(info); namingPage = page;
@@ -114,6 +120,7 @@ function controls() {
   $('full').disabled = active || !sourceReady;
   $('crop-select').disabled = active || !sourceReady;
   $('crop-select').textContent = cropEditing ? '取消框选' : '框选 PPT 区域';
+  $('crop-select').setAttribute('aria-pressed', String(cropEditing));
   $('run').disabled = active || !sourceReady || !ready;
   $('run').textContent = stream ? '开始实时截取' : '开始快速提取';
   $('stop').disabled = !task && !realtimeTimer && !batchRunning;
@@ -132,7 +139,7 @@ function controls() {
   document.querySelectorAll('#batch-jobs .batch-manual select, #batch-jobs .batch-manual button').forEach(control => { control.disabled = active; });
   video.controls = sourceReady && !active && !stream;
   overlay.style.pointerEvents = active || !sourceReady || !cropEditing ? 'none' : 'auto';
-  syncLedger();
+  syncWorkspace();
 }
 function addCard(page, index) {
   const article = document.createElement('article'), image = document.createElement('img');
@@ -181,7 +188,7 @@ function addCard(page, index) {
 function render() {
   $('pages').replaceChildren(); pages.forEach(addCard); $('count').textContent = `共 ${pages.length} 页`;
   $('review-notice').hidden = !pages.length;
-  syncLedger();
+  syncWorkspace();
 }
 function bounds() {
   const width = video.clientWidth, height = video.clientHeight;
@@ -416,7 +423,7 @@ async function fastScan() {
     });
     status(`提取完成：新增 ${result.saved} 页，共 ${pages.length} 页，耗时 ${((performance.now() - started) / 1000).toFixed(1)} 秒。${result.unstable ? `跳过 ${result.unstable} 个不稳定画面；可用细查模式复核。` : ''}\n请先筛选页面，删除不需要的截图，再点击“下载 PDF”。`);
     outcome = result;
-    if (!batchRunning) $('results').scrollIntoView({behavior: 'smooth', block: 'start'});
+    if (!batchRunning) $('results').scrollIntoView({behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start'});
   } catch (e) { status(e.name === 'AbortError' ? `已停止，保留新增 ${pages.length - before} 页。请先筛选页面，再手动下载 PDF；再次开始将从头扫描并按设置去重。` : '扫描中断，已有截图已保留：' + e.message); }
   finally {
     task = null; video.pause();
@@ -659,7 +666,7 @@ function updateSources() {
   else $('sources').value = '';
   controls();
 }
-$('discover').onclick = discover; $('course').onchange = discover; $('sources').onchange = controls; $('mode').onchange = syncLedger;
+$('discover').onclick = discover; $('course').onchange = discover; $('sources').onchange = controls; $('mode').onchange = syncWorkspace;
 if (window.chrome?.storage?.onChanged) chrome.storage.onChanged.addListener((changes, area) => {
   const value = changes['media-' + $('course').value]?.newValue;
   if (area === 'session' && value?.page === coursePage) { sources = value.items; acceptCourse(value.course, value.page); updateSources(); $('source-status').textContent = `已发现 ${sources.length} 个视频地址，请自行筛选后加载。`; }
