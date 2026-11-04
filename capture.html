@@ -4,90 +4,49 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>课程 PPT 截取</title>
+  <link rel="icon" type="image/png" href="icons/icon-32.png">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <div class="app-shell">
     <header class="app-header">
       <div class="brand-block">
-        <svg class="app-mark" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4M7 9h10M7 12h6"/></svg>
+        <img class="app-mark" src="icons/icon-32.png" width="28" height="28" alt="">
         <h1>课程 PPT 截取</h1>
-        <span class="version">2.5.1</span>
+        <span class="version">2.5.2</span>
       </div>
-      <button id="pdf" type="button" disabled>下载 PDF</button>
+      <div class="export-actions" role="group" aria-label="导出全部保留页面">
+        <button id="export-zip" type="button" disabled>下载图片包</button>
+        <button id="pdf" type="button" disabled>下载 PDF</button>
+      </div>
     </header>
 
     <div class="editor-layout">
-      <details id="workspace-tools" class="workspace-tools" open>
-        <summary>视频与设置</summary>
-        <div class="tools-body">
-          <section id="panel-source" class="tool-section" aria-label="视频来源">
-            <div class="section-heading">
-              <h2>视频来源</h2>
-              <button id="discover" class="button-quiet" type="button">刷新视频列表</button>
-            </div>
-            <label class="field-stack" for="course">
-              <span>课程标签页</span>
-              <select id="course"></select>
-            </label>
-            <label class="field-stack" for="sources">
-              <span>已发现视频</span>
-              <select id="sources"><option value="">等待发现视频</option></select>
-            </label>
-            <button id="load" class="source-load" type="button" disabled>加载选中视频</button>
-            <p id="source-status" class="status-line">请通过浏览器扩展打开此工具，也可以导入本地视频。</p>
-            <label class="field-stack local-file">
-              <span>本地视频</span>
-              <input id="file" type="file" accept="video/*,.mp4,.m4v,.webm,.mov">
-            </label>
-          </section>
-
-          <section class="tool-section" aria-label="提取设置">
-            <label class="field-stack">
-              <span>采样模式</span>
-              <select id="mode">
-                <option value="2" selected>均衡 · 每 2 秒</option>
-                <option value="0.5">细查 · 每 0.5 秒</option>
-                <option value="8">快速 · 每 8 秒</option>
-              </select>
-            </label>
-            <details class="drawer extraction-drawer">
-              <summary>提取设置</summary>
-              <div class="drawer-body">
-                <label class="field-inline">
-                  <span>新页差异</span>
-                  <span class="input-suffix">
-                    <input id="diff" type="number" value="1.2" min="0.2" max="10" step="0.1">
-                    <span>%</span>
-                  </span>
-                </label>
-                <label class="check">
-                  <input id="dedupe" type="checkbox" checked>
-                  <span>去除重复页</span>
-                </label>
-              </div>
-            </details>
-          </section>
-
-          <section class="tool-section" aria-label="导出命名">
-            <h2>导出命名</h2>
-            <div class="meta-grid">
-              <label class="field-stack">
-                <span>课程名称</span>
-                <input id="course-name" type="text" maxlength="120" placeholder="自动读取，可手动修改">
-              </label>
-              <label class="field-stack">
-                <span>上课日期</span>
-                <input id="course-date" type="date">
-              </label>
-              <label class="field-stack">
-                <span>开始时间</span>
-                <input id="course-start" type="time" step="1">
-              </label>
-            </div>
-            <p id="filename-preview" class="status-line" aria-live="polite">请填写课程信息以预览文件名。</p>
-          </section>
-
+      <aside id="workspace-tools" class="workspace-tools" aria-label="视频与设置">
+        <div class="setting-tabs" role="tablist" aria-label="工作台设置">
+          <button id="tab-source" type="button" role="tab" aria-selected="true" aria-controls="panel-source">视频</button>
+          <button id="tab-extraction" type="button" role="tab" aria-selected="false" aria-controls="panel-extraction" tabindex="-1">提取</button>
+          <button id="tab-export" type="button" role="tab" aria-selected="false" aria-controls="panel-export" tabindex="-1">导出</button>
+        </div>
+        <section id="panel-source" class="setting-panel" role="tabpanel" aria-labelledby="tab-source" tabindex="0">
+          <div class="section-heading">
+            <h2>视频来源</h2>
+            <button id="discover" class="button-quiet" type="button">刷新视频列表</button>
+          </div>
+          <label class="field-stack" for="course">
+            <span>课程标签页</span>
+            <select id="course"></select>
+          </label>
+          <label class="field-stack" for="sources">
+            <span>已发现视频</span>
+            <select id="sources"><option value="">等待发现视频</option></select>
+          </label>
+          <button id="load" class="source-load" type="button" disabled>加载选中视频</button>
+          <p id="source-status" class="status-line">请通过浏览器扩展打开此工具，也可以导入本地视频。</p>
+          <label class="field-stack local-file">
+            <span>本地视频</span>
+            <input id="file" type="file" accept="video/*,.mp4,.m4v,.webm,.mov">
+          </label>
           <div class="secondary-tools">
             <details id="batch-panel" class="drawer">
               <summary>批量模式：读取本课程全部录像</summary>
@@ -104,27 +63,23 @@
             </details>
             <details class="drawer">
               <summary>手动视频地址</summary>
-              <div class="drawer-body">
-                <div class="bar">
-                  <input id="url" type="url" placeholder="粘贴视频直链或 m3u8 地址" aria-label="视频地址">
-                  <button id="load-url" type="button">加载地址</button>
-                </div>
+              <div class="drawer-body bar">
+                <input id="url" type="url" placeholder="粘贴视频直链或 m3u8 地址" aria-label="视频地址">
+                <button id="load-url" type="button">加载地址</button>
               </div>
             </details>
             <details id="share-panel" class="drawer">
               <summary>兼容模式：实时共享画面</summary>
-              <div class="drawer-body">
-                <div class="bar">
-                  <button id="share" type="button">选择共享画面</button>
-                  <button id="end" type="button" disabled>停止共享并保留截图</button>
-                  <label class="field-inline">
-                    <span>画面稳定</span>
-                    <span class="input-suffix">
-                      <input id="stable" type="number" min="0.5" max="10" step="0.5" value="1.5">
-                      <span>秒后记为新页</span>
-                    </span>
-                  </label>
-                </div>
+              <div class="drawer-body bar">
+                <button id="share" type="button">选择共享画面</button>
+                <button id="end" type="button" disabled>停止共享并保留截图</button>
+                <label class="field-inline">
+                  <span>画面稳定</span>
+                  <span class="input-suffix">
+                    <input id="stable" type="number" min="0.5" max="10" step="0.5" value="1.5">
+                    <span>秒后记为新页</span>
+                  </span>
+                </label>
               </div>
             </details>
             <details class="drawer help-drawer">
@@ -134,8 +89,61 @@
               </div>
             </details>
           </div>
-        </div>
-      </details>
+        </section>
+
+        <section id="panel-extraction" class="setting-panel" role="tabpanel" aria-labelledby="tab-extraction" tabindex="0" hidden>
+          <h2>提取设置</h2>
+          <label class="field-stack">
+            <span>采样模式</span>
+            <select id="mode">
+              <option value="2" selected>均衡 · 每 2 秒</option>
+              <option value="0.5">细查 · 每 0.5 秒</option>
+              <option value="8">快速 · 每 8 秒</option>
+            </select>
+          </label>
+          <label class="field-inline spaced-field">
+            <span>新页差异</span>
+            <span class="input-suffix">
+              <input id="diff" type="number" value="1.2" min="0.2" max="10" step="0.1">
+              <span>%</span>
+            </span>
+          </label>
+          <label class="check">
+            <input id="dedupe" type="checkbox" checked>
+            <span>去除重复页</span>
+          </label>
+          <p class="note pane-note">细查更容易找到短暂出现的页面。再次提取会保留已有截图，并按视频时间插入新页面。</p>
+          <p class="note pane-note">提取完成后，在右侧校对页序。相似页清理仅处理同一视频中时间递增的相邻页面，保留每组最后一张；可撤销。</p>
+        </section>
+
+        <section id="panel-export" class="setting-panel" role="tabpanel" aria-labelledby="tab-export" tabindex="0" hidden>
+          <h2>导出命名</h2>
+          <div class="meta-grid">
+            <label class="field-stack">
+              <span>课程名称</span>
+              <input id="course-name" type="text" maxlength="120" placeholder="自动读取，可手动修改">
+            </label>
+            <label class="field-stack">
+              <span>上课日期</span>
+              <input id="course-date" type="date">
+            </label>
+            <label class="field-stack">
+              <span>开始时间</span>
+              <input id="course-start" type="time" step="1">
+            </label>
+          </div>
+          <p id="filename-preview" class="status-line" aria-live="polite">请填写课程信息以预览文件名。</p>
+          <label class="field-stack spaced-field">
+            <span>PDF 版式</span>
+            <select id="pdf-layout">
+              <option value="single" selected>原始页面 · 每页一张</option>
+              <option value="handout">笔记讲义 · A4 每页两张</option>
+            </select>
+          </label>
+          <p class="note pane-note">顶栏按钮导出全部保留页面，按当前页序排列。勾选仅用于批量删除。</p>
+          <p class="note pane-note">图片包保留原始 JPEG；讲义在幻灯片旁预留笔记横线。提取、清空或停止都不会自动下载。</p>
+        </section>
+      </aside>
 
       <main class="workspace-sheet">
         <section id="panel-capture" aria-label="视频预览与提取">
@@ -145,7 +153,7 @@
           </div>
           <div class="media-canvas">
             <div id="preview">
-              <video id="video" muted controls playsinline preload="metadata" poster="data:image/svg+xml;utf8,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 800 450%27 width=%27800%27 height=%27450%27%3E%3Crect width=%27800%27 height=%27450%27 fill=%27%23f5f6f8%27/%3E%3C/svg%3E"></video>
+              <video id="video" muted controls playsinline preload="metadata"></video>
               <canvas id="overlay"></canvas>
               <div id="preview-empty">
                 <p class="preview-empty-title">加载视频后预览画面</p>
@@ -177,12 +185,35 @@
             <span id="count">共 0 页</span>
             <button id="clear" class="button-quiet button-danger" type="button" disabled>清空截图</button>
           </div>
-          <p id="review-notice" class="note" hidden>拖动调整页序，删除不需要的页面；确认后点击“下载 PDF”。</p>
-          <section id="pages" aria-live="polite" data-empty-hint="加载视频后，点击“开始快速提取”或“保存当前页”。"></section>
+          <div class="review-tools" role="group" aria-label="页面筛选">
+            <label class="select-all"><input id="select-all" type="checkbox" disabled><span>全选</span></label>
+            <span id="selected-count" aria-live="polite">已选 0 页</span>
+            <button id="clear-selection" class="button-quiet" type="button" disabled>取消选择</button>
+            <button id="delete-selected" class="button-quiet button-danger" type="button" disabled>删除所选</button>
+            <button id="undo" type="button" disabled>撤销删除</button>
+            <button id="clean-similar" class="button-quiet" type="button" disabled>清理相似页</button>
+          </div>
+          <p id="review-notice" class="note" hidden>拖动调整页序，点图放大、点时间回看。导出包含全部保留页面。</p>
+          <section id="pages" tabindex="0" aria-label="幻灯片列表" data-empty-hint="加载视频后，点击“开始快速提取”或“保存当前页”。"></section>
         </section>
       </main>
     </div>
   </div>
+  <dialog id="lightbox" aria-labelledby="lightbox-meta">
+    <div class="lightbox-heading">
+      <h2 id="lightbox-meta"></h2>
+      <button id="lightbox-close" type="button" autofocus>关闭预览</button>
+    </div>
+    <div class="lightbox-canvas"><img id="lightbox-img" alt=""></div>
+    <div class="lightbox-tools" role="group" aria-label="预览操作">
+      <button id="lightbox-prev" type="button">上一页</button>
+      <button id="lightbox-next" type="button">下一页</button>
+      <button id="lightbox-seek" type="button">回看视频</button>
+      <button id="lightbox-delete" class="button-danger" type="button">删除</button>
+      <span class="note">← → 翻页 · Delete 删除 · Esc 关闭</span>
+    </div>
+    <p id="lightbox-status" class="note" role="status" aria-live="polite"></p>
+  </dialog>
   <script src="vendor/hls.min.js"></script>
   <script src="media.js"></script>
   <script src="course.js"></script>
