@@ -16,6 +16,17 @@ test('parses video URLs equally without filename preference; excludes segments',
   assert.equal(core.mediaInfo('https://user:password@cdn.example/file_2.mp4'), null);
   assert.equal(core.mediaInfo('/recording/index.m3u8', 'https://cdn.example').kind, 'm3u8');
   assert.equal(core.mediaInfo('https://cdn.example/download?filename=lecture.mp4').kind, 'mp4');
+  assert.equal(core.mediaInfo('https://cdn.example/oss/object?response-content-disposition=attachment%3B%20filename%3D%222-lecture.mp4%22&sign=1').name, '2-lecture.mp4');
+  assert.equal(core.mediaInfo('https://cdn.example/get?key=captures%2F2-key.mp4').name, '2-key.mp4');
+  assert.equal(core.mediaInfo('https://cdn.example/get?file_key=12345/2-filekey.m4v').kind, 'm4v');
+  assert.equal(core.mediaInfo('https://cdn.example/proxy?download_url=https%3A%2F%2Foss.example%2F2-dl.webm%3Ftoken%3D1').kind, 'webm');
+  assert.equal(core.mediaInfo('https://cdn.example/proxy?video_url=%2Fstream%2F2-vid.mov').kind, 'mov');
+  assert.equal(core.mediaInfo('https://cdn.example/proxy?src=https%3A%2F%2Foss.example%2Fplay.m3u8').kind, 'm3u8');
+  assert.equal(core.mediaInfo('https://cdn.example/files/12345%2F2-segment-path.mp4/download?token=abc').name, '2-segment-path.mp4');
+  assert.deepEqual(core.extractUrls('{"data":{"video":"https://cdn.example/stringified.mp4","nested":"[{\\"src\\":\\"/hls/2-nested.m3u8\\"}]"}}', 'https://rms-v5.xjtu.edu.cn'), [
+    'https://cdn.example/stringified.mp4',
+    'https://rms-v5.xjtu.edu.cn/hls/2-nested.m3u8'
+  ]);
 });
 test('timestamps cover first and last frame without exceeding duration', () => {
   assert.deepEqual(core.sampleTimes(4, 2), [0, 2, 3.95]);
@@ -24,7 +35,11 @@ test('timestamps cover first and last frame without exceeding duration', () => {
 });
 test('course-list batch discovery selects the ENCODER 2- video and skips unfinished lessons', () => {
   assert.equal(batch.courseId('https://rms-v5.xjtu.edu.cn/my-capture-courses/16220/preview-detail'), '16220');
-  assert.equal(batch.courseId('https://rms-v5.xjtu.edu.cn/my-capture-courses/16220/preview-detail/477014'), '');
+  assert.equal(batch.courseId('https://rms-v5.xjtu.edu.cn/my-capture-courses/16220/preview-detail/477014'), '16220');
+  assert.equal(batch.courseId('https://rms-v5.xjtu.edu.cn/study-capture-courses/16220/preview-detail'), '16220');
+  assert.equal(batch.courseId('https://rms-v5.xjtu.edu.cn/study-capture-courses/16220/preview-detail/477014'), '16220');
+  assert.equal(batch.courseId('https://rms-v5.xjtu.edu.cn/player?courseId=16220'), '16220');
+  assert.equal(batch.courseId('https://rms-v5.xjtu.edu.cn/player?course_id=16220'), '16220');
   const schedule = {id: 593018, capture_code: 'abc', status: 'FINISHED', start_time: '2026-10-20T02:10:00+00:00', course: {name: '传感网络与大数据技术'}};
   assert.equal(batch.eligible(schedule), true);
   assert.equal(batch.eligible({...schedule, capture_code: null, status: 'TRANSCODING'}), false);

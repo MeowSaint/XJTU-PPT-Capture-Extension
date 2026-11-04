@@ -1,26 +1,74 @@
 /* Shared, dependency-free URL selection and frame comparison. */
 (function (root) {
   'use strict';
+  const MEDIA_EXT = /\.(mp4|m4v|webm|mov|m3u8|mpd)$/i;
+  const QUERY_KEYS = ['filename', 'file', 'name', 'path', 'url', 'response-content-disposition', 'key', 'file_key', 'download_url', 'video_url', 'src'];
+  function decodePart(value) {
+    let text = String(value || '');
+    for (let i = 0; i < 2; i++) {
+      try {
+        const decoded = decodeURIComponent(text);
+        if (decoded === text) break;
+        text = decoded;
+      } catch { break; }
+    }
+    return text;
+  }
+  function matchSegment(text) {
+    const decoded = decodePart(text);
+    const disposition = decoded.match(/filename\*?=(?:UTF-8'')?["']?([^"';\r\n]+)["']?/i)?.[1];
+    const candidate = (disposition || decoded).split(/[?#"'&;]/)[0];
+    const segments = candidate.split('/').map(s => decodePart(s).trim()).filter(Boolean);
+    for (let i = segments.length - 1; i >= 0; i--) {
+      const seg = segments[i], match = seg.match(MEDIA_EXT);
+      if (match) return {file: seg, kind: match[1].toLowerCase()};
+    }
+    const inline = decoded.match(/([^/?#"'=;,\s]+\.(mp4|m4v|webm|mov|m3u8|mpd))(?:$|[?#"';,\s&])/i);
+    if (inline) return {file: inline[1], kind: inline[2].toLowerCase()};
+    return null;
+  }
   function mediaInfo(raw, base) {
     try {
+      if (typeof raw !== 'string' || !raw.trim()) return null;
       const url = new URL(raw, base);
       if (!/^https?:$/.test(url.protocol) || url.username || url.password) return null;
-      let path = decodeURIComponent(url.pathname);
-      let match = path.match(/\.(mp4|m4v|webm|mov|m3u8|mpd)$/i);
-      if (!match) {
-        for (const key of ['filename', 'file', 'name', 'path', 'url']) {
+      let hit = matchSegment(url.pathname);
+      if (!hit) {
+        for (const key of QUERY_KEYS) {
           const value = url.searchParams.get(key);
-          if (value && /\.(mp4|m4v|webm|mov|m3u8|mpd)(?:$|\?)/i.test(value)) {
-            path = value.split('?')[0]; match = path.match(/\.(mp4|m4v|webm|mov|m3u8|mpd)$/i); break;
+          if (value) { hit = matchSegment(value); if (hit) break; }
+        }
+      }
+      if (!hit) {
+        for (const [key, value] of url.searchParams.entries()) {
+          if (QUERY_KEYS.includes(key.toLowerCase()) || QUERY_KEYS.includes(key.replace(/[A-Z]/g, c => '_' + c.toLowerCase()))) {
+            hit = matchSegment(value); if (hit) break;
           }
         }
       }
-      if (!match) return null; // Ignore numbered .ts segments and thumbnails.
-      const kind = match[1].toLowerCase(), parts = path.split('/').filter(Boolean);
-      const file = parts.at(-1);
+      if (!hit) return null; // Ignore numbered .ts segments and thumbnails.
       url.hash = '';
-      return {url: url.href, name: file, kind};
+      return {url: url.href, name: hit.file, kind: hit.kind};
     } catch { return null; }
+  }
+  function extractUrls(payload, base) {
+    const found = new Set();
+    function visit(value, depth = 0) {
+      if (value == null || depth > 12 || found.size > 300) return;
+      if (typeof value === 'string') {
+        const trimmed = value.trim();
+        if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+          try { visit(JSON.parse(trimmed), depth + 1); return; } catch {}
+        }
+        const info = mediaInfo(trimmed, base);
+        if (info) found.add(info.url);
+        return;
+      }
+      if (Array.isArray(value)) value.slice(0, 2000).forEach(x => visit(x, depth + 1));
+      else if (typeof value === 'object') Object.values(value).slice(0, 2000).forEach(x => visit(x, depth + 1));
+    }
+    visit(payload, 0);
+    return [...found];
   }
   function frameDistance(a, b) {
     if (!a || !b || a.length !== b.length) return {changed: 100, mean: 100};
@@ -62,7 +110,7 @@
   function isLocalMessage(event, target) {
     return event.source === target && event.origin === messageOrigin(target);
   }
-  const api = {mediaInfo, frameDistance, similar, sampleTimes, postLocalMessage, isLocalMessage};
+  const api = {mediaInfo, extractUrls, frameDistance, similar, sampleTimes, postLocalMessage, isLocalMessage};
   root.PPTCore = api;
   if (typeof module !== 'undefined') module.exports = api;
 })(globalThis);

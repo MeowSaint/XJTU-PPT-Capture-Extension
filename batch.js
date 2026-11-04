@@ -2,8 +2,13 @@
 (function (root) {
   'use strict';
   function courseId(page) {
-    try { return new URL(page).pathname.match(/\/my-capture-courses\/([^/]+)\/preview-detail\/?$/)?.[1] || ''; }
-    catch { return ''; }
+    try {
+      const url = new URL(page);
+      return (url.pathname + url.hash).match(/\/(?:my|study)-capture-courses\/([^/?#]+)\/preview-detail(?:\/([^/?#]+))?/)?.[1]
+        || url.searchParams.get('courseId')
+        || url.searchParams.get('course_id')
+        || '';
+    } catch { return ''; }
   }
   function payload(value) { return value?.data?.data ?? value?.data ?? value; }
   function schedules(value) {

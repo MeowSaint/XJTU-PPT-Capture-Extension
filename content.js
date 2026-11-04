@@ -1,8 +1,8 @@
 (() => {
   const core = globalThis.PPTCore;
   if (!core) return;
+  if (typeof window.__pptContentCollector === 'function') { window.__pptContentCollector(); return; }
   if (window.__pptContentCollector) return;
-  window.__pptContentCollector = true;
   const found = new Set();
   let last = '', page = location.href, since = 0;
   let hookCourse = {}, lastCourse = '';
@@ -12,6 +12,66 @@
     const type = response.headers.get('content-type') || '';
     if (!/json/i.test(type)) throw Error('课程接口没有返回 JSON，请确认登录状态');
     return response.json();
+  }
+  function pageRoute(href = location.href) {
+    try {
+      const url = new URL(href);
+      const match = (url.pathname + url.hash).match(/\/(?:my|study)-capture-courses\/([^/?#]+)\/preview-detail(?:\/([^/?#]+))?/);
+      const courseId = match?.[1] || (globalThis.PPTBatch ? PPTBatch.courseId(href) : '') || url.searchParams.get('courseId') || url.searchParams.get('course_id') || '';
+      const captureCode = match?.[2] || url.searchParams.get('captureCode') || url.searchParams.get('capture_code') || url.searchParams.get('captureId') || url.searchParams.get('capture_id') || '';
+      return {courseId, captureCode};
+    } catch { return {courseId: '', captureCode: ''}; }
+  }
+  async function probeCurrentPageApi() {
+    const currentPage = location.href;
+    const {courseId, captureCode} = pageRoute(currentPage);
+    if (!courseId) return;
+    const base = `/api/v1/rms-service/study-capture-courses/${encodeURIComponent(courseId)}`;
+    try {
+      let courseData = null, latest = null, captureData = null;
+      if (captureCode) {
+        captureData = await api(`${base}/captures/${encodeURIComponent(captureCode)}`);
+      } else {
+        courseData = await api(base);
+        const detail = courseData?.data?.data ?? courseData?.data ?? courseData;
+        const list = [
+          ...(globalThis.PPTBatch ? PPTBatch.schedules(courseData) : []),
+          ...(Array.isArray(detail?.schedules) ? detail.schedules : []),
+          ...(Array.isArray(detail?.captures) ? detail.captures : []),
+          ...(Array.isArray(detail?.lessons) ? detail.lessons : [])
+        ].filter(item => item && typeof item === 'object' && (item.capture_code || item.captureCode || item.code));
+        const eligible = globalThis.PPTBatch ? list.filter(PPTBatch.eligible) : [];
+        const pool = (eligible.length ? eligible : list).sort((a, b) => String(a.start_time || a.startTime || '').localeCompare(String(b.start_time || b.startTime || '')));
+        latest = pool.at(-1) || null;
+        const resolvedCode = detail?.capture_code || detail?.captureCode || detail?.latest_capture_code || detail?.latestCaptureCode
+          || detail?.latest_capture?.capture_code || detail?.latest_capture?.captureCode || detail?.latest_capture?.code
+          || detail?.latestCapture?.capture_code || detail?.latestCapture?.captureCode || detail?.latestCapture?.code
+          || latest?.capture_code || latest?.captureCode || latest?.code || '';
+        if (resolvedCode) captureData = await api(`${base}/captures/${encodeURIComponent(resolvedCode)}`).catch(() => null);
+      }
+      if (location.href !== currentPage) return;
+      for (const payload of [courseData, latest, captureData].filter(Boolean)) {
+        if (core.extractUrls) core.extractUrls(payload, currentPage).forEach(url => add(url));
+        if (globalThis.PPTCourse) {
+          const detail = payload?.data?.data ?? payload?.data ?? payload;
+          const fallback = detail && typeof detail === 'object' ? PPTCourse.normalize({
+            name: detail.course?.name || detail.course_name || detail.courseName || '',
+            ...PPTCourse.startParts(detail.start_time || detail.startTime || detail.capture_start_time || '')
+          }) : {};
+          hookCourse = {...hookCourse, ...fallback, ...PPTCourse.normalize(PPTCourse.fromJSON(payload, currentPage))};
+        }
+      }
+      const urls = [...found].slice(-150);
+      if (urls.length && chrome.runtime?.id) {
+        last = JSON.stringify(urls);
+        chrome.runtime.sendMessage({type: 'PPT_MEDIA', urls}).catch(() => {});
+      }
+      const course = metadata();
+      if (Object.keys(course).length && chrome.runtime?.id) {
+        lastCourse = JSON.stringify(course);
+        chrome.runtime.sendMessage({type: 'PPT_COURSE', course, page: currentPage}).catch(() => {});
+      }
+    } catch { /* Ignore non-JSON or unavailable API fallback responses. */ }
   }
   async function batchDiscover() {
     if (window !== window.top || !globalThis.PPTBatch) throw Error('批量读取只能在课程列表主页面运行');
@@ -37,11 +97,11 @@
     jobs.sort((a, b) => String(a.startTime).localeCompare(String(b.startTime)));
     return {courseId, courseName, total: all.length, eligible: available.length, jobs, failures, page: location.href};
   }
-  function metadata() { return window === window.top && globalThis.PPTCourse ? {...hookCourse, ...PPTCourse.fromDocument(document)} : {}; }
+  function metadata() { return globalThis.PPTCourse ? (window === window.top ? {...hookCourse, ...PPTCourse.fromDocument(document)} : {...hookCourse}) : {}; }
   function add(raw) { const info = core.mediaInfo(raw, document.baseURI || location.href); if (info) found.add(info.url); }
   function report() {
     if (!chrome.runtime?.id) return;
-    if (page !== location.href) { found.clear(); last = ''; hookCourse = {}; lastCourse = ''; page = location.href; since = performance.now(); }
+    if (page !== location.href) { found.clear(); last = ''; hookCourse = {}; lastCourse = ''; page = location.href; since = performance.now(); probeCurrentPageApi(); }
     document.querySelectorAll('video,source,a[href]').forEach(el => { add(el.currentSrc); add(el.src || el.href); });
     performance.getEntriesByType('resource').filter(entry => entry.startTime >= since).forEach(entry => add(entry.name));
     const urls = [...found].slice(-150), text = JSON.stringify(urls);
@@ -67,9 +127,24 @@
       batchDiscover().then(result => respond({ok: true, ...result}), error => respond({ok: false, error: error.message}));
       return true;
     }
+    if (message.type === 'PPT_COURSE') {
+      lastCourse = ''; report();
+      respond({course: metadata(), page: location.href});
+      return;
+    }
+    if (message.type === 'PPT_GET_MEDIA') {
+      respond({urls: [...found].slice(-150), course: metadata(), page: location.href});
+      return;
+    }
     if (message.type !== 'PPT_DISCOVER') return;
-    last = ''; report(); respond({urls: [...found].slice(-150), course: metadata(), page: location.href});
+    last = ''; lastCourse = ''; report();
+    probeCurrentPageApi().finally(() => {
+      respond({urls: [...found].slice(-150), course: metadata(), page: location.href});
+    });
+    return true;
   });
+  window.__pptContentCollector = () => { last = ''; lastCourse = ''; report(); probeCurrentPageApi(); };
   setInterval(report, 2000);
   report();
+  probeCurrentPageApi();
 })();
