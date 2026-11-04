@@ -463,6 +463,30 @@ summary:active {
   background: var(--canvas);
 }
 
+#preview-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 8px;
+  padding: 24px;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.5;
+  text-align: center;
+  pointer-events: none;
+}
+
+#preview-empty p {
+  margin: 0;
+}
+
+#preview-empty .preview-empty-title {
+  font-size: clamp(16px, 2vw, 24px);
+  font-weight: 500;
+}
+
 #overlay {
   position: absolute;
   inset: 0;

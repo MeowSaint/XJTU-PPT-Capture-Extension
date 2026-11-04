@@ -41,6 +41,7 @@ function syncWorkspace() {
   const selected = sources.find(source => source.url === $('sources').value);
   const source = sourceReady ? `已加载 · ${sourceName}` : selected ? `待加载 · ${selected.name}` : sourceName ? `未加载 · ${sourceName}` : '等待加载视频';
   $('ledger-source').textContent = source; $('ledger-source').title = source;
+  $('preview-empty').hidden = sourceReady || !!stream;
   document.body.classList.toggle('has-pages', pages.length > 0);
 }
 const workspaceTools = $('workspace-tools'), compactWorkspace = matchMedia('(max-width: 980px)');
