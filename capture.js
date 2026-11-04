@@ -634,19 +634,31 @@ async function discover() {
     coursePage = nextPage;
     if (batchPage && batchPage !== coursePage) { batchPage = ''; batchJobs = []; renderBatchJobs(); }
     acceptCourse({}, coursePage);
-    let discovered;
-    try { discovered = await chrome.tabs.sendMessage(id, {type: 'PPT_DISCOVER'}, {frameId: 0}); }
-    catch {
-      await chrome.scripting.executeScript({target: {tabId: id, allFrames: true}, world: 'MAIN', files: ['media.js', 'course.js', 'page-hook.js']});
-      await chrome.scripting.executeScript({target: {tabId: id, allFrames: true}, files: ['media.js', 'course.js', 'batch.js', 'content.js']});
-      discovered = await chrome.tabs.sendMessage(id, {type: 'PPT_DISCOVER'}, {frameId: 0});
+    await chrome.scripting.executeScript({target: {tabId: id, allFrames: true}, world: 'MAIN', files: ['media.js', 'course.js', 'page-hook.js']}).catch(() => {});
+    await chrome.scripting.executeScript({target: {tabId: id, allFrames: true}, files: ['media.js', 'course.js', 'batch.js', 'content.js']}).catch(() => {});
+    let discovered = await chrome.tabs.sendMessage(id, {type: 'PPT_DISCOVER'}, {frameId: 0}).catch(() => null);
+    const courseReply = await chrome.tabs.sendMessage(id, {type: 'PPT_COURSE'}, {frameId: 0}).catch(() => null);
+    if (revision !== discoverySerial) return;
+    const key = 'media-' + id, tabUrl = tabs.find(t => t.id === id)?.url;
+    let entry = (await chrome.storage.session.get(key))[key];
+    if (revision !== discoverySerial) return;
+    sources = entry?.page === tabUrl ? entry.items : [];
+    if (!sources.length) {
+      await new Promise(resolve => setTimeout(resolve, 350));
+      if (revision !== discoverySerial) return;
+      discovered = await chrome.tabs.sendMessage(id, {type: 'PPT_DISCOVER'}, {frameId: 0}).catch(() => discovered);
+      const mediaReply = await chrome.tabs.sendMessage(id, {type: 'PPT_GET_MEDIA'}, {frameId: 0}).catch(() => null);
+      entry = (await chrome.storage.session.get(key))[key];
+      if (revision !== discoverySerial) return;
+      sources = entry?.page === tabUrl ? entry.items : [];
+      if (!sources.length) {
+        const fallbackUrls = mediaReply?.page === tabUrl && Array.isArray(mediaReply.urls) ? mediaReply.urls : discovered?.page === tabUrl && Array.isArray(discovered.urls) ? discovered.urls : [];
+        sources = fallbackUrls.map(raw => PPTCore.mediaInfo(raw, tabUrl)).filter(Boolean).map(info => ({...info, source: '页面 / 播放器', seen: Date.now()}));
+      }
+      if (mediaReply?.page === coursePage) acceptCourse(mediaReply.course, coursePage);
     }
-    if (revision !== discoverySerial) return;
-    const key = 'media-' + id;
-    const entry = (await chrome.storage.session.get(key))[key];
-    if (revision !== discoverySerial) return;
-    sources = entry?.page === tabs.find(t => t.id === id)?.url ? entry.items : [];
     if (entry?.page === coursePage) acceptCourse(entry.course, coursePage);
+    if (courseReply?.page === coursePage) acceptCourse(courseReply.course, coursePage);
     if (discovered?.page === coursePage) acceptCourse(discovered.course, coursePage);
     updateSources();
     $('source-status').textContent = sources.length ? `已发现 ${sources.length} 个视频地址，请自行筛选后加载。地址只保留到浏览器会话结束。` : '尚未发现视频地址，请刷新课程页并播放视频，然后再点刷新视频列表。';
