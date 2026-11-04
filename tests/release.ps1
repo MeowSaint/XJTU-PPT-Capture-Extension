@@ -8,6 +8,7 @@ foreach ($file in Get-ChildItem -LiteralPath $project -File) {
   if ($file.Extension -in @('.js', '.json', '.html', '.css', '.md', '.txt')) { Copy-Item -LiteralPath $file.FullName -Destination $fixture }
 }
 Copy-Item -LiteralPath (Join-Path $project 'vendor') -Destination $fixture -Recurse
+Copy-Item -LiteralPath (Join-Path $project 'icons') -Destination $fixture -Recurse
 $release = Join-Path $project 'scripts/release.ps1'
 function File-Hash([string]$Path) {
   $algorithm = [System.Security.Cryptography.SHA256]::Create()
@@ -42,6 +43,9 @@ try {
   $reader = New-Object System.IO.StreamReader($zip.GetEntry('manifest.json').Open())
   try { $version = ($reader.ReadToEnd() | ConvertFrom-Json).version } finally { $reader.Dispose() }
   if ($version -ne '2.4.0' -or -not $zip.GetEntry('course.js') -or -not $zip.GetEntry('batch.js')) { throw 'Latest package has wrong contents' }
+  foreach ($size in @(16, 32, 48, 128)) {
+    if (-not $zip.GetEntry("icons/icon-$size.png")) { throw "Latest package is missing icon-$size.png" }
+  }
   if ($zip.Entries.FullName -match '^(tests|\.git|last-release|node_modules)/') { throw 'Development/private data leaked into ZIP' }
 } finally { $zip.Dispose() }
 $beforeFailure = File-Hash $latest

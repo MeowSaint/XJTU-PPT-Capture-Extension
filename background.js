@@ -1,6 +1,28 @@
 importScripts('media.js', 'course.js');
 const courseOrigin = 'https://rms-v5.xjtu.edu.cn';
 let queue = Promise.resolve();
+async function updateBadge(tabId, count) {
+  const update = (method, details) => new Promise(resolve => {
+    try {
+      const pending = chrome.action[method]({tabId, ...details}, () => {
+        void chrome.runtime.lastError;
+        resolve();
+      });
+      pending?.then(resolve, resolve);
+    } catch { resolve(); }
+  });
+  await Promise.all([
+    update('setBadgeBackgroundColor', {color: '#b91c1c'}),
+    update('setBadgeText', {text: count ? String(count) : ''})
+  ]);
+}
+function clearTab(tabId) {
+  queue = queue.catch(() => {}).then(async () => {
+    await chrome.storage.session.remove('media-' + tabId);
+    await updateBadge(tabId, 0);
+  });
+  queue.catch(() => {});
+}
 function remember(tabId, urls, source, metadata, page) {
   queue = queue.catch(() => {}).then(async () => {
     const tab = await chrome.tabs.get(tabId).catch(() => null);
@@ -19,6 +41,8 @@ function remember(tabId, urls, source, metadata, page) {
     }
     entry.items = entry.items.slice(-150);
     await chrome.storage.session.set({[key]: entry});
+    const count = new Set(entry.items.map(item => PPTCore.mediaInfo(item.url, tab.url)?.url).filter(Boolean)).size;
+    await updateBadge(tabId, count);
   });
   return queue;
 }
@@ -42,4 +66,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     .then(() => respond({ok: true}), () => respond({ok: false}));
   return true;
 });
-chrome.tabs.onRemoved.addListener(tabId => chrome.storage.session.remove('media-' + tabId));
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (changeInfo.status === 'loading' || changeInfo.url) clearTab(tabId);
+});
+chrome.tabs.onRemoved.addListener(clearTab);

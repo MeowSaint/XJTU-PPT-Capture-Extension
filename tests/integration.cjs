@@ -69,7 +69,7 @@ async function main() {
   const origin = `http://127.0.0.1:${server.address().port}`;
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'ppt-capture-test-')), ext = path.join(temp, 'extension');
   fs.mkdirSync(ext);
-  for (const name of ['manifest.json', 'background.js', 'media.js', 'course.js', 'batch.js', 'page-hook.js', 'content.js', 'capture.html', 'capture.js', 'scanner.js', 'style.css', 'pdf.js', 'vendor']) fs.cpSync(path.join(root, name), path.join(ext, name), {recursive: true});
+  for (const name of ['manifest.json', 'background.js', 'media.js', 'course.js', 'batch.js', 'page-hook.js', 'content.js', 'capture.html', 'capture.js', 'scanner.js', 'style.css', 'pdf.js', 'vendor', 'icons']) fs.cpSync(path.join(root, name), path.join(ext, name), {recursive: true});
   const manifest = JSON.parse(fs.readFileSync(path.join(ext, 'manifest.json'), 'utf8'));
   // Grant only fixture server access in this test copy to avoid a headless permission dialog.
   manifest.host_permissions.push('http://127.0.0.1/*', 'http://localhost/*');
@@ -116,6 +116,20 @@ async function main() {
     const page = await context.newPage(); await page.goto(extensionOrigin + '/capture.html');
     let downloads = 0; page.on('download', () => { downloads++; });
     await page.waitForFunction(() => document.querySelector('#sources').options.length >= 3);
+    const badge = await worker.evaluate(async url => {
+      const tab = (await chrome.tabs.query({url})).find(tab => tab.url === url);
+      if (!tab) throw Error('Fixture course tab not found');
+      let snapshot;
+      for (let attempt = 0; attempt < 30; attempt++) {
+        const key = 'media-' + tab.id, entry = (await chrome.storage.session.get(key))[key];
+        snapshot = {count: entry?.items?.length || 0, text: await chrome.action.getBadgeText({tabId: tab.id})};
+        if (snapshot.count >= 2 && snapshot.text === String(snapshot.count)) return snapshot;
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      return snapshot;
+    }, course.url());
+    assert(badge.count >= 2, 'fixture course discovered media is stored in the real extension cache');
+    assert.equal(badge.text, String(badge.count), 'real Chrome action badge matches the discovered media cache count');
     await page.waitForFunction(() => document.querySelectorAll('#pages article').length === 1);
     assert.equal(await page.locator('#course-name').inputValue(), '', 'legacy screenshot must not acquire an unrelated course name');
     await page.locator('#pdf').click();
@@ -130,6 +144,7 @@ async function main() {
     assert.equal(await page.locator('#load').isEnabled(), false);
     assert.equal(await page.locator('#release-cache').isEnabled(), false, 'no loaded video to release');
     assert.doesNotMatch(await page.locator('#sources').textContent(), /★|视频\s*2/);
+    await page.locator('#tab-source').click();
     await page.locator('#sources').selectOption(origin + '/lecture_2.mp4');
     assert.equal(await page.locator('#load').isEnabled(), true);
     // Real extension fetch + Blob decoding; fixture CDN has no CORS headers.
@@ -137,6 +152,7 @@ async function main() {
     await page.waitForFunction(() => !document.querySelector('#run').disabled, {timeout: 15000});
     assert.match(await page.locator('#status').textContent(), /已加载/);
     assert(remoteRequests > 0); assert(headerRequests > 0, 'course Referer must reach the fixture CDN');
+    await page.locator('#tab-extraction').click();
     await page.locator('#mode').selectOption('0.5');
     const started = Date.now();
     await page.locator('#run').click();
@@ -158,6 +174,7 @@ async function main() {
     await page.screenshot({path: path.join(output, 'verified-interface.png'), fullPage: true});
     console.log(`Dense scan: 4 unique slides; no automatic download; user filtering exports 3 pages; elapsed ${(Date.now() - started) / 1000}s`);
     // A new load recreates a working video after explicit release.
+    await page.locator('#tab-source').click();
     await page.locator('#load').click();
     await page.waitForFunction(() => !document.querySelector('#run').disabled);
     // Reopening preserves screenshot DB.
@@ -178,6 +195,7 @@ async function main() {
     await page.locator('#discover').click();
     await page.waitForFunction(name => sourceCourse.name === name, courseName);
     // Manual correction is reflected in the actual download and persists across reloads.
+    await page.locator('#tab-export').click();
     await page.locator('#course-name').fill('手动/课程'); await page.locator('#course-start').fill('15:31:00');
     const manualDownload = page.waitForEvent('download'); await page.locator('#pdf').click();
     assert.equal((await manualDownload).suggestedFilename(), '手动_课程-2026-09-07-15-31-00.pdf');
@@ -202,6 +220,7 @@ async function main() {
     await page.waitForFunction(() => document.querySelectorAll('#pages article').length === 0 && !document.querySelector('#run').disabled);
     await page.waitForFunction(() => document.querySelector('#course-name').value === '另一门课程');
     assert.equal(await page.locator('#course-date').inputValue(), '2026-09-08');
+    await page.locator('#tab-extraction').click();
     await page.locator('#mode').selectOption('2'); await page.locator('#run').click();
     await page.waitForFunction(() => document.querySelector('#status').textContent.includes('提取完成'));
     assert.equal(await page.locator('#pages article').count(), 3, 'sparse endpoints can miss a brief page between identical frames');
@@ -219,8 +238,10 @@ async function main() {
     page.once('dialog', d => d.accept()); await page.locator('#clear').click();
     await page.waitForFunction(() => !document.querySelector('#load-url').disabled);
     // The manual address panel is already open after reloading the source above.
+    await page.locator('#tab-source').click();
     await page.locator('#url').fill(origin + '/lecture_2.m3u8'); await page.locator('#load-url').click();
     await page.waitForFunction(() => !document.querySelector('#run').disabled, {timeout: 15000});
+    await page.locator('#tab-extraction').click();
     await page.locator('#mode').selectOption('0.5'); await page.locator('#run').click();
     await page.waitForFunction(() => document.querySelector('#status').textContent.includes('提取完成'), {timeout: 30000});
     assert.equal(await page.locator('#pages article').count(), 4);
@@ -236,6 +257,7 @@ async function main() {
     await orderCheck.close();
     assert(crossDomainHeaders > 0, 'cross-domain HLS segments must carry course Referer');
     console.log('Cross-domain HLS scan: 4 unique slides; chronological fine-scan merge, drag order persistence and Referer verified');
+    await page.locator('#tab-export').click();
     await page.locator('#course-name').fill('手动HLS课程'); await page.locator('#course-start').fill('08:05:00');
     await page.evaluate(() => namingSave);
     await verifyCacheRelease(page, 'HLS / manual naming');
@@ -244,6 +266,7 @@ async function main() {
     assert.equal(releasedPDF.suggestedFilename(), '手动HLS课程-2026-09-08-08-05-00.pdf');
     assert.equal((await PDFDocument.load(fs.readFileSync(await releasedPDF.path()))).getPageCount(), 4, 'PDF export remains usable after HLS release');
     // Local import and prompt cancellation must not erase results; stop keeps committed pages.
+    await page.locator('#tab-source').click();
     await page.locator('#file').setInputFiles(path.join(output, 'lecture_2.mp4'));
     await page.waitForFunction(() => !document.querySelector('#run').disabled);
     page.once('dialog', d => d.accept()); await page.locator('#clear').click();
@@ -281,7 +304,9 @@ async function main() {
     assert.equal(await page.locator('#batch-jobs button').filter({hasText: '加载 0 路并框选'}).count(), 1);
     page.once('dialog', dialog => dialog.accept()); await page.locator('#clear').click();
     await page.waitForFunction(() => pages.length === 0);
-    await page.locator('#mode').selectOption('0.5'); await page.locator('#batch-start').click();
+    await page.locator('#tab-extraction').click();
+    await page.locator('#mode').selectOption('0.5');
+    await page.locator('#tab-source').click(); await page.locator('#batch-start').click();
     await page.waitForFunction(() => !batchRunning && batchJobs.filter(job => !job.requiresCrop).every(job => job.state === 'done'), {timeout: 60000});
     assert.deepEqual(await page.evaluate(() => batchJobs.map(job => pages.filter(item => item.batchJobId === job.id).length)), [4, 4, 0]);
     assert.equal(await page.locator('#batch-jobs button').filter({hasText: '下载本节 PDF'}).count(), 3);

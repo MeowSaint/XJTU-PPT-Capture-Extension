@@ -78,22 +78,105 @@ test('small but substantive text changes beat compression and cursor noise', () 
   for (let i = 0; i < 400; i++) b[i * 4] = b[i * 4 + 1] = b[i * 4 + 2] = 0;
   assert.equal(core.similar(a, b), false);
 });
-test('simultaneous background discoveries survive; session cache is page-specific', async () => {
-  const listeners = {}, storage = {}, tab = {url: 'https://rms-v5.xjtu.edu.cn/course/A'};
+function backgroundHarness() {
+  const listeners = {}, storage = {}, badges = [], tab = {url: 'https://rms-v5.xjtu.edu.cn/course/A'};
+  const state = {badgeFailure: '', beforeSet: async () => {}};
+  const badge = method => (details, callback) => {
+    badges.push({method, ...details});
+    if (state.badgeFailure === 'promise') return Promise.reject(new Error('No tab with id: 42'));
+    queueMicrotask(() => {
+      if (state.badgeFailure === 'callback') chrome.runtime.lastError = {message: 'No tab with id: 42'};
+      callback();
+      delete chrome.runtime.lastError;
+    });
+  };
   const chrome = {
     runtime: {onMessage: {addListener: fn => { listeners.message = fn; }}},
-    tabs: {get: async () => tab, onRemoved: {addListener() {}}},
-    action: {onClicked: {addListener() {}}},
+    tabs: {
+      get: async () => tab,
+      onRemoved: {addListener: fn => { listeners.removed = fn; }},
+      onUpdated: {addListener: fn => { listeners.updated = fn; }}
+    },
+    action: {onClicked: {addListener() {}}, setBadgeText: badge('text'), setBadgeBackgroundColor: badge('color')},
     webRequest: {onBeforeRequest: {addListener: fn => { listeners.request = fn; }}},
-    storage: {session: {get: async k => ({[k]: storage[k]}), set: async value => Object.assign(storage, value), remove: async k => delete storage[k]}}
+    storage: {session: {
+      get: async k => ({[k]: storage[k]}),
+      set: async value => { await state.beforeSet(); Object.assign(storage, value); },
+      remove: async k => { delete storage[k]; }
+    }}
   };
   const context = vm.createContext({chrome, PPTCore: core, importScripts() {}, URL, Date});
   vm.runInContext(fs.readFileSync(require.resolve('../background.js'), 'utf8'), context);
-  const send = url => new Promise(resolve => listeners.message({type: 'PPT_MEDIA', urls: [url]}, {tab: {id: 42}, url: tab.url}, resolve));
+  const send = (...urls) => new Promise(resolve => listeners.message({type: 'PPT_MEDIA', urls}, {tab: {id: 42}, url: tab.url}, resolve));
+  const flush = () => vm.runInContext('queue', context);
+  return {listeners, storage, badges, tab, state, send, flush};
+}
+
+test('simultaneous background discoveries survive; session cache is page-specific', async () => {
+  const {listeners, storage, tab, send} = backgroundHarness();
   await Promise.all([send('https://cdn.example/A_1.mp4'), send('https://cdn.example/A_2.mp4')]);
   assert.equal(storage['media-42'].items.length, 2);
   await new Promise(resolve => listeners.message({type: 'PPT_MEDIA', urls: ['https://cdn.example/iframe.mp4']}, {tab: {id: 42}, url: 'about:srcdoc'}, resolve));
   assert.equal(storage['media-42'].items.length, 3);
   tab.url = 'https://rms-v5.xjtu.edu.cn/course/B'; await send('https://cdn.example/B_2.mp4');
   assert.equal(storage['media-42'].items.length, 1); assert.equal(storage['media-42'].items[0].name, 'B_2.mp4');
+});
+
+test('badge counts only unique valid sources for the current tab and clears zero', async () => {
+  const {storage, badges, tab, send} = backgroundHarness();
+  storage['media-42'] = {page: tab.url, items: [
+    {url: 'https://cdn.example/A.mp4'}, {url: 'https://cdn.example/A.mp4'},
+    {url: 'https://cdn.example/segment.ts'}, {url: 'javascript:alert(1)'}
+  ]};
+  await send('https://cdn.example/A.mp4', 'https://cdn.example/B.mp4', 'https://cdn.example/segment.ts');
+  assert.deepEqual(badges.filter(x => x.method === 'text').at(-1), {method: 'text', tabId: 42, text: '2'});
+  assert.deepEqual(badges.filter(x => x.method === 'color').at(-1), {method: 'color', tabId: 42, color: '#b91c1c'});
+  tab.url = 'https://rms-v5.xjtu.edu.cn/course/B';
+  await send('https://cdn.example/segment.ts');
+  assert.equal(badges.filter(x => x.method === 'text').at(-1).text, '');
+  assert.equal(storage['media-42'].items.length, 0);
+});
+
+test('navigation and reload clear stale badges/cache after pending media writes', async () => {
+  const {storage, badges, tab, state, send, listeners, flush} = backgroundHarness();
+  let release, started;
+  const writing = new Promise(resolve => { started = resolve; });
+  state.beforeSet = () => { started(); return new Promise(resolve => { release = resolve; }); };
+  const pending = send('https://cdn.example/A.mp4');
+  await writing;
+  tab.url = 'https://rms-v5.xjtu.edu.cn/course/B';
+  listeners.updated(42, {url: tab.url, status: 'loading'}, tab);
+  release();
+  await pending;
+  await flush();
+  assert.equal(storage['media-42'], undefined);
+  assert.equal(badges.filter(x => x.method === 'text').at(-1).text, '');
+  state.beforeSet = async () => {};
+  await send('https://cdn.example/B.mp4');
+  listeners.updated(42, {status: 'complete'}, tab);
+  await flush();
+  assert.equal(storage['media-42'].items.length, 1);
+  listeners.updated(42, {status: 'loading'}, tab);
+  await flush();
+  assert.equal(storage['media-42'], undefined);
+  await send('https://cdn.example/B.mp4');
+  tab.url = 'https://example.org/';
+  listeners.updated(42, {url: tab.url}, tab);
+  await flush();
+  assert.equal(storage['media-42'], undefined);
+  assert.equal(badges.filter(x => x.method === 'text').at(-1).text, '');
+});
+
+test('closed-tab badge callback errors and promise rejections do not lose cache writes', async () => {
+  const {storage, badges, state, send, listeners, flush} = backgroundHarness();
+  state.badgeFailure = 'callback';
+  assert.equal((await send('https://cdn.example/A.mp4')).ok, true);
+  assert.equal(badges.length, 2);
+  state.badgeFailure = 'promise';
+  assert.equal((await send('https://cdn.example/B.mp4')).ok, true);
+  assert.equal(badges.length, 4);
+  assert.equal(storage['media-42'].items.length, 2);
+  listeners.removed(42);
+  await flush();
+  assert.equal(storage['media-42'], undefined);
 });
