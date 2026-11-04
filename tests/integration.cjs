@@ -69,7 +69,7 @@ async function main() {
   const origin = `http://127.0.0.1:${server.address().port}`;
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'ppt-capture-test-')), ext = path.join(temp, 'extension');
   fs.mkdirSync(ext);
-  for (const name of ['manifest.json', 'background.js', 'media.js', 'course.js', 'batch.js', 'page-hook.js', 'content.js', 'capture.html', 'capture.js', 'scanner.js', 'style.css', 'pdf.js', 'zip.js', 'vendor', 'icons']) fs.cpSync(path.join(root, name), path.join(ext, name), {recursive: true});
+  for (const name of ['manifest.json', 'background.js', 'media.js', 'course.js', 'batch.js', 'page-hook.js', 'content.js', 'capture.html', 'capture.js', 'scanner.js', 'style.css', 'pdf.js', 'vendor', 'icons']) fs.cpSync(path.join(root, name), path.join(ext, name), {recursive: true});
   const manifest = JSON.parse(fs.readFileSync(path.join(ext, 'manifest.json'), 'utf8'));
   // Grant only fixture server access in this test copy to avoid a headless permission dialog.
   manifest.host_permissions.push('http://127.0.0.1/*', 'http://localhost/*');

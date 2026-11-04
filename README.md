@@ -120,7 +120,7 @@ Windows 可使用已安装的 Edge。环境变量 `PPT_TEST_BROWSER` 可指定�
 | `course.js` | 课程名称 / 开始时间提取、日期校验及 PDF 文件名 |
 | `scanner.js` | 跳转解码、稳定性检查和去重 |
 | `capture.html` / `capture.js` / `style.css` | 截取、预览、筛选及本地存储 |
-| `pdf.js` / `zip.js` | JPEG 截图的单页 / A4 讲义 PDF 和原始图片 ZIP 生成 |
+| `pdf.js` | JPEG 截图的单页 / A4 讲义 PDF 和原始图片 ZIP 生成 |
 | `vendor/` | 随扩展分发的 HLS 库及其许可 |
 | `tests/` | 核心、消息通信、桌面校对与导出、完整流程测试 |
 | `scripts/release.ps1` | 最新版打包及历史版本归档 |
