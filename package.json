@@ -4,7 +4,7 @@
   "private": true,
   "description": "Browser extension for extracting slide images from XJTU course videos and exporting reviewed pages to PDF.",
   "scripts": {
-    "test": "node --test tests/core.test.cjs tests/course.test.cjs",
+    "test": "node --test tests/core.test.cjs tests/course.test.cjs tests/export.test.cjs",
     "release": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release.ps1",
     "test:release": "powershell -NoProfile -ExecutionPolicy Bypass -File tests/release.ps1",
     "test:bridge": "node tests/bridge.cjs",

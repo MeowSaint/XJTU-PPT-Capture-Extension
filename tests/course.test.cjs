@@ -40,8 +40,13 @@ test('background stores only normalized top-frame metadata and isolates navigati
   let listener; const storage = {}, tab = {url: page};
   const chrome = {
     runtime: {onMessage: {addListener: fn => { listener = fn; }}},
-    tabs: {get: async () => tab, onRemoved: {addListener() {}}},
-    action: {onClicked: {addListener() {}}}, webRequest: {onBeforeRequest: {addListener() {}}},
+    tabs: {get: async () => tab, onRemoved: {addListener() {}}, onUpdated: {addListener() {}}},
+    action: {
+      onClicked: {addListener() {}},
+      setBadgeText: (_details, callback) => queueMicrotask(callback),
+      setBadgeBackgroundColor: (_details, callback) => queueMicrotask(callback)
+    },
+    webRequest: {onBeforeRequest: {addListener() {}}},
     storage: {session: {get: async k => ({[k]: storage[k]}), set: async v => Object.assign(storage, v), remove() {}}}
   };
   vm.runInNewContext(fs.readFileSync(require.resolve('../background.js'), 'utf8'), {chrome, PPTCore: core, PPTCourse: course, importScripts() {}, URL, Date});

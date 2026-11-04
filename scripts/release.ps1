@@ -11,6 +11,7 @@ $files = @('manifest.json', 'background.js', 'media.js', 'course.js', 'batch.js'
 $instructions = ([char]0x4f7f).ToString() + [char]0x7528 + [char]0x8bf4 + [char]0x660e + '.txt'
 $files += $instructions
 $files += @('vendor/hls.min.js', 'vendor/hls.LICENSE')
+$files += @('icons/icon-16.png', 'icons/icon-32.png', 'icons/icon-48.png', 'icons/icon-128.png')
 foreach ($relative in $files) {
   if (-not (Test-Path -LiteralPath (Join-Path $releaseRoot $relative) -PathType Leaf)) { throw "Missing release file: $relative" }
 }
