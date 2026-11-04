@@ -211,19 +211,25 @@ function zipEntries(bytes) {
       assert.match(await page.locator('#status').textContent(), /重新加载/); await count(4);
     });
 
-    await test('conservative adjacent cleanup is one reversible deletion batch', async () => {
+    await test('conservative adjacent cleanup requires persisted identity and is one reversible deletion batch', async () => {
+      await seed([]); await load(fixture); await atTime(0.25); await page.locator('#shot').click(); await count(1);
+      const sourceKey = (await stored()).pages[0].sourceKey; assert.match(sourceKey, /^file:/);
       const specs = [
         {id: 1, sourceTime: 0}, {id: 2, sourceTime: 1}, {id: 3, sourceTime: 2},
         {id: 4, sourceTime: 3, sourceName: 'other.mp4'}, {id: 5, sourceTime: 4}, {id: 6, sourceTime: 4}, {id: 7, sourceTime: 3},
         {id: 8, sourceTime: 5, coursePage: 'other'}, {id: 9, sourceTime: 6, coursePage: 'other', batchJobId: 'other'},
         {id: 10, sourceTime: 7, signature: false}, {id: 11, sourceTime: 8, signature: 'short'},
         {id: 12, sourceTime: 9, image: 1}, {id: 13, sourceTime: 10, sourceKey: 'file:key1'}, {id: 14, sourceTime: 11, sourceKey: 'file:key2'}
-      ];
-      await seed(specs); const original = await stored();
-      await page.locator('#clean-similar').click(); await count(12);
-      assert.deepEqual(await ids(), Array.from({length: 12}, (_, i) => i + 3));
-      await page.locator('#undo').click(); await count(14); assert.deepEqual(await stored(), original);
-      await page.locator('#clean-similar').click(); await count(12);
+      ].map(spec => ({sourceKey, ...spec}));
+      specs.push({id: 15, sourceTime: 12}, {id: 16, sourceTime: 13});
+      await seed(specs); const original = await stored(), legacy = original.pages.slice(-2);
+      assert(legacy.every(record => !Object.hasOwn(record, 'sourceKey') && record.sig.length === 192 * 108 * 4));
+      assert.deepEqual(legacy[0].sig, legacy[1].sig); assert(legacy[0].sourceTime < legacy[1].sourceTime);
+      await page.locator('#clean-similar').click(); await count(14);
+      assert.deepEqual(await ids(), Array.from({length: 14}, (_, i) => i + 3));
+      assert.deepEqual((await stored()).pages.slice(-2), legacy, 'keyless legacy pair is retained unchanged');
+      await page.locator('#undo').click(); await count(16); assert.deepEqual(await stored(), original);
+      await page.locator('#clean-similar').click(); await count(14);
     });
 
     await test('ZIP and A4 handout download every retained page regardless of selection; invalid naming surfaces export pane', async () => {
