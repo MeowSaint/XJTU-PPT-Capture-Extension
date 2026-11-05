@@ -10,12 +10,12 @@
 
 ## 推荐浏览器
 
-使用电脑端 Chrome、Edge 或 Brave。它们都基于 Chromium，可以加载本扩展。点击图标或名称前往官方下载页。
+支持 **Windows、macOS 和 Linux** 上的桌面版 Chrome、Edge、Brave。这些浏览器都基于 Chromium，可以加载本扩展；点击下方图标或名称前往官方下载页。
 
 | [<img src="icons/browsers/chrome.svg" width="48" height="48" alt="Google Chrome">](https://www.google.com/chrome/) | [<img src="icons/browsers/edge.svg" width="48" height="48" alt="Microsoft Edge">](https://explore.microsoft.com/edge/download) | [<img src="icons/browsers/brave.svg" width="48" height="48" alt="Brave">](https://brave.com/download/) |
 | :---: | :---: | :---: |
 | [Google Chrome](https://www.google.com/chrome/) | [Microsoft Edge](https://explore.microsoft.com/edge/download) | [Brave](https://brave.com/download/) |
-| 首选，适合平时就用 Chrome 的同学 | Windows 上通常已经装好 | 习惯用 Brave 也可以继续用 |
+| 首选，适合平时就用 Chrome 的同学 | Windows 常见，也支持 macOS 和 Linux | 习惯用 Brave 也可以继续用 |
 
 Chrome 需要 114 或更新版本；Edge 和 Brave 使用当前稳定版。工具界面按桌面窗口设计，适合 1280×800、1440×900 和 1920×1080。
 
@@ -29,6 +29,8 @@ Chrome 需要 114 或更新版本；Edge 和 Brave 使用当前稳定版。工�
 - 自动填写课程名称和上课时间，用它们给文件命名；截图和手动修改会保存在本地。
 
 ## 安装与更新
+
+Windows、macOS 和 Linux 使用同一份扩展文件，安装步骤相同。
 
 1. [下载最新版 ZIP](https://github.com/MeowSaint/XJTU-PPT-Capture-Extension/releases/latest/download/ppt-capture.zip)，解压到准备长期保留的文件夹。
 2. 打开浏览器的扩展管理页：Chrome 用 `chrome://extensions`，Edge 用 `edge://extensions`，Brave 用 `brave://extensions`。
@@ -181,7 +183,7 @@ npm run test:bridge
 npm run test:integration
 ```
 
-Windows 默认可用已安装的 Edge。`PPT_TEST_BROWSER` 指定测试浏览器路径（完整集成测试需要支持加载解压扩展），`PPT_TEST_NODE_MODULES` 指定已有依赖目录。测试使用临时浏览器配置和本地合成视频，输出放在 `.test-output/`。测试覆盖内容见 [测试说明](https://github.com/MeowSaint/XJTU-PPT-Capture-Extension/blob/main/tests/README.md)。
+这些测试可在 Windows、macOS 和 Linux 上运行。Windows 默认可用已安装的 Edge；macOS 和 Linux 使用上面安装的 Chromium。`PPT_TEST_BROWSER` 可指定其他测试浏览器路径（完整集成测试需要支持加载解压扩展），`PPT_TEST_NODE_MODULES` 可指定已有依赖目录。测试使用临时浏览器配置和本地合成视频，输出放在 `.test-output/`。测试覆盖内容见 [测试说明](https://github.com/MeowSaint/XJTU-PPT-Capture-Extension/blob/main/tests/README.md)。
 
 ## 代码结构
 
@@ -200,11 +202,25 @@ Windows 默认可用已安装的 Edge。`PPT_TEST_BROWSER` 指定测试浏览器
 | `tests/` | 核心、消息通信、校对、导出和完整提取测试 |
 | `scripts/release.ps1` | 打包最新版并归档旧包 |
 
-### 打包（Windows）
+### 打包与归档
 
-运行 `npm run release`，根目录会生成 `ppt-capture.zip`，旧 ZIP 移到 `last-release/`。固定名称的旧包会按其版本改名；同名历史包加时间戳和序号保存。
+打包脚本使用 PowerShell。Windows 可直接运行：
 
-安装包按文件清单收录运行文件、README、图标和许可。测试输出、录像、PDF、依赖和 Git 数据不参与打包。ZIP 是本地产物，不加入 Git。`npm run test:release` 用临时目录检查打包、归档、重名和构建失败时的处理。
+```sh
+npm run release
+npm run test:release
+```
+
+macOS 和 Linux 安装 [PowerShell 7](https://learn.microsoft.com/powershell/scripting/install/installing-powershell) 后运行以下命令；Windows 安装 PowerShell 7 后也可以这样运行：
+
+```sh
+pwsh -NoProfile -File scripts/release.ps1
+pwsh -NoProfile -File tests/release.ps1
+```
+
+打包后，根目录会生成 `ppt-capture.zip`，旧 ZIP 移到 `last-release/`。固定名称的旧包会按其版本改名；同名历史包加时间戳和序号保存。生成的扩展包可在 Windows、macOS 和 Linux 上安装。
+
+安装包按文件清单收录运行文件、README、图标和许可。测试输出、录像、PDF、依赖和 Git 数据不参与打包。ZIP 是本地产物，不加入 Git。打包测试用临时目录检查文件收录、归档、重名和构建失败时的处理。
 
 ## 版本变化
 
