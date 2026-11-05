@@ -4,9 +4,22 @@
 
 # XJTU PPT Capture Extension
 
-把西安交通大学课程录播里的幻灯片截下来，整理后导出 PDF 或图片包。
+**不发 PPT？那我就自己爬！**
+
+把西安交通大学思源学堂课程录播里的幻灯片截下来，整理后导出 PDF 或图片包。
 
 当前版本：**2.5.2** · [下载扩展](https://github.com/MeowSaint/XJTU-PPT-Capture-Extension/releases/latest/download/ppt-capture.zip) · [版本记录](https://github.com/MeowSaint/XJTU-PPT-Capture-Extension/releases)
+
+> [!WARNING]
+> **为学习而做，也请尊重老师的劳动。**
+>
+> 本项目希望帮助同学整理课堂内容、更好地学习和复习。课程视频、课件及相关内容的著作权等权益，归授课教师及其他相应权利人所有。
+>
+> 请使用**本人账号登录思源学堂**后再使用本扩展，只处理自己有权访问的课程。
+>
+> **禁止将本扩展提取所得的课件、截图、PDF 或其他课程资料用于商业用途。**
+>
+> 使用本扩展，即表示你已阅读并同意以上使用约定。祝大家学习进步，复习顺利！
 
 ## 推荐浏览器
 
