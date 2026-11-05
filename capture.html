@@ -8,12 +8,14 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <div class="app-shell">
+  <div class="app-shell" inert>
     <header class="app-header">
       <div class="brand-block">
         <img class="app-mark" src="icons/icon-32.png" width="28" height="28" alt="">
         <h1>课程 PPT 截取</h1>
-        <span class="version">2.5.2</span>
+        <span class="version">2.6.0</span>
+        <button id="check-updates" class="button-quiet" type="button">检查更新</button>
+        <button id="terms-open" class="button-quiet" type="button">使用约定</button>
       </div>
       <div class="export-actions" role="group" aria-label="导出全部保留页面">
         <button id="export-zip" type="button" disabled>下载图片包</button>
@@ -41,6 +43,11 @@
             <span>已发现视频</span>
             <select id="sources"><option value="">等待发现视频</option></select>
           </label>
+          <div class="preflight-tools">
+            <label class="check"><input id="source-show-all" type="checkbox"><span>显示无效地址</span></label>
+            <button id="preflight-authorize" class="button-quiet" type="button" disabled>重新检测</button>
+          </div>
+          <p id="preflight-status" class="note" role="status" aria-live="polite">同意使用约定后检测视频地址。</p>
           <button id="load" class="source-load" type="button" disabled>加载选中视频</button>
           <p id="source-status" class="status-line">请通过浏览器扩展打开此工具，也可以导入本地视频。</p>
           <label class="field-stack local-file">
@@ -214,12 +221,40 @@
     </div>
     <p id="lightbox-status" class="note" role="status" aria-live="polite"></p>
   </dialog>
+  <dialog id="terms-dialog" class="workspace-dialog" aria-labelledby="terms-title" aria-describedby="terms-status">
+    <h2 id="terms-title">课程资料使用约定</h2>
+    <div class="dialog-copy">
+      <p>为学习而做，也请尊重老师的劳动。</p>
+      <p>请使用本人账号登录思源学堂，只处理自己有权访问的课程。课程视频、课件及相关资料的权益归授课教师及其他相应权利人所有。</p>
+      <p>我同意不将本扩展提取所得的课件、截图、PDF 或其他课程资料用于商业用途。</p>
+      <p>项目代码按 <a href="https://github.com/MeowSaint/XJTU-PPT-Capture-Extension/blob/main/LICENSE" target="_blank" rel="noopener noreferrer">MIT 许可证</a>授权。祝大家学习进步，复习顺利！</p>
+    </div>
+    <label class="check"><input id="terms-agree" type="checkbox"><span>我已阅读并同意以上约定</span></label>
+    <p id="terms-status" class="note" role="status" aria-live="polite">确认仅保存在本机。已有截图和命名信息会保留。</p>
+    <div class="dialog-actions">
+      <button id="terms-decline" type="button">暂不同意</button>
+      <button id="terms-accept" type="button" disabled>同意并继续</button>
+    </div>
+  </dialog>
+  <dialog id="update-dialog" class="workspace-dialog" aria-labelledby="update-title" aria-describedby="update-status">
+    <h2 id="update-title">扩展更新</h2>
+    <p>当前版本 <span id="update-current">2.6.0</span><span id="update-available" hidden> · 新版本 <strong id="update-version"></strong></span></p>
+    <p id="update-status" class="note" role="status" aria-live="polite"></p>
+    <div class="dialog-actions">
+      <a id="update-release" target="_blank" rel="noopener noreferrer" hidden>查看更新</a>
+      <a id="update-download" target="_blank" rel="noopener noreferrer" hidden>下载安装包</a>
+      <button id="update-later" type="button" autofocus>稍后</button>
+    </div>
+  </dialog>
   <script src="vendor/hls.min.js"></script>
   <script src="media.js"></script>
   <script src="course.js"></script>
   <script src="batch.js"></script>
   <script src="pdf.js"></script>
   <script src="scanner.js"></script>
+  <script src="extension-state.js"></script>
+  <script src="preflight.js"></script>
   <script src="capture.js"></script>
+  <script src="workspace.js"></script>
 </body>
 </html>

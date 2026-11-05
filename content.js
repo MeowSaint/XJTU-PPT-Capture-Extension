@@ -7,6 +7,7 @@
   let last = '', page = location.href, since = 0;
   let hookCourse = {}, lastCourse = '';
   async function api(path) {
+    if (!globalThis.PPTState || !await PPTState.hasConsent()) throw Error('请先在截取工具中同意课程资料使用约定');
     const response = await fetch(path, {credentials: 'include', headers: {'accept': 'application/json'}});
     if (!response.ok) throw Error(`课程接口返回 HTTP ${response.status}`);
     const type = response.headers.get('content-type') || '';

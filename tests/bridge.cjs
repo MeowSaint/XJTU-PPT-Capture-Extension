@@ -21,10 +21,16 @@ async function main() {
       const video = `https://cdn.example/${id}.mp4`; urls.push(video);
       await frame.evaluate(videoURL => {
         window.__testMessages = [];
-        Object.defineProperty(window, 'chrome', {configurable: true, value: {runtime: {id: 'bridge-test', sendMessage: async message => { window.__testMessages.push(message); }, onMessage: {addListener: listener => { window.__testDiscover = listener; }}}}});
+        const saved = {};
+        Object.defineProperty(window, 'chrome', {configurable: true, value: {
+          storage: {local: {get: async key => ({[key]: saved[key]}), set: async values => { Object.assign(saved, values); }}},
+          runtime: {id: 'bridge-test', sendMessage: async message => { window.__testMessages.push(message); }, onMessage: {addListener: listener => { window.__testDiscover = listener; }}}
+        }});
         window.fetch = async () => new Response(JSON.stringify({data: {video: videoURL}}), {headers: {'content-type': 'application/json'}});
       }, video);
-      for (const script of ['media.js', 'course.js', 'page-hook.js', 'content.js']) await frame.addScriptTag({content: fs.readFileSync(path.join(root, script), 'utf8')});
+      for (const script of ['media.js', 'course.js', 'page-hook.js', 'extension-state.js']) await frame.addScriptTag({content: fs.readFileSync(path.join(root, script), 'utf8')});
+      await frame.evaluate(() => PPTState.acceptConsent());
+      await frame.addScriptTag({content: fs.readFileSync(path.join(root, 'content.js'), 'utf8')});
       assert.deepEqual(errors, [], id + ': bridge must not throw on initialization');
       await frame.evaluate(async () => { await fetch('/fixture.json'); });
       await frame.waitForFunction(url => window.__testMessages.some(m => m.urls?.includes(url)), video, {timeout: 6000});
@@ -72,9 +78,11 @@ async function main() {
       await lessonPage.goto(targetURL);
       await lessonPage.evaluate(() => {
         window.__testMessages = [];
+        const saved = {};
         Object.defineProperty(window, 'chrome', {
           configurable: true,
           value: {
+            storage: {local: {get: async key => ({[key]: saved[key]}), set: async values => { Object.assign(saved, values); }}},
             runtime: {
               id: 'bridge-test',
               sendMessage: async message => { window.__testMessages.push(message); },
@@ -83,9 +91,11 @@ async function main() {
           }
         });
       });
-      for (const script of ['media.js', 'course.js', 'batch.js', 'content.js']) {
+      for (const script of ['media.js', 'course.js', 'batch.js', 'extension-state.js']) {
         await lessonPage.addScriptTag({content: fs.readFileSync(path.join(root, script), 'utf8')});
       }
+      await lessonPage.evaluate(() => PPTState.acceptConsent());
+      await lessonPage.addScriptTag({content: fs.readFileSync(path.join(root, 'content.js'), 'utf8')});
       const discovered = await lessonPage.evaluate(() => new Promise(resolve => window.__testDiscover({type: 'PPT_DISCOVER'}, {}, resolve)));
       assert(discovered.urls.some(u => u.includes('2-fallback.mp4')), `API fallback must discover video for ${targetURL}`);
       assert.equal(discovered.course.name, '光电传感与机器视觉');

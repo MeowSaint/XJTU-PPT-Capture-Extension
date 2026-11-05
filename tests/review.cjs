@@ -8,7 +8,7 @@ const {dependency, browserOptions} = require('./runtime.cjs');
 const {chromium} = dependency('playwright'), sharp = dependency('sharp');
 const {PDFDocument} = dependency('pdf-lib');
 const root = path.resolve(__dirname, '..');
-const scratch = path.join(root, '.test-output', 'v2.5.2');
+const scratch = path.join(root, '.test-output', 'v2.6.0');
 fs.mkdirSync(scratch, {recursive: true});
 const output = fs.mkdtempSync(path.join(scratch, 'review-'));
 const fixture = path.join(output, 'review-video.mp4');
@@ -121,7 +121,12 @@ function zipEntries(bytes) {
     });
     page = await context.newPage(); page.setDefaultTimeout(10000);
     page.on('pageerror', error => errors.push(error.message));
-    await page.goto(pathToFileURL(path.join(root, 'capture.html')).href); await count(0);
+    await page.goto(pathToFileURL(path.join(root, 'capture.html')).href);
+    await page.locator('#terms-dialog').waitFor({state: 'visible'});
+    assert.equal(await page.locator('.app-shell').evaluate(shell => shell.inert), true);
+    await page.locator('#terms-decline').click(); await page.keyboard.press('Escape');
+    assert.equal(await page.locator('#terms-dialog').isVisible(), true, 'decline and Escape keep the workspace locked');
+    await page.locator('#terms-agree').check(); await page.locator('#terms-accept').click(); await count(0);
 
     await test('three accessible setting tabs and desktop first layout', async () => {
       assert.equal(await page.locator('[role="tab"][aria-selected="true"]').getAttribute('id'), 'tab-source');

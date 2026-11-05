@@ -1,13 +1,14 @@
 'use strict';
 const $ = id => document.getElementById(id), video = $('video'), overlay = $('overlay');
 const status = message => { $('status').textContent = message; syncWorkspace(); };
-let db, pages = [], ready = false, sourceReady = false, stream = null, hls = null, objectURL = null;
+let db, pages = [], ready = false, sourceReady = false, studyAccepted = false, stream = null, hls = null, objectURL = null;
 let crop = {x: 0, y: 0, w: 1, h: 1}, drag = null, cropEditing = false, task = null, sourceName = '', sources = [], pendingOrigins = [], pendingURL = '';
 let realtimeTimer = null, realtimeBusy = false, candidate = null, candidateSince = 0, last = null, coursePage = '';
 let draggedPageId = null, reviewBusy = false, exportBusy = false, pageWrites = 0, undoState = null;
 let selectedPages = new Set(), previewPageId = null, previewReturn = null, loadedIdentity = null;
 let batchJobs = [], batchPage = '', batchRunning = false, batchStopRequested = false, activeBatchJob = null;
 const referrerRule = 16220;
+let referrerOrigins = new Set(), referrerPage = '', referrerWrites = Promise.resolve();
 let sourceCourse = {}, sourceCoursePage = '', namingPage = '', namingManual = false, namingSave = Promise.resolve(), discoverySerial = 0;
 const dbReady = new Promise((resolve, reject) => {
   const request = indexedDB.open('course-ppt', 2);
@@ -134,7 +135,7 @@ function timecode(seconds) {
   const s = Math.max(0, Math.floor(seconds));
   return `${Math.floor(s / 3600).toString().padStart(2, '0')}:${Math.floor(s / 60 % 60).toString().padStart(2, '0')}:${(s % 60).toString().padStart(2, '0')}`; /* taste-skill-ignore */
 }
-function busy() { return !!task || !!realtimeTimer || realtimeBusy || batchRunning || reviewBusy || exportBusy || pageWrites > 0; }
+function busy() { return !studyAccepted || !!task || !!realtimeTimer || realtimeBusy || batchRunning || reviewBusy || exportBusy || pageWrites > 0; }
 function namingSnapshot() { return {course: namingInfo(), page: namingPage, manual: namingManual}; }
 function restoreNaming(snapshot) { namingManual = snapshot.manual; setNaming(snapshot.course, snapshot.page); }
 function invalidateUndo() { undoState = null; selectedPages.clear(); updateSelection(); }
@@ -307,6 +308,7 @@ function controls() {
   video.controls = sourceReady && !active && !stream;
   overlay.style.pointerEvents = active || !sourceReady || !cropEditing ? 'none' : 'auto';
   syncWorkspace();
+  window.PPTWorkspace?.syncControls();
 }
 function addCard(page, index) {
   const article = document.createElement('article'), image = document.createElement('img');
@@ -429,11 +431,14 @@ async function save(f) {
   render();
 }
 function releaseSource() {
+  window.PPTWorkspace?.cancelPreflight();
   if (stream) { stream.getTracks().forEach(track => { track.onended = null; track.stop(); }); stream = null; }
   hls?.destroy(); hls = null; video.pause(); video.srcObject = null; video.removeAttribute('src'); video.load();
   if (objectURL) URL.revokeObjectURL(objectURL); objectURL = null; sourceReady = false; loadedIdentity = null;
   crop = {x: 0, y: 0, w: 1, h: 1}; cropEditing = false; drag = null; candidate = null; candidateSince = 0; last = null; controls(); draw();
-  return window.chrome?.declarativeNetRequest?.updateSessionRules({removeRuleIds: [referrerRule]}).catch(() => {});
+  referrerOrigins.clear(); referrerPage = '';
+  referrerWrites = referrerWrites.catch(() => {}).then(() => window.chrome?.declarativeNetRequest?.updateSessionRules({removeRuleIds: [referrerRule]})).catch(() => {});
+  return referrerWrites;
 }
 $('release-cache').onclick = async () => {
   if (busy() || !(sourceReady || objectURL || hls || stream)) return;
@@ -444,13 +449,20 @@ $('release-cache').onclick = async () => {
   } catch (e) { status('视频缓存释放失败：' + e.message + '。截图和命名信息还在，可以关闭工具页后重试。'); }
   finally { task = null; controls(); }
 };
-async function setCourseReferrer(origins) {
-  if (!coursePage || !window.chrome?.declarativeNetRequest) return;
-  await chrome.declarativeNetRequest.updateSessionRules({removeRuleIds: [referrerRule], addRules: [{
-    id: referrerRule, priority: 1,
-    action: {type: 'modifyHeaders', requestHeaders: [{header: 'referer', operation: 'set', value: coursePage}]},
-    condition: {initiatorDomains: [chrome.runtime.id], requestDomains: [...new Set(origins.map(x => new URL(x).hostname))], resourceTypes: ['xmlhttprequest', 'media']}
-  }]});
+async function setCourseReferrer(origins, page = coursePage) {
+  if (!page || page !== coursePage || !window.chrome?.declarativeNetRequest) return;
+  if (referrerPage !== page) { referrerOrigins.clear(); referrerPage = page; }
+  origins.forEach(origin => referrerOrigins.add(origin));
+  const domains = [...new Set([...referrerOrigins].map(origin => new URL(origin).hostname))];
+  referrerWrites = referrerWrites.catch(() => {}).then(async () => {
+    if (page !== coursePage || referrerPage !== page) return;
+    await chrome.declarativeNetRequest.updateSessionRules({removeRuleIds: [referrerRule], addRules: [{
+      id: referrerRule, priority: 1,
+      action: {type: 'modifyHeaders', requestHeaders: [{header: 'referer', operation: 'set', value: page}]},
+      condition: {initiatorDomains: [chrome.runtime.id], requestDomains: domains, excludedRequestDomains: ['api.github.com'], resourceTypes: ['xmlhttprequest', 'media']}
+    }]});
+  });
+  return referrerWrites;
 }
 async function awaitVideo(signal) {
   signal?.throwIfAborted();
@@ -514,7 +526,7 @@ async function inspectPlaylist(url, signal, visited = new Set(), depth = 0, orig
   for (const child of children) await inspectPlaylist(child, signal, visited, depth + 1, origins);
 }
 async function loadRemote(raw, options = {}) {
-  if (task || realtimeTimer || realtimeBusy || reviewBusy || exportBusy || pageWrites || (batchRunning && !options.batchJob)) return false;
+  if (!studyAccepted || task || realtimeTimer || realtimeBusy || reviewBusy || exportBusy || pageWrites || (batchRunning && !options.batchJob)) return false;
   const batchJob = options.batchJob || null;
   if (!batchJob) activeBatchJob = null;
   const info = PPTCore.mediaInfo(raw);
@@ -667,7 +679,7 @@ function renderBatchJobs() {
       select.value = job.url; select.disabled = batchRunning || !!task;
       select.onchange = () => { const item = job.options.find(candidate => candidate.url === select.value); if (item) Object.assign(job, item); renderBatchJobs(); };
       prepare.textContent = count ? '继续用 0 路处理' : '加载 0 路并框选'; prepare.disabled = batchRunning || !!task;
-      prepare.onclick = () => prepareManualBatchJob(job, chrome.permissions.request({origins: [originPattern(job.url)]}));
+      prepare.onclick = () => { if (!busy()) prepareManualBatchJob(job, chrome.permissions.request({origins: [originPattern(job.url)]})); };
       manual.append(select, prepare); row.append(manual);
     }
     row.append(download); container.append(row);
@@ -749,6 +761,7 @@ $('batch-select').onclick = () => {
   selectable.forEach(job => { job.selected = choose; }); renderBatchJobs();
 };
 $('batch-start').onclick = () => {
+  if (busy()) return;
   const origins = [...new Set(batchJobs.filter(job => !job.requiresCrop && job.selected && job.state !== 'done').map(job => originPattern(job.url)))];
   const permission = origins.length ? chrome.permissions.request({origins}) : Promise.resolve(false);
   runBatch(permission);
@@ -817,6 +830,8 @@ $('share').onclick = async () => {
 };
 $('end').onclick = () => { stopRealtime(); releaseSource(); status('共享已结束，截图已保留。'); };
 async function discover() {
+  if (busy()) return;
+  window.PPTWorkspace?.cancelPreflight();
   if (!window.chrome?.tabs) { $('source-status').textContent = '请通过浏览器扩展打开此工具。也可以导入本地视频。'; return; }
   const revision = ++discoverySerial;
   try {
@@ -836,7 +851,7 @@ async function discover() {
     if (batchPage && batchPage !== coursePage) { batchPage = ''; batchJobs = []; renderBatchJobs(); }
     acceptCourse({}, coursePage);
     await chrome.scripting.executeScript({target: {tabId: id, allFrames: true}, world: 'MAIN', files: ['media.js', 'course.js', 'page-hook.js']}).catch(() => {});
-    await chrome.scripting.executeScript({target: {tabId: id, allFrames: true}, files: ['media.js', 'course.js', 'batch.js', 'content.js']}).catch(() => {});
+    await chrome.scripting.executeScript({target: {tabId: id, allFrames: true}, files: ['media.js', 'course.js', 'batch.js', 'extension-state.js', 'content.js']}).catch(() => {});
     let discovered = await chrome.tabs.sendMessage(id, {type: 'PPT_DISCOVER'}, {frameId: 0}).catch(() => null);
     const courseReply = await chrome.tabs.sendMessage(id, {type: 'PPT_COURSE'}, {frameId: 0}).catch(() => null);
     if (revision !== discoverySerial) return;
@@ -861,23 +876,13 @@ async function discover() {
     if (entry?.page === coursePage) acceptCourse(entry.course, coursePage);
     if (courseReply?.page === coursePage) acceptCourse(courseReply.course, coursePage);
     if (discovered?.page === coursePage) acceptCourse(discovered.course, coursePage);
-    updateSources();
+    updateSources(true);
     $('source-status').textContent = sources.length ? `已发现 ${sources.length} 个视频地址，选好后点击“加载选中视频”。` : '还没找到视频。请刷新课程页并播放一次，再点“刷新视频列表”。';
     if (PPTBatch.courseId(coursePage) && batchPage !== coursePage) await discoverBatch(id, true);
   } catch (e) { $('source-status').textContent = '发现视频失败：' + e.message + '。请刷新课程页，或使用手动地址 / 本地视频。'; }
 }
-function updateSources() {
-  const old = $('sources').value;
-  $('sources').replaceChildren();
-  sources.sort((a, b) => b.seen - a.seen);
-  const placeholder = document.createElement('option'); placeholder.value = ''; placeholder.textContent = sources.length ? '请选择视频地址' : '等待发现视频'; $('sources').append(placeholder);
-  for (const source of sources) {
-    const option = document.createElement('option'); option.value = source.url;
-    option.textContent = `${source.name} · ${new URL(source.url).host} · ${source.source}`;
-    option.title = source.url; $('sources').append(option);
-  }
-  if (sources.some(x => x.url === old)) $('sources').value = old;
-  else $('sources').value = '';
+function updateSources(reset = false) {
+  window.PPTWorkspace?.refreshSources(sources, coursePage, {reset});
   controls();
 }
 $('discover').onclick = discover; $('course').onchange = discover; $('sources').onchange = controls; $('mode').onchange = syncWorkspace;
@@ -885,5 +890,5 @@ if (window.chrome?.storage?.onChanged) chrome.storage.onChanged.addListener((cha
   const value = changes['media-' + $('course').value]?.newValue;
   if (area === 'session' && value?.page === coursePage) { sources = value.items; acceptCourse(value.course, value.page); updateSources(); $('source-status').textContent = `已发现 ${sources.length} 个视频地址，选好后点击“加载选中视频”。`; }
 });
-controls(); previewName(); discover();
+controls(); previewName();
 window.addEventListener('beforeunload', event => { if (task || realtimeTimer) { event.preventDefault(); event.returnValue = ''; } });

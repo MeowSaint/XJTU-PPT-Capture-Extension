@@ -167,6 +167,24 @@ progress::-moz-progress-bar { background: var(--accent); }
 .lightbox-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 #lightbox-status:empty { display: none; }
 
+.brand-block > button { min-height: 28px; padding: 2px 5px; font-size: 12px; }
+#check-updates[data-available="true"] { color: var(--accent); }
+#check-updates[data-available="true"]::before { content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 5px; border-radius: 50%; background: currentColor; }
+.preflight-tools { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 2px 4px; margin-top: 5px; }
+.preflight-tools .check { min-height: 28px; margin-top: 0; gap: 5px; font-size: 12px; }
+.preflight-tools button { min-height: 28px; padding: 2px 0; font-size: 12px; }
+#preflight-status { margin-top: 3px; font-size: 12px; }
+.workspace-dialog { width: min(520px, calc(100vw - 48px)); max-height: calc(100dvh - 64px); padding: 24px; overflow: auto; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); color: var(--text); }
+.workspace-dialog::backdrop { background: rgb(36 53 74 / 35%); }
+.workspace-dialog h2 { font-size: 18px; margin-bottom: 16px; }
+.workspace-dialog p + p, .workspace-dialog > .note { margin-top: 12px; }
+.dialog-copy { line-height: 1.8; }
+.workspace-dialog .check { align-items: flex-start; margin-top: 18px; }
+.workspace-dialog .check input { margin-top: 3px; }
+.dialog-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 20px; }
+.workspace-dialog a { color: var(--accent); text-underline-offset: 3px; }
+#terms-accept:not(:disabled) { background: var(--accent); border-color: var(--accent); color: var(--surface); }
+
 @media (prefers-contrast: more) {
   :root { --control: #68798b; --border: #9ba9b9; --muted: #3e4d60; }
   :where(button, input, select, summary, [tabindex]):focus-visible { outline-width: 3px; }

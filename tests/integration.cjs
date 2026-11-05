@@ -69,7 +69,7 @@ async function main() {
   const origin = `http://127.0.0.1:${server.address().port}`;
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'ppt-capture-test-')), ext = path.join(temp, 'extension');
   fs.mkdirSync(ext);
-  for (const name of ['manifest.json', 'background.js', 'media.js', 'course.js', 'batch.js', 'page-hook.js', 'content.js', 'capture.html', 'capture.js', 'scanner.js', 'style.css', 'pdf.js', 'vendor', 'icons']) fs.cpSync(path.join(root, name), path.join(ext, name), {recursive: true});
+  for (const name of ['manifest.json', 'background.js', 'media.js', 'course.js', 'batch.js', 'page-hook.js', 'content.js', 'capture.html', 'capture.js', 'workspace.js', 'extension-state.js', 'preflight.js', 'scanner.js', 'style.css', 'pdf.js', 'vendor', 'icons']) fs.cpSync(path.join(root, name), path.join(ext, name), {recursive: true});
   const manifest = JSON.parse(fs.readFileSync(path.join(ext, 'manifest.json'), 'utf8'));
   // Grant only fixture server access in this test copy to avoid a headless permission dialog.
   manifest.host_permissions.push('http://127.0.0.1/*', 'http://localhost/*');
@@ -79,6 +79,19 @@ async function main() {
   context.on('page', p => p.on('pageerror', e => errors.push(p.url() + ': ' + e.stack)));
   try {
     const worker = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker');
+    // Worker requests are not intercepted by page routes: mock the public check here.
+    await worker.evaluate(() => {
+      const fetchFixture = globalThis.fetch.bind(globalThis);
+      globalThis.fetch = (input, options) => {
+        const url = typeof input === 'string' ? input : input.url;
+        if (url.startsWith('https://api.github.com/')) return Promise.resolve(new Response(JSON.stringify({
+          tag_name: 'v2.6.0', draft: false, prerelease: false, published_at: '2026-11-05T00:00:00Z',
+          html_url: 'https://github.com/MeowSaint/XJTU-PPT-Capture-Extension/releases/tag/v2.6.0',
+          assets: [{name: 'ppt-capture.zip', browser_download_url: 'https://github.com/MeowSaint/XJTU-PPT-Capture-Extension/releases/download/v2.6.0/ppt-capture.zip'}]
+        }), {headers: {'Content-Type': 'application/json'}}));
+        return fetchFixture(input, options);
+      };
+    });
     const extensionOrigin = worker.url().replace('/background.js', '');
     const courseName = '传感网络与大数据技术', expectedFilename = courseName + '-2026-09-07-15-30-00.pdf';
     // Simulate a pre-v2.3.1 database: migration preserves existing screenshots.
@@ -115,6 +128,14 @@ async function main() {
     await course.goto('https://rms-v5.xjtu.edu.cn/my-capture-courses/16220/preview-detail/477014');
     const page = await context.newPage(); await page.goto(extensionOrigin + '/capture.html');
     let downloads = 0; page.on('download', () => { downloads++; });
+    await page.locator('#terms-dialog').waitFor({state: 'visible'});
+    await page.waitForFunction(() => ready && pages.length === 1);
+    assert.equal(await page.locator('.app-shell').evaluate(shell => shell.inert), true);
+    await page.locator('#terms-decline').click(); await page.keyboard.press('Escape');
+    assert.equal(await page.locator('#terms-dialog').isVisible(), true);
+    assert.equal(await page.locator('#pages article').count(), 1, 'declining consent preserves the migrated legacy screenshot');
+    await page.locator('#terms-agree').check(); await page.locator('#terms-accept').click();
+    await page.locator('#source-show-all').check();
     await page.waitForFunction(() => document.querySelector('#sources').options.length >= 3);
     const badge = await worker.evaluate(async url => {
       const tab = (await chrome.tabs.query({url})).find(tab => tab.url === url);
