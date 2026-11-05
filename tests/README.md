@@ -1,52 +1,35 @@
-# 本地测试
+# 测试说明
 
-测试使用临时浏览器配置和本地生成的视频。课程域名的页面由测试代码提供，学校账号和日常浏览器配置都用不上。中间文件放在 `.test-output/`。
+所有测试均在本地运行，使用临时浏览器配置和合成测试视频，不需要登录思源学堂账号，也不会影响日常使用的浏览器。测试产物保存在 `.test-output/`。
 
-## 运行
+## 运行命令
 
-| 命令 | 需要什么 | 检查什么 |
+| 命令 | 环境要求 | 测试内容 |
 | --- | --- | --- |
-| `npm test` | Node.js 20+ | 地址解析、采样、图像差异、课程信息、PDF / ZIP、媒体预检和条款 / 更新状态 |
-| `npm run test:features` | 开发依赖、FFmpeg、Chromium | 首次同意、地址筛选、授权和更新提醒 |
-| `npm run test:review` | 开发依赖、FFmpeg、Chromium | 页面校对、撤销、回看、导出和桌面布局 |
-| `npm run test:bridge` | 开发依赖、Chromium | iframe 中的视频地址消息通信 |
-| `npm run test:integration` | 开发依赖、Chromium、FFmpeg、Poppler | 从发现视频到生成 PDF 的完整流程 |
-| `npm run test:release` | Node.js 20+ | 文件清单、完整许可证、打包和历史版本归档 |
+| `npm test` | Node.js 20+ | 视频地址解析、抽帧时间点、图像比对、课程命名、PDF / ZIP 生成、媒体预检、版本状态 |
+| `npm run test:release` | Node.js 20+ | 扩展打包清单、ZIP 校验、旧包归档与异常回滚 |
+| `npm run test:features` | 开发依赖、Chromium、FFmpeg | 首次使用确认、视频地址预检分组、域名授权、更新检查 |
+| `npm run test:review` | 开发依赖、Chromium、FFmpeg | 页面筛选、批量删除与撤销、快捷键、相似页清理、PDF / ZIP 导出 |
+| `npm run test:bridge` | 开发依赖、Chromium | 页面与各类 iframe（含沙箱 `srcdoc`）之间的消息通信 |
+| `npm run test:integration` | 开发依赖、Chromium、FFmpeg、Poppler | 从发现课程视频、单节/批量提取到校验导出 PDF 像素的完整流程 |
 
-开发测试可在 Windows、macOS 和 Linux 上运行。先运行 `npm install` 安装开发依赖；Windows 默认可用已安装的 Edge，macOS 和 Linux 先运行 `npx playwright install chromium`。`pdftoppm` 需能从 PATH 调用。
+`npm test` 和 `npm run test:release` 只用到 Node.js 内置模块，克隆仓库后可直接运行。
 
-`PPT_TEST_BROWSER` 可指定浏览器可执行文件，完整集成测试需要浏览器支持加载解压扩展；`PPT_TEST_NODE_MODULES` 可指定已有依赖目录。
+运行浏览器测试前需先安装依赖：
 
-打包测试只需要 Node.js 20+，可以直接在 Bash、Zsh 或 Windows 终端中运行 `npm run test:release`，也可以运行 `node --test tests/release.test.cjs`。它使用 Node 自带的模块，无须安装开发依赖或 PowerShell。
+```sh
+npm install
+npx playwright install chromium
+```
 
-## 覆盖内容
+Windows 默认可直接使用已安装的 Edge；macOS 和 Linux 使用 Playwright 安装的 Chromium。运行 `test:integration` 还需确保系统 PATH 中有 `ffmpeg` 和 `pdftoppm`（Poppler）。可通过环境变量 `PPT_TEST_BROWSER` 指定浏览器可执行文件路径，或通过 `PPT_TEST_NODE_MODULES` 指定依赖目录。
 
-核心测试检查地址解析、首尾采样、图像噪声、并发记录、课程缓存分离、名称与时间提取、时区、非法日期、文件名字符、JSON ID 与信息来源，以及 PDF / ZIP 格式。媒体预检测试用本地 HTTP 响应检查文件头、伪装网页、无视 Range 的大响应、超时和取消；状态测试检查条款版本、存储失败、版本比较、更新缓存与通知认领。
+## 各测试套件覆盖点
 
-新功能浏览器测试通过真实扩展页面检查首次同意、保留旧截图、地址分组与授权、登录凭据和 Referer、切课后的旧请求，以及多工具页的更新提醒。GitHub 版本响应由本地夹具提供，结果保存在 `.test-output/v2.6.0/`。
-
-iframe 测试包含继承来源的 `srcdoc`、来源为 `null` 的沙箱 `srcdoc` 和沙箱 URL 页面，检查消息往返、定时采集，以及来自其他窗口的消息是否被拒绝。它对应曾出现的 `Invalid target origin 'null'` 错误。
-
-校对测试检查多选与单页删除、数据库写入失败时的回滚、撤销、键盘操作、视频来源匹配、相似页清理、实际 PDF / ZIP 下载和三个桌面尺寸。结果保存在 `.test-output/v2.6.0/`。
-
-完整流程测试检查：
-
-- 从 JSON 接口发现视频，即使页面没有对应的 `video` 元素；视频列表由用户选择，工具栏角标与地址数量一致。
-- 从课程列表读取课次，跳过正在转码的录像，优先选 `ENCODER` / `2-` PPT 视频；两节课依次提取并分组，清空后能重跑。只有 `0-` 视频时，先框选再提取。
-- 提取结束后显示校对提示，点击下载才生成文件；删除后的页面不再导出。
-- PDF 按课程名称、上课日期和开始时间命名，网页文字和 JSON 信息都能使用。
-- 旧数据库升级、缺少命名信息、手动修改、重开恢复，以及切换课程时已有截图的命名。
-- 无 CORS 响应头的 MP4 经本地 Blob 解码，视频请求带上课程 Referer。
-- 密集采样得到四张不同幻灯片，去掉重复回看页面；稀疏采样中短暂页面的漏截情况。
-- HLS 按分片跳转得到相同的四页，本地视频也能导入。
-- 释放视频缓存时撤销 Blob URL、卸载 HLS，保留截图和命名，释放后还能导出，再次加载后还能提取。
-- 重开后恢复截图，停止后保留已保存的页面，框选排除留白，HTTP 错误时保留结果。
-- 用独立 PDF 解析器核对页数、尺寸，再渲染并与输入画面逐像素比较，检查内容、顺序和比例。
-
-完整流程使用本地合成视频；真实课程视频的完整提取仍待实测。集成测试只给临时扩展副本授予本地服务器访问权，发布配置仍在加载视频时申请域名权限。
-
-打包测试使用 `.test-output/` 中的临时目录，逐项检查 29 个安装文件和原始字节，包括新增运行脚本、高清 Logo 和完整许可证；同时检查版本一致、根目录只留最新版、旧包归档、同名历史包分别保存，以及构建失败后原安装包仍可用。
-
-## GitHub Actions
-
-CI 在 Windows、macOS 和 Linux 的 Node.js 20 环境运行单元和打包测试，另在 Linux 安装 Chromium、FFmpeg、Poppler 后运行四组浏览器测试。推送版本标签会先运行同样的 CI，通过后才打包、生成 SHA-256 校验文件并发布新版本。
+- **`tests/core.test.cjs` / `tests/course.test.cjs` / `tests/export.test.cjs`**：测试 URL 提取、采样时间序列、画面噪点容差、课程名称与东八区时间解析、导出文件名过滤，以及单页 PDF、A4 讲义 PDF 和 JPEG ZIP 的二进制结构。
+- **`tests/preflight.test.cjs` / `tests/extension-state.test.cjs`**：通过本地 HTTP 服务测试 MP4 / WebM / m3u8 文件头识别、HTML 登录页与 JSON 接口过滤、超长响应截断、超时与取消；测试使用约定持久化、语义化版本比对、24 小时更新缓存和通知去重。
+- **`tests/features.cjs`**：加载扩展界面，验证首次使用约定弹窗、视频地址预检分组与域名授权、视频请求携带 Cookie 与课程页 Referer，以及更新提醒。
+- **`tests/review.cjs`**：验证缩略图多选、删除与 `Ctrl / Cmd + Z` 撤销、数据库写入异常回滚、大图预览键盘导航、按时间戳回看视频、清理相邻相似页，以及桌面窗口下的布局和实际文件下载。
+- **`tests/bridge.cjs`**：验证课程页主窗口与同源 iframe、`about:srcdoc`、沙箱 `origin === "null"` iframe 之间的视频地址采集通信。
+- **`tests/integration.cjs`**：用 FFmpeg 生成带幻灯片切换的测试视频，走完从课程接口发现视频、MP4 / HLS / 本地文件提取、整门课批量提取（含 `0-` 路视频手动框选）、释放视频缓存到导出 PDF 的全流程，并用 `pdftoppm` 渲染 PDF 逐页比对画面。
+- **`tests/release.test.cjs`**：在临时目录中验证 `npm run release` 打包出的 29 个文件内容、版本号一致性、`last-release/` 历史包归档，以及打包中途报错时原安装包不被破坏。
