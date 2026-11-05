@@ -18,10 +18,10 @@ class PPTScanner {
     signal?.throwIfAborted();
     return this.capture(time);
   }
-  async scan({step, threshold, dedupe, signal, save, progress, previous = []}) {
+  async scan({step, threshold, dedupe, signal, save, progress, previous = [], isDuplicate}) {
     const duration = this.video.duration;
     const times = PPTCore.sampleTimes(duration, step);
-    const seen = previous.filter(Boolean).slice();
+    const seen = isDuplicate ? null : previous.filter(Boolean).slice();
     let baseline = null, lastCoarse = null, previousTime = 0, saved = 0, unstable = 0;
     const same = (a, b) => PPTCore.similar(a, b, threshold);
     const consider = async (time, known) => {
@@ -32,8 +32,9 @@ class PPTScanner {
       const confirmed = confirmTime > time + 0.02 ? await this.seek(confirmTime, signal) : first;
       if (!PPTCore.similar(first.sig, confirmed.sig, Math.min(threshold, 0.8))) { unstable++; return; }
       baseline = confirmed.sig;
-      if (dedupe && seen.some(sig => same(confirmed.sig, sig))) return;
-      await save(confirmed); seen.push(confirmed.sig); saved++;
+      if (dedupe && (isDuplicate ? await isDuplicate(confirmed.sig, threshold) : seen.some(sig => same(confirmed.sig, sig)))) return;
+      signal.throwIfAborted();
+      await save(confirmed); seen?.push(confirmed.sig); saved++;
     };
     for (let i = 0; i < times.length; i++) {
       signal.throwIfAborted();

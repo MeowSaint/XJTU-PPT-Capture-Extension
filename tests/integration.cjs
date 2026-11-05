@@ -24,12 +24,18 @@ async function fixtures() {
   command('ffmpeg', ['-y', '-v', 'error', '-i', path.join(output, 'lecture_2.mp4'), '-c', 'copy', '-hls_time', '1', '-hls_playlist_type', 'vod', '-hls_segment_filename', path.join(output, 'segment%02d.ts'), path.join(output, 'lecture_2.m3u8')]);
 }
 async function verifyCacheRelease(page, label) {
-  const retained = () => ({
-    pages: pages.map(p => ({id: p.id, data: p.data, w: p.w, h: p.h, time: p.time, sourceTime: p.sourceTime, sourceName: p.sourceName, course: p.course, coursePage: p.coursePage})),
-    naming: namingInfo(), manual: namingManual, namingPage,
-    fields: ['course-name', 'course-date', 'course-start'].map(id => document.getElementById(id).value),
-    preview: document.getElementById('filename-preview').textContent
-  });
+  const retained = async () => {
+    const assets = await PPTPageStore.assets(db, pages.map(p => p.id));
+    const data = await Promise.all(assets.map(asset => new Promise((resolve, reject) => {
+      const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = () => reject(reader.error); reader.readAsDataURL(asset.image);
+    })));
+    return {
+      pages: pages.map((p, index) => ({id: p.id, data: data[index], w: p.w, h: p.h, time: p.time, sourceTime: p.sourceTime, sourceName: p.sourceName, course: p.course, coursePage: p.coursePage})),
+      naming: namingInfo(), manual: namingManual, namingPage,
+      fields: ['course-name', 'course-date', 'course-start'].map(id => document.getElementById(id).value),
+      preview: document.getElementById('filename-preview').textContent
+    };
+  };
   const before = await page.evaluate(retained), oldURL = await page.evaluate(() => objectURL);
   assert.equal(await page.locator('#release-cache').isEnabled(), true, label + ': cache can be released');
   await page.locator('#release-cache').click();
@@ -69,7 +75,7 @@ async function main() {
   const origin = `http://127.0.0.1:${server.address().port}`;
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'ppt-capture-test-')), ext = path.join(temp, 'extension');
   fs.mkdirSync(ext);
-  for (const name of ['manifest.json', 'background.js', 'media.js', 'course.js', 'batch.js', 'page-hook.js', 'content.js', 'capture.html', 'capture.js', 'workspace.js', 'extension-state.js', 'preflight.js', 'scanner.js', 'style.css', 'pdf.js', 'vendor', 'icons']) fs.cpSync(path.join(root, name), path.join(ext, name), {recursive: true});
+  for (const name of ['manifest.json', 'background.js', 'media.js', 'course.js', 'batch.js', 'page-hook.js', 'content.js', 'capture.html', 'capture.js', 'page-store.js', 'disk-cache.js', 'workspace.js', 'extension-state.js', 'preflight.js', 'scanner.js', 'style.css', 'pdf.js', 'vendor', 'icons']) fs.cpSync(path.join(root, name), path.join(ext, name), {recursive: true});
   const manifest = JSON.parse(fs.readFileSync(path.join(ext, 'manifest.json'), 'utf8'));
   // Grant only fixture server access in this test copy to avoid a headless permission dialog.
   manifest.host_permissions.push('http://127.0.0.1/*', 'http://localhost/*');
@@ -85,9 +91,9 @@ async function main() {
       globalThis.fetch = (input, options) => {
         const url = typeof input === 'string' ? input : input.url;
         if (url.startsWith('https://api.github.com/')) return Promise.resolve(new Response(JSON.stringify({
-          tag_name: 'v2.6.0', draft: false, prerelease: false, published_at: '2026-11-05T00:00:00Z',
-          html_url: 'https://github.com/MeowSaint/XJTU-PPT-Capture-Extension/releases/tag/v2.6.0',
-          assets: [{name: 'ppt-capture.zip', browser_download_url: 'https://github.com/MeowSaint/XJTU-PPT-Capture-Extension/releases/download/v2.6.0/ppt-capture.zip'}]
+          tag_name: 'v3.0.0', draft: false, prerelease: false, published_at: '2026-11-05T00:00:00Z',
+          html_url: 'https://github.com/MeowSaint/XJTU-PPT-Capture-Extension/releases/tag/v3.0.0',
+          assets: [{name: 'ppt-capture.zip', browser_download_url: 'https://github.com/MeowSaint/XJTU-PPT-Capture-Extension/releases/download/v3.0.0/ppt-capture.zip'}]
         }), {headers: {'Content-Type': 'application/json'}}));
         return fetchFixture(input, options);
       };
@@ -95,6 +101,7 @@ async function main() {
     const extensionOrigin = worker.url().replace('/background.js', '');
     const courseName = '传感网络与大数据技术', expectedFilename = courseName + '-2026-09-07-15-30-00.pdf';
     // Simulate a pre-v2.3.1 database: migration preserves existing screenshots.
+    const legacyData = 'data:image/png;base64,' + fs.readFileSync(path.join(output, 'slide1.png')).toString('base64');
     await worker.evaluate(data => new Promise((resolve, reject) => {
       const request = indexedDB.open('course-ppt', 1);
       request.onupgradeneeded = () => request.result.createObjectStore('pages', {keyPath: 'id', autoIncrement: true});
@@ -104,7 +111,7 @@ async function main() {
         tx.objectStore('pages').add({data, w: 1280, h: 720, time: Date.now(), sourceName: 'legacy.mp4'});
         tx.oncomplete = () => { db.close(); resolve(); }; tx.onerror = () => reject(tx.error);
       };
-    }), 'data:image/png;base64,' + fs.readFileSync(path.join(output, 'slide1.png')).toString('base64'));
+    }), legacyData);
     // Fulfill the course page locally; no request is sent to the school.
     const course = await context.newPage();
     await course.route('https://rms-v5.xjtu.edu.cn/**', route => {
@@ -130,6 +137,12 @@ async function main() {
     let downloads = 0; page.on('download', () => { downloads++; });
     await page.locator('#terms-dialog').waitFor({state: 'visible'});
     await page.waitForFunction(() => ready && pages.length === 1);
+    assert.equal(await page.evaluate(async () => {
+      const asset = await PPTPageStore.asset(db, pages[0].id);
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = () => reject(reader.error); reader.readAsDataURL(asset.image);
+      });
+    }), legacyData, 'v1 migration preserves the exact original PNG bytes');
     assert.equal(await page.locator('.app-shell').evaluate(shell => shell.inert), true);
     await page.locator('#terms-decline').click(); await page.keyboard.press('Escape');
     assert.equal(await page.locator('#terms-dialog').isVisible(), true);
@@ -306,11 +319,12 @@ async function main() {
     const oldCount = await page.locator('#pages article').count(); await page.locator('#shot').click();
     await page.waitForFunction(n => document.querySelectorAll('#pages article').length === n + 1, oldCount);
     const croppedImage = page.locator('#pages article img').last();
-    await croppedImage.scrollIntoViewIfNeeded();
-    const cropSize = await croppedImage.evaluate(async img => { await img.decode(); return {w: img.naturalWidth, h: img.naturalHeight}; });
+    await croppedImage.scrollIntoViewIfNeeded(); await croppedImage.click();
+    await page.waitForFunction(() => { const image = document.querySelector('#lightbox-img'); return image.complete && image.naturalWidth > 0; });
+    const cropSize = await page.locator('#lightbox-img').evaluate(async img => { await img.decode(); return {w: img.naturalWidth, h: img.naturalHeight}; });
     console.log('Decoded crop dimensions:', cropSize);
     assert(cropSize.w > 600 && cropSize.w < 660); assert.equal(cropSize.h, 360);
-    await page.locator('#full').click();
+    await page.locator('#lightbox-close').click(); await page.locator('#full').click();
     await verifyCacheRelease(page, 'local video');
     // A server error must be actionable and preserve all extracted pages.
     const retained = await page.locator('#pages article').count();

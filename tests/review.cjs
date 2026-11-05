@@ -1,21 +1,20 @@
-/* Focused desktop review tests: local files, a fresh Chromium context, no extension or real profile. */
+/* Focused desktop review tests: loopback fixtures, a fresh Chromium context, no extension or real profile. */
 'use strict';
 const assert = require('node:assert/strict');
-const fs = require('node:fs'), path = require('node:path');
-const {pathToFileURL} = require('node:url');
+const fs = require('node:fs'), path = require('node:path'), http = require('node:http');
 const {spawnSync} = require('node:child_process');
 const {dependency, browserOptions} = require('./runtime.cjs');
 const {chromium} = dependency('playwright'), sharp = dependency('sharp');
 const {PDFDocument} = dependency('pdf-lib');
 const root = path.resolve(__dirname, '..');
-const scratch = path.join(root, '.test-output', 'v2.6.0');
+const scratch = path.join(root, '.test-output', 'v3.0.0');
 fs.mkdirSync(scratch, {recursive: true});
 const output = fs.mkdtempSync(path.join(scratch, 'review-'));
 const fixture = path.join(output, 'review-video.mp4');
 const naming = {course: {name: '模式识别', date: '2026-11-04', start: '08:00:00'}, page: '', manual: true};
 const modifier = process.platform === 'darwin' ? 'Meta' : 'Control';
 const results = [], errors = [], blocked = [];
-let browser, context, page, images;
+let browser, context, page, images, server;
 
 async function idle() { await page.waitForFunction(() => ready && !busy()); }
 async function count(value) {
@@ -23,16 +22,27 @@ async function count(value) {
 }
 async function ids() { return page.locator('#pages article').evaluateAll(cards => cards.map(card => Number(card.dataset.pageId))); }
 async function stored() {
-  return page.evaluate(() => new Promise((resolve, reject) => {
-    const request = indexedDB.open('course-ppt', 2);
-    request.onerror = () => reject(request.error);
-    request.onsuccess = () => {
-      const database = request.result, tx = database.transaction(['pages', 'settings']);
-      const pages = tx.objectStore('pages').getAll(), naming = tx.objectStore('settings').get('exportNaming');
-      tx.oncomplete = () => { database.close(); resolve({pages: pages.result.sort((a, b) => a.order - b.order), naming: naming.result}); };
-      tx.onerror = () => { database.close(); reject(tx.error); };
-    };
-  }));
+  return page.evaluate(async () => {
+    const snapshot = await new Promise((resolve, reject) => {
+      const request = indexedDB.open('course-ppt', 3);
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => {
+        const database = request.result, tx = database.transaction(['pages', 'settings', 'assets']);
+        const pages = tx.objectStore('pages').getAll(), naming = tx.objectStore('settings').get('exportNaming'), assets = tx.objectStore('assets').getAll();
+        tx.oncomplete = () => { database.close(); resolve({pages: pages.result.sort((a, b) => a.order - b.order), naming: naming.result, assets: assets.result}); };
+        tx.onerror = () => { database.close(); reject(tx.error); };
+      };
+    });
+    const assets = new Map(snapshot.assets.map(asset => [asset.id, asset]));
+    const pages = await Promise.all(snapshot.pages.map(async metadata => {
+      const asset = assets.get(metadata.id);
+      const data = await new Promise((resolve, reject) => {
+        const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = () => reject(reader.error); reader.readAsDataURL(asset.image);
+      });
+      return {...metadata, data, ...(asset.sig === undefined ? {} : {sig: asset.sig})};
+    }));
+    return {pages, naming: snapshot.naming};
+  });
 }
 async function seed(specs, exportNaming = naming) {
   await idle();
@@ -49,8 +59,15 @@ async function seed(specs, exportNaming = naming) {
       if (spec.signature === 'short') record.sig = new Uint8ClampedArray(4);
       return record;
     }));
+    await namingSave.catch(() => {}); db.close();
+    await new Promise((resolve, reject) => {
+      const request = indexedDB.deleteDatabase('course-ppt');
+      request.onsuccess = resolve; request.onerror = () => reject(request.error);
+      request.onblocked = () => reject(Error('Fixture database reset is blocked'));
+    });
     await new Promise((resolve, reject) => {
       const request = indexedDB.open('course-ppt', 2);
+      request.onupgradeneeded = () => { request.result.createObjectStore('pages', {keyPath: 'id', autoIncrement: true}); request.result.createObjectStore('settings'); };
       request.onerror = () => reject(request.error);
       request.onsuccess = () => {
         const database = request.result, tx = database.transaction(['pages', 'settings'], 'readwrite');
@@ -113,15 +130,28 @@ function zipEntries(bytes) {
       const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360"><rect width="640" height="360" fill="#ffffff"/><rect x="35" y="35" width="570" height="70" fill="${color}"/><text x="55" y="82" font-family="sans-serif" font-size="30" fill="white">Review slide ${index + 1}</text><path d="M55 160h480M55 210h400M55 260h450" stroke="${color}" stroke-width="16"/></svg>`;
       return 'data:image/jpeg;base64,' + (await sharp(Buffer.from(svg)).jpeg({quality: 95}).toBuffer()).toString('base64');
     }));
+    // OPFS requires a trusted origin; file:// cannot exercise disk-backed exports.
+    server = http.createServer((req, res) => {
+      const file = path.resolve(root, '.' + decodeURIComponent(new URL(req.url, 'http://localhost').pathname));
+      if (!file.startsWith(root + path.sep)) { res.writeHead(403); res.end(); return; }
+      fs.readFile(file, (error, bytes) => {
+        if (error) { res.writeHead(404); res.end(); return; }
+        const type = {'.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.png': 'image/png'}[path.extname(file)] || 'application/octet-stream';
+        res.writeHead(200, {'Content-Type': type}); res.end(bytes);
+      });
+    });
+    await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+    const origin = `http://127.0.0.1:${server.address().port}`;
     browser = await chromium.launch({...browserOptions(), downloadsPath: output});
     context = await browser.newContext({viewport: {width: 1440, height: 900}, acceptDownloads: true, reducedMotion: 'reduce'});
     await context.route('**/*', route => {
-      if (/^(file|blob|data):/.test(route.request().url())) return route.continue();
-      blocked.push(route.request().url()); return route.abort();
+      const url = route.request().url();
+      if (/^(blob|data):/.test(url) || new URL(url).origin === origin) return route.continue();
+      blocked.push(url); return route.abort();
     });
     page = await context.newPage(); page.setDefaultTimeout(10000);
     page.on('pageerror', error => errors.push(error.message));
-    await page.goto(pathToFileURL(path.join(root, 'capture.html')).href);
+    await page.goto(origin + '/capture.html');
     await page.locator('#terms-dialog').waitFor({state: 'visible'});
     assert.equal(await page.locator('.app-shell').evaluate(shell => shell.inert), true);
     await page.locator('#terms-decline').click(); await page.keyboard.press('Escape');
@@ -294,5 +324,6 @@ function zipEntries(bytes) {
     console.error(error); console.error('Evidence: ' + output); process.exitCode = 1;
   } finally {
     if (context) await context.close(); if (browser) await browser.close();
+    if (server?.listening) await new Promise(resolve => server.close(resolve));
   }
 })();

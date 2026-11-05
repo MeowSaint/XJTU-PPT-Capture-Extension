@@ -13,7 +13,7 @@
       <div class="brand-block">
         <img class="app-mark" src="icons/icon-32.png" width="28" height="28" alt="">
         <h1>课程 PPT 截取</h1>
-        <span class="version">2.6.0</span>
+        <span class="version">3.0.0</span>
         <button id="check-updates" class="button-quiet" type="button">检查更新</button>
         <button id="terms-open" class="button-quiet" type="button">使用约定</button>
       </div>
@@ -238,7 +238,7 @@
   </dialog>
   <dialog id="update-dialog" class="workspace-dialog" aria-labelledby="update-title" aria-describedby="update-status">
     <h2 id="update-title">扩展更新</h2>
-    <p>当前版本 <span id="update-current">2.6.0</span><span id="update-available" hidden> · 新版本 <strong id="update-version"></strong></span></p>
+    <p>当前版本 <span id="update-current">3.0.0</span><span id="update-available" hidden> · 新版本 <strong id="update-version"></strong></span></p>
     <p id="update-status" class="note" role="status" aria-live="polite"></p>
     <div class="dialog-actions">
       <a id="update-release" target="_blank" rel="noopener noreferrer" hidden>查看更新</a>
@@ -254,6 +254,8 @@
   <script src="scanner.js"></script>
   <script src="extension-state.js"></script>
   <script src="preflight.js"></script>
+  <script src="disk-cache.js"></script>
+  <script src="page-store.js"></script>
   <script src="capture.js"></script>
   <script src="workspace.js"></script>
 </body>

@@ -1,82 +1,132 @@
 /* Generate single-page PDFs, A4 handout PDFs, and JPEG slide ZIP archives. */
-function makePDF(pages, options = {}){
- if(options.layout === 'handout') return makeHandoutPDF(pages);
- const enc=new TextEncoder(),chunks=[],offsets=[0];let length=0;
- const put=x=>{const b=typeof x==='string'?enc.encode(x):x;chunks.push(b);length+=b.length;};
- const obj=(n,body)=>{offsets[n]=length;put(`${n} 0 obj\n`);put(body);put('\nendobj\n');};
- put('%PDF-1.4\n');obj(1,'<< /Type /Catalog /Pages 2 0 R >>');
- obj(2,`<< /Type /Pages /Count ${pages.length} /Kids [${pages.map((_,i)=>`${3+i*3} 0 R`).join(' ')}] >>`);
- pages.forEach((p,i)=>{const n=3+i*3,w=842,h=842*p.h/p.w;
- obj(n,`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${w} ${h}] /Resources << /XObject << /Im0 ${n+1} 0 R >> >> /Contents ${n+2} 0 R >>`);
- const raw=atob(p.data.split(',')[1]),b=Uint8Array.from(raw,c=>c.charCodeAt(0));
- offsets[n+1]=length;put(`${n+1} 0 obj\n<< /Type /XObject /Subtype /Image /Width ${p.w} /Height ${p.h} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${b.length} >>\nstream\n`);put(b);put('\nendstream\nendobj\n');
- const s=`q ${w} 0 0 ${h} 0 0 cm /Im0 Do Q\n`;obj(n+2,`<< /Length ${enc.encode(s).length} >>\nstream\n${s}endstream`);
- });const start=length,total=3+pages.length*3;put(`xref\n0 ${total}\n0000000000 65535 f \n`);for(let n=1;n<total;n++)put(`${String(offsets[n]).padStart(10,'0')} 00000 n \n`);put(`trailer\n<< /Size ${total} /Root 1 0 R >>\nstartxref\n${start}\n%%EOF`);return new Blob(chunks,{type:'application/pdf'});
+function makePDF(pages, options = {}) {
+  return collectExport(pdfParts(pages, options.layout), 'application/pdf');
 }
 
 function makeHandoutPDF(pages) {
-  const enc = new TextEncoder(), chunks = [], offsets = [0];
-  let length = 0, next = 4;
-  const put = value => {
-    const bytes = typeof value === 'string' ? enc.encode(value) : value;
-    chunks.push(bytes); length += bytes.length;
-  };
-  const obj = (n, body) => { offsets[n] = length; put(`${n} 0 obj\n`); put(body); put('\nendobj\n'); };
-  const sheets = Array.from({length: Math.ceil(pages.length / 2)}, (_, i) => {
-    const slides = pages.slice(i * 2, i * 2 + 2), n = next++;
-    return {n, slides, images: slides.map(() => next++), content: next++};
-  });
-  put('%PDF-1.4\n');
-  obj(1, '<< /Type /Catalog /Pages 2 0 R >>');
-  obj(2, `<< /Type /Pages /Count ${sheets.length} /Kids [${sheets.map(sheet => `${sheet.n} 0 R`).join(' ')}] >>`);
-  obj(3, '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>');
-  sheets.forEach((sheet, i) => {
-    obj(sheet.n, `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> /XObject << ${sheet.images.map((n, row) => `/Im${row} ${n} 0 R`).join(' ')} >> >> /Contents ${sheet.content} 0 R >>`);
-    let commands = '';
-    sheet.slides.forEach((p, row) => {
-      const raw = atob(p.data.split(',')[1]), bytes = Uint8Array.from(raw, c => c.charCodeAt(0));
-      const n = sheet.images[row];
-      offsets[n] = length;
-      put(`${n} 0 obj\n<< /Type /XObject /Subtype /Image /Width ${p.w} /Height ${p.h} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${bytes.length} >>\nstream\n`);
-      put(bytes); put('\nendstream\nendobj\n');
-      const scale = Math.min(310 / p.w, 210 / p.h), w = p.w * scale, h = p.h * scale;
-      const bottom = row === 0 ? 526 : 132, x = 40 + (310 - w) / 2, y = bottom + (210 - h) / 2;
-      commands += `q ${w} 0 0 ${h} ${x} ${y} cm /Im${row} Do Q\n0.75 G 0.5 w\n`;
-      for (let line = 0; line < 8; line++) {
-        const y = bottom + 196 - line * 28;
-        commands += `360 ${y} m 555 ${y} l S\n`;
-      }
-      commands += `BT /F1 10 Tf 40 ${bottom - 22} Td (${i * 2 + row + 1}) Tj ET\n`;
-    });
-    commands += `BT /F1 10 Tf 280 24 Td (${i + 1} / ${sheets.length}) Tj ET\n`;
-    obj(sheet.content, `<< /Length ${enc.encode(commands).length} >>\nstream\n${commands}endstream`);
-  });
-  const start = length;
-  put(`xref\n0 ${next}\n0000000000 65535 f \n`);
-  for (let n = 1; n < next; n++) put(`${String(offsets[n]).padStart(10, '0')} 00000 n \n`);
-  put(`trailer\n<< /Size ${next} /Root 1 0 R >>\nstartxref\n${start}\n%%EOF`);
-  return new Blob(chunks, {type: 'application/pdf'});
+  return makePDF(pages, {layout: 'handout'});
 }
 
 function makeZIP(pages) {
+  return collectExport(zipParts(pages), 'application/zip');
+}
+
+async function writePDF(pages, {layout = 'single', readImage, write}) {
+  await writeExport(pdfParts(pages, layout), readImage, write);
+}
+
+async function writeZIP(pages, {readImage, write}) {
+  await writeExport(zipParts(pages), readImage, write);
+}
+
+// Parts are byte chunks or requests for one image; neither generator caches JPEGs.
+function collectExport(parts, type) {
+  const chunks = [];
+  for (let step = parts.next(); !step.done;) {
+    if (step.value instanceof Uint8Array) {
+      chunks.push(step.value);
+      step = parts.next();
+    } else {
+      const {page, maxLength = Infinity} = step.value;
+      const raw = atob(page.data.split(',')[1]);
+      if (raw.length > maxLength) zip32Overflow();
+      step = parts.next(Uint8Array.from(raw, c => c.charCodeAt(0)));
+    }
+  }
+  return new Blob(chunks, {type});
+}
+
+async function writeExport(parts, readImage, write) {
+  try {
+    for (let step = parts.next(); !step.done;) {
+      if (step.value instanceof Uint8Array) {
+        await write(step.value);
+        step = parts.next();
+      } else {
+        step = parts.next(await readImage(step.value.page));
+      }
+    }
+  } finally {
+    parts.return();
+  }
+}
+
+function* pdfParts(pages, layout) {
+  const enc = new TextEncoder(), offsets = [0], handout = layout === 'handout';
+  let length = 0, next = handout ? 4 : 3;
+  function* put(value) {
+    const bytes = typeof value === 'string' ? enc.encode(value) : value;
+    length += bytes.length;
+    yield bytes;
+  }
+  function* obj(n, body) {
+    offsets[n] = length;
+    yield* put(`${n} 0 obj\n`); yield* put(body); yield* put('\nendobj\n');
+  }
+  const perSheet = handout ? 2 : 1;
+  const sheets = Array.from({length: Math.ceil(pages.length / perSheet)}, (_, i) => {
+    const slides = pages.slice(i * perSheet, (i + 1) * perSheet), n = next++;
+    return {n, slides, images: slides.map(() => next++), content: next++};
+  });
+  yield* put('%PDF-1.4\n');
+  yield* obj(1, '<< /Type /Catalog /Pages 2 0 R >>');
+  yield* obj(2, `<< /Type /Pages /Count ${sheets.length} /Kids [${sheets.map(sheet => `${sheet.n} 0 R`).join(' ')}] >>`);
+  if (handout) yield* obj(3, '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>');
+  for (const [i, sheet] of sheets.entries()) {
+    const w = handout ? 595 : 842, h = handout ? 842 : 842 * sheet.slides[0].h / sheet.slides[0].w;
+    const font = handout ? '/Font << /F1 3 0 R >> ' : '';
+    yield* obj(sheet.n, `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${w} ${h}] /Resources << ${font}/XObject << ${sheet.images.map((n, row) => `/Im${row} ${n} 0 R`).join(' ')} >> >> /Contents ${sheet.content} 0 R >>`);
+    let commands = '';
+    for (const [row, p] of sheet.slides.entries()) {
+      let bytes = yield {page: p};
+      const n = sheet.images[row];
+      offsets[n] = length;
+      yield* put(`${n} 0 obj\n<< /Type /XObject /Subtype /Image /Width ${p.w} /Height ${p.h} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${bytes.length} >>\nstream\n`);
+      yield* put(bytes); bytes = null;
+      yield* put('\nendstream\nendobj\n');
+      if (handout) {
+        const scale = Math.min(310 / p.w, 210 / p.h), w = p.w * scale, h = p.h * scale;
+        const bottom = row === 0 ? 526 : 132, x = 40 + (310 - w) / 2, y = bottom + (210 - h) / 2;
+        commands += `q ${w} 0 0 ${h} ${x} ${y} cm /Im${row} Do Q\n0.75 G 0.5 w\n`;
+        for (let line = 0; line < 8; line++) {
+          const y = bottom + 196 - line * 28;
+          commands += `360 ${y} m 555 ${y} l S\n`;
+        }
+        commands += `BT /F1 10 Tf 40 ${bottom - 22} Td (${i * 2 + row + 1}) Tj ET\n`;
+      } else {
+        commands = `q ${w} 0 0 ${h} 0 0 cm /Im0 Do Q\n`;
+      }
+    }
+    if (handout) commands += `BT /F1 10 Tf 280 24 Td (${i + 1} / ${sheets.length}) Tj ET\n`;
+    yield* obj(sheet.content, `<< /Length ${enc.encode(commands).length} >>\nstream\n${commands}endstream`);
+  }
+  const start = length;
+  yield* put(`xref\n0 ${next}\n0000000000 65535 f \n`);
+  for (let n = 1; n < next; n++) yield* put(`${String(offsets[n]).padStart(10, '0')} 00000 n \n`);
+  yield* put(`trailer\n<< /Size ${next} /Root 1 0 R >>\nstartxref\n${start}\n%%EOF`);
+}
+
+function zip32Overflow() {
+  throw new RangeError('ZIP32 limit exceeded');
+}
+
+function* zipParts(pages) {
   const max = 0xffffffff;
-  const overflow = () => { throw new RangeError('ZIP32 limit exceeded'); };
-  if (pages.length > 0xffff) overflow();
-  const enc = new TextEncoder(), chunks = [], directory = [];
+  if (pages.length > 0xffff) zip32Overflow();
+  const enc = new TextEncoder(), directory = [];
   const crcTable = Uint32Array.from({length: 256}, (_, value) => {
     for (let bit = 0; bit < 8; bit++) value = (value >>> 1) ^ ((value & 1) ? 0xedb88320 : 0);
     return value >>> 0;
   });
   let length = 0, directoryLength = 0;
-  pages.forEach((page, i) => {
+  for (const [i, page] of pages.entries()) {
     const time = Number.isFinite(page.sourceTime) ? Math.min(Number.MAX_SAFE_INTEGER, Math.max(0, Math.floor(page.sourceTime))) : 0;
     const clock = [Math.floor(time / 3600), Math.floor(time / 60) % 60, time % 60].map(n => String(n).padStart(2, '0')).join('-');
     const name = enc.encode(`${String(i + 1).padStart(3, '0')}-${clock}.jpg`);
-    const raw = atob(page.data.split(',')[1]);
-    const localLength = 30 + name.length + raw.length;
     directoryLength += 46 + name.length;
-    if (raw.length > max || length + localLength + directoryLength + 22 > max) overflow();
-    const bytes = Uint8Array.from(raw, c => c.charCodeAt(0));
+    let bytes = yield {page, maxLength: max - length - (30 + name.length) - directoryLength - 22};
+    const localLength = 30 + name.length + bytes.length;
+    if (bytes.length > max || length + localLength + directoryLength + 22 > max) zip32Overflow();
     let crc = 0xffffffff;
     for (const byte of bytes) crc = (crc >>> 8) ^ crcTable[(crc ^ byte) & 0xff];
     crc = (crc ^ 0xffffffff) >>> 0;
@@ -100,14 +150,16 @@ function makeZIP(pages) {
     centralView.setUint16(28, name.length, true);
     centralView.setUint32(42, length, true);
     central.set(name, 46);
-    chunks.push(local, bytes); directory.push(central);
+    yield local; yield bytes; bytes = null;
+    directory.push(central);
     length += localLength;
-  });
+  }
   const end = new Uint8Array(22), view = new DataView(end.buffer);
   view.setUint32(0, 0x06054b50, true);
   view.setUint16(8, pages.length, true);
   view.setUint16(10, pages.length, true);
   view.setUint32(12, directoryLength, true);
   view.setUint32(16, length, true);
-  return new Blob([...chunks, ...directory, end], {type: 'application/zip'});
+  yield* directory;
+  yield end;
 }

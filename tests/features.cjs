@@ -5,7 +5,7 @@ const fs = require('node:fs'), path = require('node:path'), os = require('node:o
 const {spawnSync} = require('node:child_process'), {createHash} = require('node:crypto');
 const {dependency, browserOptions} = require('./runtime.cjs');
 const {chromium} = dependency('playwright'), sharp = dependency('sharp');
-const root = path.resolve(__dirname, '..'), reportRoot = path.join(root, '.test-output', 'v2.6.0');
+const root = path.resolve(__dirname, '..'), reportRoot = path.join(root, '.test-output', 'v3.0.0');
 fs.mkdirSync(reportRoot, {recursive: true});
 const output = fs.mkdtempSync(path.join(reportRoot, 'features-'));
 const github = 'https://api.github.com/repos/MeowSaint/XJTU-PPT-Capture-Extension/releases/latest';
@@ -35,7 +35,7 @@ function sources(phase) {
   return ['video.mp4', 'lecture.m3u8', 'login.mp4', 'data.mp4', 'unknown.mp4'].map(name => `${origin}/initial/${name}`);
 }
 function releaseJSON() {
-  const tag = updateMode === 'prerelease' ? 'v9.0.0-beta.1' : updateMode === 'current' ? 'v2.6.0' : 'v2.10.0';
+  const tag = updateMode === 'prerelease' ? 'v9.0.0-beta.1' : updateMode === 'current' ? 'v3.0.0' : 'v3.10.0';
   return {tag_name: tag, draft: false, prerelease: updateMode === 'prerelease', published_at: '2026-11-05T00:00:00Z',
     html_url: `${repository}/releases/tag/${tag}`, assets: [{name: 'ppt-capture.zip', browser_download_url: `${repository}/releases/download/${tag}/ppt-capture.zip`}]};
 }
@@ -86,7 +86,7 @@ async function setup() {
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
   origin = `http://127.0.0.1:${server.address().port}`; alternate = `http://localhost:${server.address().port}`; updateOrigin = `http://updates.test:${server.address().port}`;
   temp = fs.mkdtempSync(path.join(os.tmpdir(), 'ppt-features-')); const ext = path.join(temp, 'extension'); fs.mkdirSync(ext);
-  for (const name of ['manifest.json', 'background.js', 'media.js', 'course.js', 'batch.js', 'page-hook.js', 'content.js', 'capture.html', 'capture.js', 'scanner.js', 'style.css', 'pdf.js', 'extension-state.js', 'preflight.js', 'workspace.js', 'vendor', 'icons']) {
+  for (const name of ['manifest.json', 'background.js', 'media.js', 'course.js', 'batch.js', 'page-hook.js', 'content.js', 'capture.html', 'capture.js', 'page-store.js', 'disk-cache.js', 'scanner.js', 'style.css', 'pdf.js', 'extension-state.js', 'preflight.js', 'workspace.js', 'vendor', 'icons']) {
     fs.cpSync(path.join(root, name), path.join(ext, name), {recursive: true});
     if (fs.statSync(path.join(ext, name)).isFile()) copiedHashes[name] = createHash('sha256').update(fs.readFileSync(path.join(ext, name))).digest('hex');
   }
@@ -129,10 +129,23 @@ async function setup() {
   return fixture;
 }
 async function storedPages() {
-  return worker.evaluate(() => new Promise((resolve, reject) => {
-    const request = indexedDB.open('course-ppt', 2); request.onerror = () => reject(request.error);
-    request.onsuccess = () => { const db = request.result, tx = db.transaction('pages'), read = tx.objectStore('pages').getAll(); tx.oncomplete = () => { db.close(); resolve(read.result); }; tx.onerror = () => reject(tx.error); };
-  }));
+  return worker.evaluate(async () => {
+    const snapshot = await new Promise((resolve, reject) => {
+      const request = indexedDB.open('course-ppt', 3); request.onerror = () => reject(request.error);
+      request.onsuccess = () => {
+        const db = request.result, tx = db.transaction(['pages', 'assets']), pages = tx.objectStore('pages').getAll(), assets = tx.objectStore('assets').getAll();
+        tx.oncomplete = () => { db.close(); resolve({pages: pages.result, assets: assets.result}); }; tx.onerror = () => { db.close(); reject(tx.error); };
+      };
+    });
+    const assets = new Map(snapshot.assets.map(asset => [asset.id, asset]));
+    return Promise.all(snapshot.pages.map(async metadata => {
+      const asset = assets.get(metadata.id);
+      const data = await new Promise((resolve, reject) => {
+        const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = () => reject(reader.error); reader.readAsDataURL(asset.image);
+      });
+      return {...metadata, data, ...(asset.sig === undefined ? {} : {sig: asset.sig})};
+    }));
+  });
 }
 async function openTool() { const page = await context.newPage(); page.setDefaultTimeout(12000); await page.goto(extensionOrigin + '/capture.html'); return page; }
 async function accepted(page) { await page.locator('#terms-agree').check(); await page.locator('#terms-accept').click(); await page.waitForFunction(() => !document.querySelector('.app-shell').inert); }
@@ -255,16 +268,16 @@ async function closeTools() { for (const page of context.pages()) if (page.url()
       await page.locator('#source-show-all').check(); assert.equal(await page.locator('#sources option').evaluateAll(options => options.some(option => option.value.includes('/old/'))), false);
       assert.equal(requests.filter(item => item.path.startsWith('/old/')).length, started, 'cancelled old queue never starts another request'); await page.close();
     });
-    await test('simultaneous tool tabs serialize update GET and claim one 2.10.0 automatic dialog', async () => {
+    await test('simultaneous tool tabs serialize update GET and claim one 3.10.0 automatic dialog', async () => {
       await resetUpdate('available', true); const before = updateRequests.length;
       const tabs = await Promise.all([openTool(), openTool()]); await until(() => pending.update.length === 1, 'held update request not observed');
       holdUpdate = false; release('update'); await Promise.all(tabs.map(tab => tab.waitForFunction(() => document.querySelector('#check-updates').dataset.available === 'true')));
       await until(async () => (await Promise.all(tabs.map(tab => tab.locator('#update-dialog').evaluate(node => node.open)))).filter(Boolean).length === 1, 'expected exactly one automatic update dialog');
       assert.equal(updateRequests.length - before, 1, 'background serial queue shares one cached GET');
       const opened = await Promise.all(tabs.map(tab => tab.locator('#update-dialog').evaluate(node => node.open))); page = tabs[opened.indexOf(true)];
-      assert.equal(await page.locator('#update-current').textContent(), '2.6.0'); assert.equal(await page.locator('#update-version').textContent(), '2.10.0');
-      assert.equal(await page.locator('#update-release').getAttribute('href'), `${repository}/releases/tag/v2.10.0`);
-      assert.equal(await page.locator('#update-download').getAttribute('href'), `${repository}/releases/download/v2.10.0/ppt-capture.zip`);
+      assert.equal(await page.locator('#update-current').textContent(), '3.0.0'); assert.equal(await page.locator('#update-version').textContent(), '3.10.0');
+      assert.equal(await page.locator('#update-release').getAttribute('href'), `${repository}/releases/tag/v3.10.0`);
+      assert.equal(await page.locator('#update-download').getAttribute('href'), `${repository}/releases/download/v3.10.0/ppt-capture.zip`);
       await screenshots(page, 'update', '#update-dialog');
       assert.equal((await Promise.all(tabs.map(tab => tab.locator('#update-dialog').evaluate(node => node.open)))).filter(Boolean).length, 1, 'second tab never opens a duplicate automatic dialog');
       await page.locator('#update-later').click();
@@ -314,7 +327,7 @@ async function closeTools() { for (const page of context.pages()) if (page.url()
     const changedDuringRun = Object.keys(copiedHashes).filter(name => copiedHashes[name] !== finalHashes[name]);
     const report = {status: process.exitCode ? 'fail' : 'pass', scope: process.argv.includes('--focus-diagnostic') ? 'focus diagnostic only' : 'full feature suite', output, transport, copiedHashes, finalHashes, changedDuringRun, permissionTest: 'Only the disposable extension grants localhost; faithful UI contains/request shim exercises an already-granted host without a headless native prompt.', results, counters: {mediaAndAPI: requests.length, updateGET: updateRequests.length, initialPeak}, requests, updateRequests, keyboardTrace, errors, unexpected: [...new Set(unexpected)], failure};
     fs.writeFileSync(path.join(output, 'results.json'), JSON.stringify(report, null, 2));
-    fs.writeFileSync(path.join(reportRoot, 'feature-test-report.md'), `# v2.6.0 independent browser features\n\nStatus: ${report.status}; scope: ${report.scope}\n\nEvidence: ${path.relative(reportRoot, output)}/results.json\n\n${transport}\n\nPermission timing uses a faithful Chrome API stub over an already-granted local test host. All media and retained pages are synthetic local fixtures.\n\n${results.map(result => `- ${result.status.toUpperCase()}: ${result.name}`).join('\n')}\n\nCounters: ${JSON.stringify(report.counters)}\n\nPage errors: ${errors.length}; unexpected external requests: ${report.unexpected.length}.\n${failure ? '\nFailure:\n```\n' + failure + '\n```\n' : ''}`);
+    fs.writeFileSync(path.join(reportRoot, 'feature-test-report.md'), `# v3.0.0 independent browser features\n\nStatus: ${report.status}; scope: ${report.scope}\n\nEvidence: ${path.relative(reportRoot, output)}/results.json\n\n${transport}\n\nPermission timing uses a faithful Chrome API stub over an already-granted local test host. All media and retained pages are synthetic local fixtures.\n\n${results.map(result => `- ${result.status.toUpperCase()}: ${result.name}`).join('\n')}\n\nCounters: ${JSON.stringify(report.counters)}\n\nPage errors: ${errors.length}; unexpected external requests: ${report.unexpected.length}.\n${failure ? '\nFailure:\n```\n' + failure + '\n```\n' : ''}`);
     console.log('Feature evidence: ' + output);
   }
 })();
