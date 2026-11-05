@@ -76,7 +76,7 @@
   async function batchDiscover() {
     if (window !== window.top || !globalThis.PPTBatch) throw Error('批量读取只能在课程列表主页面运行');
     const courseId = PPTBatch.courseId(location.href);
-    if (!courseId) throw Error('请打开形如“课程 / preview-detail”的录像列表页，不要进入某一节录像');
+    if (!courseId) throw Error('请回到这门课的录像列表页，再读取课次');
     const base = `/api/frontend/study-capture-courses/${encodeURIComponent(courseId)}`;
     const scheduleData = await api(`${base}/schedules?in_course_preview=false`), all = PPTBatch.schedules(scheduleData);
     const available = all.filter(PPTBatch.eligible).sort((a, b) => String(a.start_time || a.startTime || '').localeCompare(String(b.start_time || b.startTime || '')));

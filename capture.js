@@ -16,7 +16,7 @@ const dbReady = new Promise((resolve, reject) => {
     if (!request.result.objectStoreNames.contains('settings')) request.result.createObjectStore('settings');
   };
   request.onerror = () => reject(request.error);
-  request.onblocked = () => status('本地存储升级正在等待：请关闭其他旧版截取工具页，再重新打开此工具。');
+  request.onblocked = () => status('请关闭其他截取工具页，再重新打开，完成本地数据升级。');
   request.onsuccess = () => {
     db = request.result;
     const tx = db.transaction(['pages', 'settings']), read = tx.objectStore('pages').getAll(), naming = tx.objectStore('settings').get('exportNaming');
@@ -68,7 +68,7 @@ settingTabs.forEach((tab, index) => {
 });
 function previewName() {
   const name = PPTCourse.filename(namingInfo());
-  $('filename-preview').textContent = name ? `下载文件名：${name}` : '尚未获得完整的课程名称、上课日期和开始时间。请刷新课程页 / 视频列表，或手动补填后下载。';
+  $('filename-preview').textContent = name ? `下载文件名：${name}` : '请补全课程名称、上课日期和开始时间，也可以刷新视频列表自动读取。';
   syncWorkspace();
 }
 function setNaming(info, page) {
@@ -82,7 +82,7 @@ function persistNaming() {
     await dbReady;
     await new Promise((resolve, reject) => {
       const tx = db.transaction('settings', 'readwrite'); tx.objectStore('settings').put(snapshot, 'exportNaming');
-      tx.oncomplete = resolve; tx.onerror = () => reject(tx.error || Error('命名信息事务失败')); tx.onabort = () => reject(tx.error || Error('命名信息事务已取消'));
+      tx.oncomplete = resolve; tx.onerror = () => reject(tx.error || Error('命名信息未能保存')); tx.onabort = () => reject(tx.error || Error('命名信息保存已取消'));
     });
   });
   namingSave.catch(e => status('命名信息保存失败：' + e.message));
@@ -93,7 +93,7 @@ function acceptCourse(info, page) {
   sourceCoursePage = page; sourceCourse = {...sourceCourse, ...PPTCourse.normalize(info)};
   dbReady.then(() => {
     if (sourceCoursePage !== page || reviewBusy || pageWrites || exportBusy) return;
-    // A different selected tab must never rename screenshots already retained.
+    // Keep the naming tied to the course of the retained screenshots.
     if (!namingManual && (!pages.length || pages.every(p => p.coursePage === page))) {
       setNaming(sourceCourse, page); persistNaming();
     }
@@ -110,7 +110,7 @@ async function write(action, value) {
       const tx = db.transaction('pages', 'readwrite'), request = tx.objectStore('pages')[action](value);
       let result;
       request.onsuccess = () => { result = request.result; };
-      tx.oncomplete = () => resolve(result); tx.onerror = () => reject(tx.error || Error('本地存储事务失败或已取消')); tx.onabort = () => reject(tx.error || Error('本地存储事务已取消'));
+      tx.oncomplete = () => resolve(result); tx.onerror = () => reject(tx.error || Error('本地保存失败或已取消')); tx.onabort = () => reject(tx.error || Error('本地保存已取消'));
     });
   } finally { pageWrites--; controls(); }
 }
@@ -120,7 +120,7 @@ async function putPages(values) {
     await new Promise((resolve, reject) => {
       const tx = db.transaction('pages', 'readwrite'), store = tx.objectStore('pages');
       values.forEach(page => store.put(page));
-      tx.oncomplete = resolve; tx.onerror = () => reject(tx.error || Error('本地存储事务失败或已取消')); tx.onabort = () => reject(tx.error || Error('本地存储事务已取消'));
+      tx.oncomplete = resolve; tx.onerror = () => reject(tx.error || Error('本地保存失败或已取消')); tx.onabort = () => reject(tx.error || Error('本地保存已取消'));
     });
   } finally { pageWrites--; controls(); }
 }
@@ -145,7 +145,7 @@ async function reviewTransaction({remove = [], restore = [], naming, clear = fal
     if (clear) store.clear();
     remove.forEach(id => store.delete(id)); restore.forEach(page => store.put(page));
     tx.objectStore('settings').put(naming, 'exportNaming');
-    tx.oncomplete = resolve; tx.onerror = () => reject(tx.error || Error('本地存储事务失败或已取消')); tx.onabort = () => reject(tx.error || Error('本地存储事务已取消'));
+    tx.oncomplete = resolve; tx.onerror = () => reject(tx.error || Error('本地保存失败或已取消')); tx.onabort = () => reject(tx.error || Error('本地保存已取消'));
   });
 }
 async function deletePages(ids) {
@@ -191,7 +191,7 @@ function cleanSimilar() {
     const a = pages[i - 1], b = pages[i];
     if (sameTimeline(a, b) && Number.isFinite(a.sourceTime) && Number.isFinite(b.sourceTime) && a.sourceTime < b.sourceTime && validSignature(a) && validSignature(b) && a.w === b.w && a.h === b.h && a.sig.length === b.sig.length && PPTCore.similar(a.sig, b.sig, threshold)) remove.push(a.id);
   }
-  if (remove.length) deletePages(remove); else status('没有可安全清理的相邻相似页，已保留全部页面。');
+  if (remove.length) deletePages(remove); else status('没有找到需要合并的相邻相似页。');
 }
 function updateSelection() {
   selectedPages = new Set([...selectedPages].filter(id => pages.some(page => page.id === id)));
@@ -206,12 +206,12 @@ function updateSelection() {
 function seekPage(page) {
   if (busy()) return;
   let message = '';
-  if (!sourceReady || stream || !loadedIdentity || !page.sourceKey || !sameTimeline(page, loadedIdentity)) message = '请重新加载这张截图对应的视频后回看，当前视频与截图来源不一致。';
+  if (!sourceReady || stream || !loadedIdentity || !page.sourceKey || !sameTimeline(page, loadedIdentity)) message = '视频与截图来源不一致，请重新加载对应的视频再回看。';
   else if (!Number.isFinite(page.sourceTime) || page.sourceTime < 0 || !Number.isFinite(video.duration) || page.sourceTime > video.duration) message = '这张截图没有可用的视频时间。';
   else {
     let seekable = false;
     for (let i = 0; i < video.seekable.length; i++) if (page.sourceTime >= video.seekable.start(i) && page.sourceTime <= video.seekable.end(i)) seekable = true;
-    if (!seekable) message = '该视频时间暂不可跳转，请等待加载完成后重试。';
+    if (!seekable) message = '这个位置还没加载好，稍等一下再回看。';
     else {
       try { video.pause(); video.currentTime = page.sourceTime; message = `已定位到 ${timecode(page.sourceTime)}。`; }
       catch (e) { message = '视频定位失败：' + e.message; }
@@ -440,8 +440,8 @@ $('release-cache').onclick = async () => {
   task = new AbortController(); controls();
   try {
     await releaseSource(); activeBatchJob = null; if (batchJobs.length) renderBatchJobs();
-    status('已卸载视频并释放本工具持有的视频缓存，截图和命名信息已保留，可继续筛选、下载 PDF。预览或补截请重新加载视频；浏览器自身的网络缓存不受影响。');
-  } catch (e) { status('视频缓存释放失败：' + e.message + '。截图和命名信息未删除，可关闭工具页释放剩余资源。'); }
+    status('已卸载视频，截图和命名信息已保留，可以继续整理和导出。预览或补截时重新加载视频即可。');
+  } catch (e) { status('视频缓存释放失败：' + e.message + '。截图和命名信息还在，可以关闭工具页后重试。'); }
   finally { task = null; controls(); }
 };
 async function setCourseReferrer(origins) {
@@ -468,10 +468,10 @@ function originPattern(url) { const u = new URL(url); return `${u.protocol}//${u
 async function fetchVideo(url, signal) {
   status('正在下载视频到本地缓存，下载后快速扫描…');
   const response = await fetch(url, {credentials: 'include', signal});
-  if (!response.ok) throw Error(`视频服务器返回 HTTP ${response.status}，请刷新课程页重新捕获；若需要网站专用请求头，请下载视频后导入`);
+  if (!response.ok) throw Error(`视频服务器返回 HTTP ${response.status}，请刷新课程页获取新地址，或下载视频后导入`);
   if (/text\/html|application\/json/i.test(response.headers.get('content-type') || '')) throw Error('地址返回登录页或接口数据，不是视频文件');
   const total = Number(response.headers.get('content-length')) || 0, limit = 2 * 1024 ** 3;
-  if (total > limit) { await response.body?.cancel(); throw Error('视频超过 2 GB，请下载后使用“本地视频”导入，避免占用过多内存'); }
+  if (total > limit) { await response.body?.cancel(); throw Error('视频超过 2 GB，请下载后通过“本地视频”导入'); }
   const chunks = [], reader = response.body.getReader(); let received = 0, lastUpdate = 0;
   while (true) {
     const {value, done} = await reader.read(); if (done) break;
@@ -534,7 +534,7 @@ async function loadRemote(raw, options = {}) {
       pendingOrigins = []; status('正在检查 HLS 播放列表与分片域名…');
       await inspectPlaylist(info.url, controller.signal);
       pendingOrigins = [...new Set(pendingOrigins)];
-      if (pendingOrigins.length) throw Error(`分片还需要访问 ${pendingOrigins.join('、')}。请再次点击“加载”授权这些域名`);
+      if (pendingOrigins.length) throw Error(`视频分片还需要访问 ${pendingOrigins.join('、')}，再点一次加载按钮即可授权`);
       if (!window.Hls?.isSupported()) throw Error('当前浏览器不支持 HLS 解码，请导入本地 MP4');
       hls = new Hls({enableWorker: false, maxBufferLength: 8, maxMaxBufferLength: 15, backBufferLength: 0, xhrSetup: xhr => { xhr.withCredentials = true; }});
       hls.on(Hls.Events.ERROR, (_, data) => { if (data.fatal) { (task || controller).abort(Error('HLS 加载失败：' + data.details + '，请检查分片域名权限或导入本地 MP4')); } });
@@ -577,7 +577,7 @@ function downloadBlob(blob, name) {
 function downloadPDF(list, course, layout = 'single') {
   if (!list.length) throw Error('还没有截图');
   const name = PPTCourse.filename(course);
-  if (!name) throw Error('请先补填课程名称、有效的上课日期和开始时间，再下载 PDF');
+  if (!name) throw Error('请先补填课程名称、上课日期和开始时间，并检查填写是否正确，再下载 PDF');
   downloadBlob(makePDF(list, {layout}), name);
 }
 function exportPDF() { downloadPDF(pages, namingInfo(), $('pdf-layout').value); }
@@ -592,11 +592,11 @@ async function exportRetained(kind) {
       const missing = ['course-name', 'course-date', 'course-start'].find(id => !$(id).value) || 'course-name';
       // Focus after the export guard releases disabled naming fields.
       exportBusy = false; controls(); $(missing).focus();
-      throw Error('请先补填课程名称、有效的上课日期和开始时间，再下载');
+      throw Error('请先补填课程名称、上课日期和开始时间，并检查填写是否正确，再下载');
     }
     if (kind === 'zip') downloadBlob(makeZIP(pages), name.replace(/\.pdf$/i, '-slides.zip'));
     else exportPDF();
-    status(`已生成全部 ${pages.length} 页的${kind === 'zip' ? '图片包' : $('pdf-layout').value === 'handout' ? '笔记讲义 PDF' : 'PDF'}，下载由浏览器处理。`);
+    status(`已生成全部 ${pages.length} 页的${kind === 'zip' ? '图片包' : $('pdf-layout').value === 'handout' ? '笔记讲义 PDF' : 'PDF'}。`);
   } catch (e) { status('导出失败：' + e.message); }
   finally { exportBusy = false; controls(); }
 }
@@ -614,9 +614,9 @@ async function fastScan() {
       previous: pages.filter(page => !activeBatchJob || page.batchJobId === activeBatchJob.id).map(p => p.sig),
       progress: p => { $('progress').value = p.ratio; status(`扫描 ${timecode(p.time)} / ${timecode(p.duration)} · ${(p.ratio * 100).toFixed(1)}% · 新增 ${p.saved} 页 · 耗时 ${((performance.now() - started) / 1000).toFixed(1)} 秒`); }
     });
-    status(`提取完成：新增 ${result.saved} 页，共 ${pages.length} 页，耗时 ${((performance.now() - started) / 1000).toFixed(1)} 秒。${result.unstable ? `跳过 ${result.unstable} 个不稳定画面；可用细查模式复核。` : ''}\n请先筛选页面，删除不需要的截图，再点击“下载 PDF”。`);
+    status(`提取完成：新增 ${result.saved} 页，共 ${pages.length} 页，耗时 ${((performance.now() - started) / 1000).toFixed(1)} 秒。${result.unstable ? `跳过 ${result.unstable} 个不稳定画面；可用细查模式复核。` : ''}\n请先筛选页面，再下载 PDF 或图片包。`);
     outcome = result;
-  } catch (e) { status(e.name === 'AbortError' ? `已停止，保留新增 ${pages.length - before} 页。请先筛选页面，再手动下载 PDF；再次开始将从头扫描并按设置去重。` : '扫描中断，已有截图已保留：' + e.message); }
+  } catch (e) { status(e.name === 'AbortError' ? `已停止，保留新增 ${pages.length - before} 页。可以先整理并导出；再次开始会从头扫描，并按设置去重。` : '扫描中断，已有截图已保留：' + e.message); }
   finally {
     task = null; video.pause();
     if (manualJob) {
@@ -704,7 +704,7 @@ async function prepareManualBatchJob(job, permission) {
     const loaded = await loadRemote(job.url, {permissionGranted: true, sourceName: job.sourceName, batchJob: job});
     if (!loaded) throw Error($('status').textContent || '视频加载失败');
     job.state = 'manual'; job.cropConfirmed = false; cropEditing = true; renderBatchJobs(); controls(); draw();
-    const prompt = '本节没有 2 路 PPT 视频，已加载 0 路视频。请在预览画面中拖动框选 PPT 区域，然后选择采样模式并点击“开始快速提取”。';
+    const prompt = '本节只有 0 路视频。请在预览中框选 PPT 区域，再点击“开始快速提取”。';
     status(prompt); $('batch-status').textContent = prompt;
   } catch (error) {
     job.state = batchPageCount(job) ? 'partial' : 'failed'; job.error = error.message;
@@ -772,7 +772,7 @@ $('run').onclick = () => {
   if (busy()) return;
   if (activeBatchJob?.requiresCrop && !activeBatchJob.cropConfirmed) {
     cropEditing = true; controls(); draw();
-    const prompt = '请先在 0 路视频画面中拖动框选 PPT 区域；若 PPT 占满画面，可明确点击“使用完整画面”。';
+    const prompt = '请先在 0 路视频画面中框选 PPT 区域；PPT 已占满画面时，点击“使用完整画面”即可。';
     status(prompt); $('batch-status').textContent = prompt; return;
   }
   if (stream) { realtimeTimer = setInterval(realTick, 350); controls(); status('正在实时截取，请保持课程视频播放。'); }
@@ -862,7 +862,7 @@ async function discover() {
     if (courseReply?.page === coursePage) acceptCourse(courseReply.course, coursePage);
     if (discovered?.page === coursePage) acceptCourse(discovered.course, coursePage);
     updateSources();
-    $('source-status').textContent = sources.length ? `已发现 ${sources.length} 个视频地址，请自行筛选后加载。地址只保留到浏览器会话结束。` : '尚未发现视频地址，请刷新课程页并播放视频，然后再点刷新视频列表。';
+    $('source-status').textContent = sources.length ? `已发现 ${sources.length} 个视频地址，选好后点击“加载选中视频”。` : '还没找到视频。请刷新课程页并播放一次，再点“刷新视频列表”。';
     if (PPTBatch.courseId(coursePage) && batchPage !== coursePage) await discoverBatch(id, true);
   } catch (e) { $('source-status').textContent = '发现视频失败：' + e.message + '。请刷新课程页，或使用手动地址 / 本地视频。'; }
 }
@@ -883,7 +883,7 @@ function updateSources() {
 $('discover').onclick = discover; $('course').onchange = discover; $('sources').onchange = controls; $('mode').onchange = syncWorkspace;
 if (window.chrome?.storage?.onChanged) chrome.storage.onChanged.addListener((changes, area) => {
   const value = changes['media-' + $('course').value]?.newValue;
-  if (area === 'session' && value?.page === coursePage) { sources = value.items; acceptCourse(value.course, value.page); updateSources(); $('source-status').textContent = `已发现 ${sources.length} 个视频地址，请自行筛选后加载。`; }
+  if (area === 'session' && value?.page === coursePage) { sources = value.items; acceptCourse(value.course, value.page); updateSources(); $('source-status').textContent = `已发现 ${sources.length} 个视频地址，选好后点击“加载选中视频”。`; }
 });
 controls(); previewName(); discover();
 window.addEventListener('beforeunload', event => { if (task || realtimeTimer) { event.preventDefault(); event.returnValue = ''; } });
