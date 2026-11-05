@@ -19,7 +19,9 @@
 >
 > **禁止将本扩展提取所得的课件、截图、PDF 或其他课程资料用于商业用途。**
 >
-> 使用本扩展，即表示你已阅读并同意以上使用约定。祝大家学习进步，复习顺利！
+> 以上约定针对课程资料的获取与使用；项目代码按 [MIT 许可证](LICENSE) 授权。
+>
+> 使用本扩展获取或整理课程资料，即表示你已阅读并同意以上使用约定。祝大家学习进步，复习顺利！
 
 ## 推荐浏览器
 
@@ -243,6 +245,10 @@ pwsh -NoProfile -File tests/release.ps1
 - **2.4.0**：支持整门课排队提取、逐节导出，以及 `0-` 视频的手动框选。
 - **2.3.1**：支持拖动排序，细查新增页面按时间插回原序列。
 
-## 第三方许可
+## 许可证与资料版权
 
-hls.js 1.6.13 使用 Apache-2.0 许可；浏览器 SVG 来自 [browser-logos](https://github.com/alrra/browser-logos)。具体来源和许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。项目自有代码暂未指定开源许可证。
+项目自有代码采用 [MIT 许可证](LICENSE)，版权所有者为 MeowSaint 及贡献者。你可以使用、修改和分发代码，包括商业使用；分发时请保留版权声明和许可证全文。
+
+课程视频、课件和提取出的截图、PDF 等资料仍归授课教师及其他相应权利人所有。请遵守文首的学习用途约定，**禁止将提取所得的课程资料用于商业用途**。
+
+hls.js 1.6.13 使用 Apache-2.0 许可；浏览器 SVG 来自 [browser-logos](https://github.com/alrra/browser-logos)。具体来源和许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

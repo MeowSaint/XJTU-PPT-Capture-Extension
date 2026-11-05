@@ -5,7 +5,7 @@ $project = Split-Path -Parent $PSScriptRoot
 $fixture = Join-Path $project ('.test-output/release-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $fixture -Force | Out-Null
 foreach ($file in Get-ChildItem -LiteralPath $project -File) {
-  if ($file.Extension -in @('.js', '.json', '.html', '.css', '.md', '.txt')) { Copy-Item -LiteralPath $file.FullName -Destination $fixture }
+  if ($file.Name -eq 'LICENSE' -or $file.Extension -in @('.js', '.json', '.html', '.css', '.md', '.txt')) { Copy-Item -LiteralPath $file.FullName -Destination $fixture }
 }
 Copy-Item -LiteralPath (Join-Path $project 'vendor') -Destination $fixture -Recurse
 Copy-Item -LiteralPath (Join-Path $project 'icons') -Destination $fixture -Recurse
@@ -42,7 +42,13 @@ $zip = [System.IO.Compression.ZipFile]::OpenRead($latest)
 try {
   $reader = New-Object System.IO.StreamReader($zip.GetEntry('manifest.json').Open())
   try { $version = ($reader.ReadToEnd() | ConvertFrom-Json).version } finally { $reader.Dispose() }
-  if ($version -ne '2.4.0' -or $zip.Entries.Count -ne 24 -or -not $zip.GetEntry('course.js') -or -not $zip.GetEntry('batch.js') -or -not $zip.GetEntry('README.md')) { throw 'Latest package has wrong contents' }
+  if ($version -ne '2.4.0' -or $zip.Entries.Count -ne 25 -or -not $zip.GetEntry('course.js') -or -not $zip.GetEntry('batch.js') -or -not $zip.GetEntry('README.md')) { throw 'Latest package has wrong contents' }
+  $license = $zip.GetEntry('LICENSE')
+  if (-not $license) { throw 'Latest package is missing project license' }
+  $reader = New-Object System.IO.StreamReader($license.Open())
+  try { $packagedLicense = $reader.ReadToEnd() } finally { $reader.Dispose() }
+  $sourceLicense = Get-Content -LiteralPath (Join-Path $project 'LICENSE') -Raw -Encoding UTF8
+  if ($packagedLicense -cne $sourceLicense) { throw 'Packaged project license differs from source' }
   foreach ($size in @(16, 32, 48, 128)) {
     if (-not $zip.GetEntry("icons/icon-$size.png")) { throw "Latest package is missing icon-$size.png" }
   }
