@@ -1,6 +1,6 @@
 {
   "name": "xjtu-ppt-capture-extension",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "license": "MIT",
   "private": true,
   "description": "Browser extension for capturing slides from XJTU lecture videos and exporting PDFs or image archives.",

@@ -16,8 +16,7 @@
     const locked = busy();
     el('preflight-authorize').disabled = locked || !items.length;
     el('source-show-all').disabled = locked;
-    el('check-updates').disabled = locked || !ready || checkingUpdate;
-    el('terms-open').disabled = locked;
+    el('check-updates').disabled = !studyAccepted || checkingUpdate;
   }
   function renderSources() {
     const select = el('sources'), selected = select.value;
@@ -119,7 +118,7 @@
       ? PPTState.checkForUpdate(currentVersion, {storage, force: message.force})
       : PPTState.claimNotification(message.version, storage);
   }
-  function canShowUpdate() { return studyAccepted && ready && !busy() && !document.querySelector('dialog[open]'); }
+  function canShowUpdate(manual) { return studyAccepted && (manual || (ready && !busy())) && !document.querySelector('dialog[open]'); }
   async function checkUpdate(manual) {
     if (!studyAccepted || checkingUpdate) return;
     checkingUpdate = true; syncControls();
@@ -128,9 +127,9 @@
       const available = result?.status === 'available' && result.release;
       el('check-updates').dataset.available = String(!!available);
       el('check-updates').textContent = available ? '发现新版' : '检查更新';
-      if (!canShowUpdate() || (!manual && !available)) return;
+      if (!canShowUpdate(manual) || (!manual && !available)) return;
       if (!manual && !await updateMessage({type: 'PPT_CLAIM_UPDATE', version: result.release.version})) return;
-      if (!canShowUpdate()) return;
+      if (!canShowUpdate(manual)) return;
       el('update-current').textContent = currentVersion;
       el('update-available').hidden = !available;
       el('update-version').textContent = available ? result.release.version : '';

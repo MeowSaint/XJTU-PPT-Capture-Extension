@@ -5,7 +5,7 @@ const fs = require('node:fs'), path = require('node:path'), os = require('node:o
 const {spawnSync} = require('node:child_process'), {createHash} = require('node:crypto');
 const {dependency, browserOptions} = require('./runtime.cjs');
 const {chromium} = dependency('playwright'), sharp = dependency('sharp');
-const root = path.resolve(__dirname, '..'), reportRoot = path.join(root, '.test-output', 'v3.0.0');
+const root = path.resolve(__dirname, '..'), reportRoot = path.join(root, '.test-output', 'v3.0.1');
 fs.mkdirSync(reportRoot, {recursive: true});
 const output = fs.mkdtempSync(path.join(reportRoot, 'features-'));
 const github = 'https://api.github.com/repos/MeowSaint/XJTU-PPT-Capture-Extension/releases/latest';
@@ -35,7 +35,7 @@ function sources(phase) {
   return ['video.mp4', 'lecture.m3u8', 'login.mp4', 'data.mp4', 'unknown.mp4'].map(name => `${origin}/initial/${name}`);
 }
 function releaseJSON() {
-  const tag = updateMode === 'prerelease' ? 'v9.0.0-beta.1' : updateMode === 'current' ? 'v3.0.0' : 'v3.10.0';
+  const tag = updateMode === 'prerelease' ? 'v9.0.0-beta.1' : updateMode === 'current' ? 'v3.0.1' : 'v3.10.0';
   return {tag_name: tag, draft: false, prerelease: updateMode === 'prerelease', published_at: '2026-11-05T00:00:00Z',
     html_url: `${repository}/releases/tag/${tag}`, assets: [{name: 'ppt-capture.zip', browser_download_url: `${repository}/releases/download/${tag}/ppt-capture.zip`}]};
 }
@@ -275,7 +275,7 @@ async function closeTools() { for (const page of context.pages()) if (page.url()
       await until(async () => (await Promise.all(tabs.map(tab => tab.locator('#update-dialog').evaluate(node => node.open)))).filter(Boolean).length === 1, 'expected exactly one automatic update dialog');
       assert.equal(updateRequests.length - before, 1, 'background serial queue shares one cached GET');
       const opened = await Promise.all(tabs.map(tab => tab.locator('#update-dialog').evaluate(node => node.open))); page = tabs[opened.indexOf(true)];
-      assert.equal(await page.locator('#update-current').textContent(), '3.0.0'); assert.equal(await page.locator('#update-version').textContent(), '3.10.0');
+      assert.equal(await page.locator('#update-current').textContent(), '3.0.1'); assert.equal(await page.locator('#update-version').textContent(), '3.10.0');
       assert.equal(await page.locator('#update-release').getAttribute('href'), `${repository}/releases/tag/v3.10.0`);
       assert.equal(await page.locator('#update-download').getAttribute('href'), `${repository}/releases/download/v3.10.0/ppt-capture.zip`);
       await screenshots(page, 'update', '#update-dialog');
@@ -298,6 +298,46 @@ async function closeTools() { for (const page of context.pages()) if (page.url()
         else { holdLoad = false; release('load'); await page.waitForFunction(() => !document.querySelector('#run').disabled); }
         assert.equal(await page.locator('#update-dialog').evaluate(node => node.open), false, 'finishing work must not cause a surprise dialog'); await page.close();
       }
+    });
+    await test('manual update and read-only terms remain usable during a real remote load', async () => {
+      await resetUpdate('current'); page = await openTool();
+      await page.waitForFunction(() => !document.querySelector('#check-updates').disabled);
+      holdLoad = true; await page.locator('summary').filter({hasText: '手动视频地址'}).click();
+      await page.locator('#url').fill(origin + '/slow-load.mp4'); await page.locator('#load-url').click();
+      await until(() => pending.load.length === 1, 'real slow media load did not start');
+      assert.equal(await page.locator('#terms-open').isEnabled(), true, 'reading terms must not depend on an extraction task');
+      assert.equal(await page.locator('#check-updates').isEnabled(), true, 'manual update must not depend on an extraction task');
+      await page.locator('#terms-open').click(); await page.locator('#terms-dialog[open]').waitFor();
+      assert.equal(await page.locator('#terms-accept').isVisible(), false, 'accepted terms reopen read-only');
+      await page.screenshot({path: path.join(output, 'terms-during-load.png')});
+      await page.locator('#terms-decline').click();
+      updateMode = 'available'; holdUpdate = true;
+      await page.locator('#check-updates').click(); await until(() => pending.update.length === 1, 'manual update GET did not start');
+      assert.equal(await page.locator('#check-updates').isDisabled(), true, 'only the duplicate update request is disabled');
+      assert.equal(await page.locator('#terms-open').isEnabled(), true);
+      holdUpdate = false; release('update'); await page.locator('#update-dialog[open]').waitFor();
+      assert.equal(await page.locator('#update-version').textContent(), '3.10.0', 'manual results must open while extraction is busy');
+      assert.equal(pending.load.length, 1, 'viewing dialogs does not cancel the media load');
+      await page.screenshot({path: path.join(output, 'manual-update-during-load.png')});
+      await page.locator('#update-later').click(); assert.equal(await page.locator('#stop').isEnabled(), true);
+      holdLoad = false; release('load'); await page.waitForFunction(() => !document.querySelector('#run').disabled);
+      assert.deepEqual(await storedPages(), [retained]); await page.close();
+    });
+    await test('terms and manual update do not require screenshot storage to initialize', async () => {
+      await resetUpdate('current'); page = await context.newPage(); page.setDefaultTimeout(12000);
+      await page.addInitScript(() => {
+        const open = indexedDB.open.bind(indexedDB);
+        indexedDB.open = (name, ...args) => { if (name === 'course-ppt') throw new DOMException('Synthetic storage unavailable', 'UnknownError'); return open(name, ...args); };
+      });
+      await page.goto(extensionOrigin + '/capture.html');
+      await page.waitForFunction(() => !document.querySelector('.app-shell').inert && document.querySelector('#status').textContent.includes('Synthetic storage unavailable'));
+      assert.equal(await page.locator('#terms-open').isEnabled(), true);
+      await page.locator('#terms-open').click(); await page.locator('#terms-dialog[open]').waitFor(); await page.locator('#terms-decline').click();
+      assert.equal(await page.locator('#check-updates').isEnabled(), true);
+      await page.locator('#check-updates').click(); await page.locator('#update-dialog[open]').waitFor();
+      assert.match(await page.locator('#update-status').textContent(), /最新/);
+      assert.equal(await page.locator('#run').isDisabled(), true, 'capture still requires its database');
+      await page.close();
     });
     await test('prerelease ignored; offline automatic check stays quiet and local extraction remains usable', async () => {
       await resetUpdate('prerelease'); page = await openTool(); await page.waitForFunction(() => !document.querySelector('#check-updates').disabled);
@@ -327,7 +367,7 @@ async function closeTools() { for (const page of context.pages()) if (page.url()
     const changedDuringRun = Object.keys(copiedHashes).filter(name => copiedHashes[name] !== finalHashes[name]);
     const report = {status: process.exitCode ? 'fail' : 'pass', scope: process.argv.includes('--focus-diagnostic') ? 'focus diagnostic only' : 'full feature suite', output, transport, copiedHashes, finalHashes, changedDuringRun, permissionTest: 'Only the disposable extension grants localhost; faithful UI contains/request shim exercises an already-granted host without a headless native prompt.', results, counters: {mediaAndAPI: requests.length, updateGET: updateRequests.length, initialPeak}, requests, updateRequests, keyboardTrace, errors, unexpected: [...new Set(unexpected)], failure};
     fs.writeFileSync(path.join(output, 'results.json'), JSON.stringify(report, null, 2));
-    fs.writeFileSync(path.join(reportRoot, 'feature-test-report.md'), `# v3.0.0 independent browser features\n\nStatus: ${report.status}; scope: ${report.scope}\n\nEvidence: ${path.relative(reportRoot, output)}/results.json\n\n${transport}\n\nPermission timing uses a faithful Chrome API stub over an already-granted local test host. All media and retained pages are synthetic local fixtures.\n\n${results.map(result => `- ${result.status.toUpperCase()}: ${result.name}`).join('\n')}\n\nCounters: ${JSON.stringify(report.counters)}\n\nPage errors: ${errors.length}; unexpected external requests: ${report.unexpected.length}.\n${failure ? '\nFailure:\n```\n' + failure + '\n```\n' : ''}`);
+    fs.writeFileSync(path.join(reportRoot, 'feature-test-report.md'), `# v3.0.1 independent browser features\n\nStatus: ${report.status}; scope: ${report.scope}\n\nEvidence: ${path.relative(reportRoot, output)}/results.json\n\n${transport}\n\nPermission timing uses a faithful Chrome API stub over an already-granted local test host. All media and retained pages are synthetic local fixtures.\n\n${results.map(result => `- ${result.status.toUpperCase()}: ${result.name}`).join('\n')}\n\nCounters: ${JSON.stringify(report.counters)}\n\nPage errors: ${errors.length}; unexpected external requests: ${report.unexpected.length}.\n${failure ? '\nFailure:\n```\n' + failure + '\n```\n' : ''}`);
     console.log('Feature evidence: ' + output);
   }
 })();
