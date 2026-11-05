@@ -6,7 +6,7 @@
   const valid = (kind, reason) => ({status: 'valid', kind, reason});
   const aborted = () => new DOMException('已取消视频预检', 'AbortError');
 
-  function classify(bytes, contentType) {
+  function classify(bytes) {
     if (!bytes.length) return unknown('响应内容为空，暂时无法确认');
     const text = new TextDecoder().decode(bytes).trimStart();
     if (/^<(?:!doctype\s+html\b|html\b|head\b|body\b|form\b|input\b|script\b|title\b|meta\b|div\b|p\b|!--)/i.test(text)) {
@@ -24,9 +24,6 @@
       return valid('webm', '已识别 WebM 文件头');
     }
     if (/^#EXTM3U(?:\r?\n|$)/.test(text)) return valid('m3u8', '已识别播放列表，分片仍需加载确认');
-    const mime = contentType.split(';')[0].trim().toLowerCase();
-    if (mime === 'text/html' || mime === 'application/xhtml+xml') return invalid('地址返回了网页，可能需要重新登录');
-    if (/^(?:application|text)\/(?:[\w.-]+\+)?json$/.test(mime)) return invalid('地址返回了接口数据，并非视频');
     return unknown('暂未识别视频格式，可手动加载确认');
   }
 
@@ -59,7 +56,7 @@
         length += part.byteLength;
       }
       if (timedOut) return unknown('视频预检超时，可稍后重试或手动加载');
-      return classify(bytes.subarray(0, length), response.headers.get('Content-Type') || '');
+      return classify(bytes.subarray(0, length));
     } catch {
       if (signal?.aborted) throw aborted();
       return unknown(timedOut ? '视频预检超时，可稍后重试或手动加载' : '暂时无法访问该地址，可稍后重试或手动加载');

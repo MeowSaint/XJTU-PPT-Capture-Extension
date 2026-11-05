@@ -83,6 +83,7 @@ test('uses real Range GET headers, included credentials, and byte signatures', a
   const fixtures = {
     '/video.mp4': {body: MP4, type: 'application/octet-stream', status: 206, kind: 'mp4'},
     '/download': {body: WEBM, type: 'application/octet-stream', kind: 'webm'},
+    '/wrong-mime': {body: MP4, type: 'text/html', kind: 'mp4'},
     '/playlist': {body: HLS, type: 'application/vnd.apple.mpegurl', kind: 'm3u8'},
     '/hls-as-binary': {body: '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000\nchild.m3u8\n', type: 'application/octet-stream', kind: 'm3u8'}
   };
@@ -105,7 +106,7 @@ test('uses real Range GET headers, included credentials, and byte signatures', a
       }}), 'valid', fixture.kind);
     });
   }
-  assert.equal(requests.length, 4);
+  assert.equal(requests.length, 5);
   assert.ok(requests.every(req => req.method === 'GET' && req.range === 'bytes=0-65535'));
   assert.ok(options.every(init => init.credentials === 'include' && init.signal instanceof AbortSignal));
 });
@@ -121,6 +122,8 @@ test('rejects explicit HTML/JSON despite video MIME or filenames; unsupported by
     {body: '{"message":"' + '登录'.repeat(40000), type: 'video/mp4', status: 'invalid'},
     {body: UNKNOWN, type: 'video/mp4', status: 'unknown'},
     {body: UNKNOWN, type: 'application/octet-stream', status: 'unknown'},
+    {body: UNKNOWN, type: 'text/html', status: 'unknown'},
+    {body: UNKNOWN, type: 'application/json', status: 'unknown'},
     {body: '', type: 'video/mp4', status: 'unknown'},
     {body: '#EXTM3U-not-a-playlist', type: 'application/vnd.apple.mpegurl', status: 'unknown'},
     {body: '<MPD><Period/></MPD>', type: 'application/dash+xml', status: 'unknown'}
