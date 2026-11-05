@@ -22,10 +22,10 @@ async function main() {
       await frame.evaluate(videoURL => {
         window.__testMessages = [];
         const saved = {};
-        Object.defineProperty(window, 'chrome', {configurable: true, value: {
+        Object.assign(window.chrome || (window.chrome = {}), {
           storage: {local: {get: async key => ({[key]: saved[key]}), set: async values => { Object.assign(saved, values); }}},
           runtime: {id: 'bridge-test', sendMessage: async message => { window.__testMessages.push(message); }, onMessage: {addListener: listener => { window.__testDiscover = listener; }}}
-        }});
+        });
         window.fetch = async () => new Response(JSON.stringify({data: {video: videoURL}}), {headers: {'content-type': 'application/json'}});
       }, video);
       for (const script of ['media.js', 'course.js', 'page-hook.js', 'extension-state.js']) await frame.addScriptTag({content: fs.readFileSync(path.join(root, script), 'utf8')});
@@ -79,15 +79,12 @@ async function main() {
       await lessonPage.evaluate(() => {
         window.__testMessages = [];
         const saved = {};
-        Object.defineProperty(window, 'chrome', {
-          configurable: true,
-          value: {
-            storage: {local: {get: async key => ({[key]: saved[key]}), set: async values => { Object.assign(saved, values); }}},
-            runtime: {
-              id: 'bridge-test',
-              sendMessage: async message => { window.__testMessages.push(message); },
-              onMessage: {addListener: listener => { window.__testDiscover = listener; }}
-            }
+        Object.assign(window.chrome || (window.chrome = {}), {
+          storage: {local: {get: async key => ({[key]: saved[key]}), set: async values => { Object.assign(saved, values); }}},
+          runtime: {
+            id: 'bridge-test',
+            sendMessage: async message => { window.__testMessages.push(message); },
+            onMessage: {addListener: listener => { window.__testDiscover = listener; }}
           }
         });
       });
