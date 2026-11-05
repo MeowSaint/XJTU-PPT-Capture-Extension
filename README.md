@@ -215,23 +215,25 @@ npm run test:integration
 | `icons/` | 扩展图标和 README 使用的浏览器图标 |
 | `vendor/` | 随扩展提供的 HLS 库和许可 |
 | `tests/` | 核心、消息通信、校对、导出和完整提取测试 |
-| `scripts/release.ps1` | 打包最新版并归档旧包 |
+| `scripts/release.cjs` | 跨平台打包最新版并归档旧包 |
 
 ### 打包与归档
 
-打包脚本使用 PowerShell。Windows 可直接运行：
+打包和归档测试只需要 **Node.js 20+**。在仓库根目录打开终端，Windows、macOS 的 Bash / Zsh 和 Linux Shell 都执行同样的命令：
 
 ```sh
 npm run release
 npm run test:release
 ```
 
-macOS 和 Linux 安装 [PowerShell 7](https://learn.microsoft.com/powershell/scripting/install/installing-powershell) 后运行以下命令；Windows 安装 PowerShell 7 后也可以这样运行：
+也可以直接调用 Node：
 
 ```sh
-pwsh -NoProfile -File scripts/release.ps1
-pwsh -NoProfile -File tests/release.ps1
+node scripts/release.cjs
+node --test tests/release.test.cjs
 ```
+
+这两项操作使用 Node 自带的模块，不需要安装 npm 开发依赖或 PowerShell。
 
 打包后，根目录会生成 `ppt-capture.zip`，旧 ZIP 移到 `last-release/`。固定名称的旧包会按其版本改名；同名历史包加时间戳和序号保存。生成的扩展包可在 Windows、macOS 和 Linux 上安装。
 

@@ -10,13 +10,13 @@
 | `npm run test:review` | 开发依赖、FFmpeg、Chromium | 页面校对、撤销、回看、导出和桌面布局 |
 | `npm run test:bridge` | 开发依赖、Chromium | iframe 中的视频地址消息通信 |
 | `npm run test:integration` | 开发依赖、Chromium、FFmpeg、Poppler | 从发现视频到生成 PDF 的完整流程 |
-| `npm run test:release`（Windows）或 `pwsh -NoProfile -File tests/release.ps1` | Windows PowerShell 或 PowerShell 7 | 文件清单、打包和历史版本归档 |
+| `npm run test:release` | Node.js 20+ | 文件清单、完整许可证、打包和历史版本归档 |
 
 开发测试可在 Windows、macOS 和 Linux 上运行。先运行 `npm install` 安装开发依赖；Windows 默认可用已安装的 Edge，macOS 和 Linux 先运行 `npx playwright install chromium`。`pdftoppm` 需能从 PATH 调用。
 
 `PPT_TEST_BROWSER` 可指定浏览器可执行文件，完整集成测试需要浏览器支持加载解压扩展；`PPT_TEST_NODE_MODULES` 可指定已有依赖目录。
 
-macOS 和 Linux 的打包测试需要先安装 PowerShell 7，再运行 `pwsh -NoProfile -File tests/release.ps1`。Windows 也可以使用这条 PowerShell 7 命令。
+打包测试只需要 Node.js 20+，可以直接在 Bash、Zsh 或 Windows 终端中运行 `npm run test:release`，也可以运行 `node --test tests/release.test.cjs`。它使用 Node 自带的模块，无须安装开发依赖或 PowerShell。
 
 ## 覆盖内容
 
