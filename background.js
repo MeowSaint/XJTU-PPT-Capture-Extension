@@ -1,6 +1,6 @@
-importScripts('media.js', 'course.js');
+importScripts('media.js', 'course.js', 'extension-state.js');
 const courseOrigin = 'https://rms-v5.xjtu.edu.cn';
-let queue = Promise.resolve();
+let queue = Promise.resolve(), updateQueue = Promise.resolve();
 async function updateBadge(tabId, count) {
   const update = (method, details) => new Promise(resolve => {
     try {
@@ -54,6 +54,14 @@ chrome.webRequest.onBeforeRequest.addListener(details => {
   if (details.tabId >= 0 && PPTCore.mediaInfo(details.url)) remember(details.tabId, [details.url], '网络请求').catch(() => {});
 }, {urls: ['http://*/*', 'https://*/*']});
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
+  if (message.type === 'PPT_CHECK_UPDATE' || message.type === 'PPT_CLAIM_UPDATE') {
+    if (sender.id !== chrome.runtime.id || sender.url?.split(/[?#]/)[0] !== chrome.runtime.getURL('capture.html')) return;
+    updateQueue = updateQueue.catch(() => {}).then(() => message.type === 'PPT_CHECK_UPDATE'
+      ? PPTState.checkForUpdate(chrome.runtime.getManifest().version, {force: message.force === true})
+      : PPTState.claimNotification(message.version));
+    updateQueue.then(respond, () => respond({status: 'error', release: null, cached: false}));
+    return true;
+  }
   if (message.type === 'PPT_COURSE') {
     if (!sender.tab || sender.frameId !== 0 || sender.url !== message.page || !sender.url?.startsWith(courseOrigin + '/')) return;
     remember(sender.tab.id, [], '', message.course, message.page).then(() => respond({ok: true}), () => respond({ok: false}));
