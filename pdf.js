@@ -1,4 +1,4 @@
-/* Standalone JPEG PDF and ZIP writers; no remote dependencies. */
+/* Generate single-page PDFs, A4 handout PDFs, and JPEG slide ZIP archives. */
 function makePDF(pages, options = {}){
  if(options.layout === 'handout') return makeHandoutPDF(pages);
  const enc=new TextEncoder(),chunks=[],offsets=[0];let length=0;

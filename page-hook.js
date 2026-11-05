@@ -1,4 +1,4 @@
-/* MAIN-world response observer; retains media URLs and course labels, never bodies. */
+/* Observe MAIN-world fetch/XHR responses to collect media URLs and course info. */
 (() => {
   const core = globalThis.PPTCore;
   if (!core) return;

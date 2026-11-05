@@ -1,4 +1,4 @@
-/* Course metadata only: never retain API bodies, credentials or student details. */
+/* Parse course name, date, and start time for export filenames. */
 (function (root) {
   'use strict';
   const pad = n => String(n).padStart(2, '0');
@@ -80,8 +80,7 @@
     }
     walk(value);
     const result = {};
-    // Multiple lessons / calendar rows without a matching ID are ambiguous.
-    // Never silently pick the first lesson's date or mix unrelated starts.
+    // Only use a field when the highest-scoring candidates agree on one value.
     for (const key of ['name', 'date', 'start']) {
       const choices = candidates.filter(x => x.info[key]);
       const highest = Math.max(...choices.map(x => x.score));

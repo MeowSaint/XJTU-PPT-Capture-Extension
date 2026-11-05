@@ -1,4 +1,4 @@
-/* Consent, update dialogs and bounded source checks for the capture workspace. */
+/* Terms dialog, update check, and source preflight queue for the workspace UI. */
 (() => {
   'use strict';
   const el = id => document.getElementById(id);
@@ -45,14 +45,14 @@
     const count = status => items.filter(source => states.get(source.url)?.status === status).length;
     const waiting = count('permission'), running = count('queued') + count('checking');
     el('preflight-authorize').textContent = waiting ? `授权并检测 (${waiting})` : '重新检测';
-    el('preflight-status').textContent = !studyAccepted ? '同意使用约定后检测视频地址。' : !items.length ? '发现视频后会检测已授权的地址。' :
-      `${count('valid')} 个通过 · ${count('unknown')} 个待确认${waiting ? ` · ${waiting} 个待授权` : ''}${running ? ` · ${running} 个检测中` : ''}${count('invalid') ? ` · ${count('invalid')} 个无效` : ''}。加载时仍会检查解码。`;
+    el('preflight-status').textContent = !studyAccepted ? '同意使用约定后自动检测视频地址。' : !items.length ? '发现视频后自动检测可用地址。' :
+      `${count('valid')} 个可用 · ${count('unknown')} 个待确认${waiting ? ` · ${waiting} 个待授权` : ''}${running ? ` · ${running} 个检测中` : ''}${count('invalid') ? ` · ${count('invalid')} 个已过滤` : ''}`;
     controls();
   }
   function cancelPreflight() {
     revision++; controller.abort(); controller = new AbortController(); queue = [];
     for (const state of states.values()) {
-      if (state.status === 'checking' || state.status === 'queued') Object.assign(state, {status: 'unknown', kind: null, reason: '检测已取消，可重新检测或手动加载'});
+      if (state.status === 'checking' || state.status === 'queued') Object.assign(state, {status: 'unknown', kind: null, reason: '检测已取消，可直接加载或重新检测'});
     }
   }
   function current(run, url) { return studyAccepted && run.revision === revision && run.page === pageURL && !run.signal.aborted && items.some(source => source.url === url); }
@@ -62,9 +62,9 @@
     const allowed = !!globalThis.chrome?.permissions && await chrome.permissions.contains({origins: [origin]}).catch(() => false);
     if (!current(run, source.url)) return;
     if (!allowed) {
-      states.set(source.url, {status: 'permission', kind: null, reason: '需要授权此视频域名后再检测'}); renderSources(); return;
+      states.set(source.url, {status: 'permission', kind: null, reason: '点“授权并检测”后检查此地址'}); renderSources(); return;
     }
-    states.set(source.url, {status: 'checking', kind: null, reason: '正在检查响应内容'}); renderSources();
+    states.set(source.url, {status: 'checking', kind: null, reason: '正在检测…'}); renderSources();
     await setCourseReferrer([origin], run.page);
     if (!current(run, source.url)) return;
     const result = await PPTPreflight.probe(source.url, {signal: run.signal});
@@ -78,7 +78,7 @@
       active++;
       checkSource(run, source).catch(error => {
         if (!current(run, source.url) || error.name === 'AbortError') return;
-        states.set(source.url, {status: 'unknown', kind: null, reason: '暂时无法检测，可重新检测或手动加载'}); renderSources();
+        states.set(source.url, {status: 'unknown', kind: null, reason: '未能完成检测，可直接尝试加载'}); renderSources();
       }).finally(() => { active--; pump(); });
     }
   }
@@ -108,9 +108,9 @@
     const before = revision, page = pageURL;
     Promise.resolve(permission).then(granted => {
       if (before !== revision || page !== pageURL || !studyAccepted) return;
-      if (!granted) { el('preflight-status').textContent = '未获得域名权限，未发起检测。仍可导入本地视频。'; return; }
+      if (!granted) { el('preflight-status').textContent = '未授予视频域名权限，也可以直接导入本地视频。'; return; }
       refreshSources(items, pageURL, {reset: true});
-    }).catch(() => { if (before === revision) el('preflight-status').textContent = '域名授权未完成，可稍后重试。'; });
+    }).catch(() => { if (before === revision) el('preflight-status').textContent = '域名授权未完成，请重试。'; });
   };
 
   async function updateMessage(message) {
@@ -138,12 +138,12 @@
         el(id).hidden = !available;
         if (available) el(id).href = result.release[key]; else el(id).removeAttribute('href');
       }
-      el('update-status').textContent = available ? '下载后覆盖扩展文件，并在浏览器的扩展管理页重新加载。' : result?.status === 'current' ? '当前已是最新稳定版。' : '暂时无法检查更新，请稍后再试。现有提取功能可继续使用。';
+      el('update-status').textContent = available ? '下载解压后覆盖原扩展文件夹，再去扩展管理页点“重新加载”即可。' : result?.status === 'current' ? '当前已是最新版本。' : '暂时连不上 GitHub，请稍后再试。';
       el('update-dialog').showModal();
     } catch {
       if (manual) {
         el('check-updates').textContent = '检查失败，点击重试';
-        el('check-updates').title = '暂时无法连接更新服务，现有提取功能可继续使用。';
+        el('check-updates').title = '暂时无法连接 GitHub 检查更新，请稍后再试。';
       }
     } finally { checkingUpdate = false; syncControls(); }
   }
@@ -169,7 +169,7 @@
     if (!el('terms-agree').checked || accepting) return;
     accepting = true; el('terms-accept').disabled = true; el('terms-agree').disabled = true; el('terms-decline').disabled = true;
     try { await PPTState.acceptConsent(storage); unlock(); }
-    catch { el('terms-status').textContent = '确认未能保存，工具仍保持锁定。请检查本机存储后重试，已有截图和命名信息会保留。'; }
+    catch { el('terms-status').textContent = '无法保存确认状态，工具保持锁定，请检查浏览器存储权限后重试。'; }
     finally {
       accepting = false; el('terms-agree').disabled = false; el('terms-decline').disabled = false;
       el('terms-accept').disabled = !el('terms-agree').checked;
@@ -177,7 +177,7 @@
   };
   el('terms-decline').onclick = () => {
     if (studyAccepted) { terms.close(); return; }
-    el('terms-status').textContent = '已暂不同意，工具保持锁定。可以关闭此工具页，或重新考虑后勾选同意并继续；已有截图和命名信息会保留。';
+    el('terms-status').textContent = '同意使用约定后才能使用工具；如暂不使用，直接关闭此页即可。';
   };
   el('terms-open').onclick = openTerms;
   terms.addEventListener('cancel', event => { if (!studyAccepted) event.preventDefault(); });

@@ -47,16 +47,16 @@
             <label class="check"><input id="source-show-all" type="checkbox"><span>显示无效地址</span></label>
             <button id="preflight-authorize" class="button-quiet" type="button" disabled>重新检测</button>
           </div>
-          <p id="preflight-status" class="note" role="status" aria-live="polite">同意使用约定后检测视频地址。</p>
+          <p id="preflight-status" class="note" role="status" aria-live="polite">发现视频后自动检测可用地址。</p>
           <button id="load" class="source-load" type="button" disabled>加载选中视频</button>
-          <p id="source-status" class="status-line">请通过浏览器扩展打开此工具，也可以导入本地视频。</p>
+          <p id="source-status" class="status-line">从课程页点扩展图标可自动找视频，也可以直接导入本地视频。</p>
           <label class="field-stack local-file">
             <span>本地视频</span>
             <input id="file" type="file" accept="video/*,.mp4,.m4v,.webm,.mov">
           </label>
           <div class="secondary-tools">
             <details id="batch-panel" class="drawer">
-              <summary>批量模式：读取本课程全部录像</summary>
+              <summary>批量模式：整门课录像提取</summary>
               <div class="drawer-body">
                 <div class="bar">
                   <button id="batch-discover" type="button">读取本课节列表</button>
@@ -65,7 +65,7 @@
                   <span id="batch-count">已选 0 / 0 节</span>
                 </div>
                 <div id="batch-jobs" class="batch-jobs" role="list"></div>
-                <p id="batch-status" class="note" aria-live="polite">请先打开课程页面的课节列表，再点击“读取本课节列表”。</p>
+                <p id="batch-status" class="note" aria-live="polite">在课程录像列表页打开工具，点“读取本课节列表”即可加载全部课次。</p>
               </div>
             </details>
             <details class="drawer">
@@ -76,7 +76,7 @@
               </div>
             </details>
             <details id="share-panel" class="drawer">
-              <summary>兼容模式：实时共享画面</summary>
+              <summary>备用方式：实时共享画面</summary>
               <div class="drawer-body bar">
                 <button id="share" type="button">选择共享画面</button>
                 <button id="end" type="button" disabled>停止共享并保留截图</button>
@@ -90,9 +90,9 @@
               </div>
             </details>
             <details class="drawer help-drawer">
-              <summary>怎么使用</summary>
+              <summary>使用说明</summary>
               <div class="drawer-body">
-                <p class="note">先登录课程网站并播放一次，再刷新视频列表、选择视频。加载后看预览确认内容，点击“开始快速提取”。完成后在右侧整理页面，再下载 PDF 或图片包。更新扩展后记得刷新课程页。</p>
+                <p class="note">1. 在思源学堂打开课程并播放几秒，回这里点“刷新视频列表”。2. 选 2- 开头的 PPT 视频（或 0- 视频后框选 PPT 区域），点“开始快速提取”。3. 在右侧删掉多余页面、排好顺序，点右上角下载 PDF 或图片包。</p>
               </div>
             </details>
           </div>
@@ -119,8 +119,8 @@
             <input id="dedupe" type="checkbox" checked>
             <span>去除重复页</span>
           </label>
-          <p class="note pane-note">细查更容易找到短暂出现的页面。再次提取会保留已有截图，并按视频时间插入新页面。</p>
-          <p class="note pane-note">完成后在右侧整理页面。“清理相似页”保留每组最后一张，也可以撤销。</p>
+          <p class="note pane-note">漏页时可换“细查”再扫一遍，新截到的页面会按视频时间自动插进现有列表。</p>
+          <p class="note pane-note">如果截到了动画过渡帧，点右侧“清理相似页”会自动保留每组最后一张。</p>
         </section>
 
         <section id="panel-export" class="setting-panel" role="tabpanel" aria-labelledby="tab-export" tabindex="0" hidden>
@@ -147,8 +147,8 @@
               <option value="handout">笔记讲义 · A4 每页两张</option>
             </select>
           </label>
-          <p class="note pane-note">顶栏按钮导出全部保留页面，按当前页序排列。勾选仅用于批量删除。</p>
-          <p class="note pane-note">图片包保留原始 JPEG；讲义右侧留有笔记横线。整理好后，点击顶栏按钮下载。</p>
+          <p class="note pane-note">点右上角按钮会按当前顺序导出全部保留页面（卡片上的勾选框只用来批量删除）。</p>
+          <p class="note pane-note">笔记讲义为 A4 双联并带手写横线；图片包内为按页序命名的原图 JPEG。</p>
         </section>
       </aside>
 
@@ -200,7 +200,7 @@
             <button id="undo" type="button" disabled>撤销删除</button>
             <button id="clean-similar" class="button-quiet" type="button" disabled>清理相似页</button>
           </div>
-          <p id="review-notice" class="note" hidden>拖动调整页序，点图放大、点时间回看。导出包含全部保留页面。</p>
+          <p id="review-notice" class="note" hidden>拖动卡片调序，点缩略图放大预览，点时间跳回视频对应位置。</p>
           <section id="pages" tabindex="0" aria-label="幻灯片列表" data-empty-hint="加载视频后，点击“开始快速提取”或“保存当前页”。"></section>
         </section>
       </main>
@@ -224,13 +224,13 @@
   <dialog id="terms-dialog" class="workspace-dialog" aria-labelledby="terms-title" aria-describedby="terms-status">
     <h2 id="terms-title">课程资料使用约定</h2>
     <div class="dialog-copy">
-      <p>为学习而做，也请尊重老师的劳动。</p>
-      <p>请使用本人账号登录思源学堂，只处理自己有权访问的课程。课程视频、课件及相关资料的权益归授课教师及其他相应权利人所有。</p>
-      <p>我同意不将本扩展提取所得的课件、截图、PDF 或其他课程资料用于商业用途。</p>
-      <p>项目代码按 <a href="https://github.com/MeowSaint/XJTU-PPT-Capture-Extension/blob/main/LICENSE" target="_blank" rel="noopener noreferrer">MIT 许可证</a>授权。祝大家学习进步，复习顺利！</p>
+      <p>这个小工具用来帮大家整理课堂笔记和考前复习，使用时也请尊重授课老师的劳动成果：</p>
+      <p>1. 请用本人账号登录思源学堂，只整理自己选修或有权观看的课程。</p>
+      <p>2. 课程视频与课件归授课教师及相关权利人所有，<strong>提取出的课件、截图和 PDF 严禁用于商业用途</strong>。</p>
+      <p>项目代码按 <a href="https://github.com/MeowSaint/XJTU-PPT-Capture-Extension/blob/main/LICENSE" target="_blank" rel="noopener noreferrer">MIT 许可证</a>开源。祝学习顺利！</p>
     </div>
-    <label class="check"><input id="terms-agree" type="checkbox"><span>我已阅读并同意以上约定</span></label>
-    <p id="terms-status" class="note" role="status" aria-live="polite">确认仅保存在本机。已有截图和命名信息会保留。</p>
+    <label class="check"><input id="terms-agree" type="checkbox"><span>我已了解并同意以上约定</span></label>
+    <p id="terms-status" class="note" role="status" aria-live="polite">勾选同意后即可开始使用。</p>
     <div class="dialog-actions">
       <button id="terms-decline" type="button">暂不同意</button>
       <button id="terms-accept" type="button" disabled>同意并继续</button>

@@ -17,7 +17,7 @@ const dbReady = new Promise((resolve, reject) => {
     if (!request.result.objectStoreNames.contains('settings')) request.result.createObjectStore('settings');
   };
   request.onerror = () => reject(request.error);
-  request.onblocked = () => status('请关闭其他截取工具页，再重新打开，完成本地数据升级。');
+  request.onblocked = () => status('请先关掉其他已打开的截取工具页，再刷新本页。');
   request.onsuccess = () => {
     db = request.result;
     const tx = db.transaction(['pages', 'settings']), read = tx.objectStore('pages').getAll(), naming = tx.objectStore('settings').get('exportNaming');
@@ -37,7 +37,7 @@ const dbReady = new Promise((resolve, reject) => {
     };
   };
 });
-dbReady.then(() => status('本地截图已恢复。请选择课程视频或导入本地视频。')).catch(e => status('本地存储不可用：' + e.message));
+dbReady.then(() => status('已恢复上次保存的截图。请选择课程视频或导入本地视频。')).catch(e => status('本地存储不可用：' + e.message));
 function namingInfo() { return PPTCourse.normalize({name: $('course-name').value, date: $('course-date').value, start: $('course-start').value}); }
 function syncWorkspace() {
   const selected = sources.find(source => source.url === $('sources').value);
@@ -69,7 +69,7 @@ settingTabs.forEach((tab, index) => {
 });
 function previewName() {
   const name = PPTCourse.filename(namingInfo());
-  $('filename-preview').textContent = name ? `下载文件名：${name}` : '请补全课程名称、上课日期和开始时间，也可以刷新视频列表自动读取。';
+  $('filename-preview').textContent = name ? `下载文件名：${name}` : '填好课程名称、上课日期和开始时间后，这里会显示导出文件名。';
   syncWorkspace();
 }
 function setNaming(info, page) {
@@ -164,7 +164,7 @@ async function deletePages(ids) {
     if (wanted.has(previewPageId)) previewPageId = pages[Math.min(previewIndex, pages.length - 1)]?.id ?? null;
     render(); if (batchJobs.length) renderBatchJobs();
     status(`已删除 ${removed.length} 页，可点击“撤销删除”恢复。`);
-  } catch (e) { status('删除失败，页面保持原样：' + e.message); }
+  } catch (e) { status('删除失败：' + e.message); }
   finally { reviewBusy = false; controls(); }
 }
 async function undoDelete() {
@@ -175,8 +175,8 @@ async function undoDelete() {
   try {
     await reviewTransaction({restore: snapshot.removed.map(item => item.page), naming: snapshot.naming});
     pages = restored; restoreNaming(snapshot.naming); undoState = null; last = null;
-    render(); if (batchJobs.length) renderBatchJobs(); status(`已恢复 ${snapshot.removed.length} 页及删除前的命名。`);
-  } catch (e) { status('撤销失败，页面保持原样：' + e.message); }
+    render(); if (batchJobs.length) renderBatchJobs(); status(`已恢复 ${snapshot.removed.length} 页。`);
+  } catch (e) { status('撤销失败：' + e.message); }
   finally { reviewBusy = false; controls(); }
 }
 function sameTimeline(a, b) {
@@ -192,7 +192,7 @@ function cleanSimilar() {
     const a = pages[i - 1], b = pages[i];
     if (sameTimeline(a, b) && Number.isFinite(a.sourceTime) && Number.isFinite(b.sourceTime) && a.sourceTime < b.sourceTime && validSignature(a) && validSignature(b) && a.w === b.w && a.h === b.h && a.sig.length === b.sig.length && PPTCore.similar(a.sig, b.sig, threshold)) remove.push(a.id);
   }
-  if (remove.length) deletePages(remove); else status('没有找到需要合并的相邻相似页。');
+  if (remove.length) deletePages(remove); else status('没有发现相邻的相似页面。');
 }
 function updateSelection() {
   selectedPages = new Set([...selectedPages].filter(id => pages.some(page => page.id === id)));
@@ -349,7 +349,7 @@ function addCard(page, index) {
     let to = ordered.findIndex(item => item.id === page.id); if (after) to++;
     ordered.splice(to, 0, moved); draggedPageId = null; reviewBusy = true; controls();
     try { await persistOrder(ordered); undoState = null; render(); status(`已调整截图顺序：第 ${to + 1} 页。`); }
-    catch (e) { status('顺序保存失败，页面保持原样：' + e.message); }
+    catch (e) { status('顺序保存失败：' + e.message); }
     finally { reviewBusy = false; controls(); }
   };
   article.ondragend = () => { draggedPageId = null; document.querySelectorAll('#pages article').forEach(card => card.classList.remove('dragging', 'drop-before', 'drop-after')); };
@@ -445,8 +445,8 @@ $('release-cache').onclick = async () => {
   task = new AbortController(); controls();
   try {
     await releaseSource(); activeBatchJob = null; if (batchJobs.length) renderBatchJobs();
-    status('已卸载视频，截图和命名信息已保留，可以继续整理和导出。预览或补截时重新加载视频即可。');
-  } catch (e) { status('视频缓存释放失败：' + e.message + '。截图和命名信息还在，可以关闭工具页后重试。'); }
+    status('已释放视频缓存，截图和命名信息已保留；需要回看或补截时重新加载视频即可。');
+  } catch (e) { status('释放视频缓存失败：' + e.message); }
   finally { task = null; controls(); }
 };
 async function setCourseReferrer(origins, page = coursePage) {
@@ -478,7 +478,7 @@ async function awaitVideo(signal) {
 }
 function originPattern(url) { const u = new URL(url); return `${u.protocol}//${u.host}/*`; }
 async function fetchVideo(url, signal) {
-  status('正在下载视频到本地缓存，下载后快速扫描…');
+  status('正在缓存视频到内存，完成后即可快速提取…');
   const response = await fetch(url, {credentials: 'include', signal});
   if (!response.ok) throw Error(`视频服务器返回 HTTP ${response.status}，请刷新课程页获取新地址，或下载视频后导入`);
   if (/text\/html|application\/json/i.test(response.headers.get('content-type') || '')) throw Error('地址返回登录页或接口数据，不是视频文件');
@@ -492,7 +492,7 @@ async function fetchVideo(url, signal) {
     chunks.push(value);
     if (Date.now() - lastUpdate > 250) {
       lastUpdate = Date.now(); $('progress').value = total ? received / total : 0;
-      status(`下载视频：${(received / 1024 ** 2).toFixed(1)} MB${total ? ' / ' + (total / 1024 ** 2).toFixed(1) + ' MB' : ''}。下载完即进行快速扫描。`);
+      status(`正在缓存视频：${(received / 1024 ** 2).toFixed(1)} MB${total ? ' / ' + (total / 1024 ** 2).toFixed(1) + ' MB' : ''}…`);
     }
   }
   if (!received) throw Error('视频文件为空');
@@ -589,7 +589,7 @@ function downloadBlob(blob, name) {
 function downloadPDF(list, course, layout = 'single') {
   if (!list.length) throw Error('还没有截图');
   const name = PPTCourse.filename(course);
-  if (!name) throw Error('请先补填课程名称、上课日期和开始时间，并检查填写是否正确，再下载 PDF');
+  if (!name) throw Error('请先补填课程名称、上课日期和开始时间');
   downloadBlob(makePDF(list, {layout}), name);
 }
 function exportPDF() { downloadPDF(pages, namingInfo(), $('pdf-layout').value); }
@@ -604,7 +604,7 @@ async function exportRetained(kind) {
       const missing = ['course-name', 'course-date', 'course-start'].find(id => !$(id).value) || 'course-name';
       // Focus after the export guard releases disabled naming fields.
       exportBusy = false; controls(); $(missing).focus();
-      throw Error('请先补填课程名称、上课日期和开始时间，并检查填写是否正确，再下载');
+      throw Error('请先补填课程名称、上课日期和开始时间');
     }
     if (kind === 'zip') downloadBlob(makeZIP(pages), name.replace(/\.pdf$/i, '-slides.zip'));
     else exportPDF();
@@ -628,7 +628,7 @@ async function fastScan() {
     });
     status(`提取完成：新增 ${result.saved} 页，共 ${pages.length} 页，耗时 ${((performance.now() - started) / 1000).toFixed(1)} 秒。${result.unstable ? `跳过 ${result.unstable} 个不稳定画面；可用细查模式复核。` : ''}\n请先筛选页面，再下载 PDF 或图片包。`);
     outcome = result;
-  } catch (e) { status(e.name === 'AbortError' ? `已停止，保留新增 ${pages.length - before} 页。可以先整理并导出；再次开始会从头扫描，并按设置去重。` : '扫描中断，已有截图已保留：' + e.message); }
+  } catch (e) { status(e.name === 'AbortError' ? `已停止，本次新增 ${pages.length - before} 页。` : '提取中断，已截页面已保留：' + e.message); }
   finally {
     task = null; video.pause();
     if (manualJob) {
@@ -804,7 +804,7 @@ $('shot').onclick = async () => {
   finally { task = null; controls(); }
 };
 $('clear').onclick = async () => {
-  if (busy() || !ready || !confirm('清空所有已保存截图？请先下载需要保留的 PDF。')) return;
+  if (busy() || !ready || !confirm('确定清空当前全部截图吗？')) return;
   reviewBusy = true; controls();
   const naming = {course: PPTCourse.normalize(sourceCourse), page: sourceCoursePage, manual: false};
   try {
@@ -812,7 +812,7 @@ $('clear').onclick = async () => {
     pages = []; last = null; invalidateUndo(); restoreNaming(naming);
     render(); if (batchJobs.length) renderBatchJobs(); status('已清空截图。');
   }
-  catch (e) { status('清空失败，页面保持原样：' + e.message); }
+  catch (e) { status('清空失败：' + e.message); }
   finally { reviewBusy = false; controls(); }
 };
 $('share').onclick = async () => {
@@ -832,7 +832,7 @@ $('end').onclick = () => { stopRealtime(); releaseSource(); status('共享已结
 async function discover() {
   if (busy()) return;
   window.PPTWorkspace?.cancelPreflight();
-  if (!window.chrome?.tabs) { $('source-status').textContent = '请通过浏览器扩展打开此工具。也可以导入本地视频。'; return; }
+  if (!window.chrome?.tabs) { $('source-status').textContent = '从课程页点扩展图标可自动找视频，也可以直接导入本地视频。'; return; }
   const revision = ++discoverySerial;
   try {
     const selected = $('course').value || new URLSearchParams(location.search).get('tab');

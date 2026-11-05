@@ -1,4 +1,4 @@
-/* Shared, dependency-free URL selection and frame comparison. */
+/* Media URL matching, frame comparison, and same-window messaging. */
 (function (root) {
   'use strict';
   const MEDIA_EXT = /\.(mp4|m4v|webm|mov|m3u8|mpd)$/i;
@@ -104,7 +104,7 @@
   }
   function postLocalMessage(target, message) {
     const origin = messageOrigin(target);
-    // Only address this very same window, never parent/top/other frames.
+    // Post to the current window only.
     target.postMessage(message, origin === 'null' ? '*' : origin);
   }
   function isLocalMessage(event, target) {

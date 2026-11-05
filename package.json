@@ -3,7 +3,7 @@
   "version": "2.6.0",
   "license": "MIT",
   "private": true,
-  "description": "Browser extension for extracting slide images from XJTU course videos and exporting reviewed pages to PDF.",
+  "description": "Browser extension for capturing slides from XJTU lecture videos and exporting PDFs or image archives.",
   "scripts": {
     "test": "node --test tests/core.test.cjs tests/course.test.cjs tests/export.test.cjs tests/preflight.test.cjs tests/extension-state.test.cjs",
     "release": "node scripts/release.cjs",

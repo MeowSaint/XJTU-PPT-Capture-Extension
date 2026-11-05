@@ -1,4 +1,4 @@
-/* Local consent and public GitHub release state; callers serialize update/claim operations. */
+/* Store terms consent and check GitHub releases for updates. */
 (function (root) {
   'use strict';
   const TERMS_VERSION = 'course-materials-v1';
