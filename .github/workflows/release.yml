@@ -1,0 +1,102 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  publish:
+    name: Build and publish verified release
+    needs: ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '20'
+          package-manager-cache: false
+      - name: Verify tag and version markers
+        run: |
+          node <<'NODE'
+          const assert = require('node:assert/strict');
+          const fs = require('node:fs');
+          const read = file => fs.readFileSync(file, 'utf8');
+          const json = file => JSON.parse(read(file));
+          const tag = process.env.GITHUB_REF_NAME;
+          assert.equal(process.env.GITHUB_REF_TYPE, 'tag');
+          assert.match(tag, /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/);
+          const version = tag.slice(1);
+          const lock = json('package-lock.json');
+          for (const [file, actual] of [
+            ['manifest.json', json('manifest.json').version],
+            ['package.json', json('package.json').version],
+            ['package-lock.json', lock.version],
+            ['package-lock.json packages[""]', lock.packages?.['']?.version],
+          ]) assert.equal(actual, version, `${file} must match ${tag}`);
+          const capture = [...read('capture.html').matchAll(/<span class="version">([^<]+)<\/span>/g)];
+          assert.equal(capture.length, 1, 'capture.html must have one version marker');
+          assert.equal(capture[0][1], version, 'capture.html version must match the tag');
+          const readme = [...read('README.md').matchAll(/^当前版本：\*\*([^*]+)\*\*/gm)];
+          assert.equal(readme.length, 1, 'README.md must have one current version marker');
+          assert.equal(readme[0][1], version, 'README.md current version must match the tag');
+          console.log(`Verified ${tag} across all version markers`);
+          NODE
+      - run: npm run release
+      - name: Generate SHA-256 checksum with Node
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const { createHash } = require('node:crypto');
+          const name = 'ppt-capture.zip';
+          const hash = createHash('sha256').update(fs.readFileSync(name)).digest('hex');
+          fs.writeFileSync('SHA256SUMS', `${hash}  ${name}\n`, { flag: 'wx' });
+          NODE
+      - name: Create draft with assets, then publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          node <<'NODE'
+          const assert = require('node:assert/strict');
+          const fs = require('node:fs');
+          const { execFileSync } = require('node:child_process');
+          const tag = process.env.GITHUB_REF_NAME;
+          const repo = process.env.GH_REPO;
+          const gh = args => execFileSync('gh', args, { encoding: 'utf8' });
+          const releases = JSON.parse(gh(['api', '--paginate', '--slurp', `repos/${repo}/releases?per_page=100`])).flat();
+          assert.ok(!releases.some(release => release.tag_name === tag),
+            `Release ${tag} already exists; refusing to change it or its assets`);
+          console.log(gh(['release', 'create', tag, 'ppt-capture.zip', 'SHA256SUMS',
+            '--repo', repo, '--draft', '--verify-tag', '--generate-notes', '--title', tag]));
+          const release = JSON.parse(gh(['release', 'view', tag, '--repo', repo,
+            '--json', 'tagName,isDraft,isPrerelease,assets']));
+          assert.equal(release.tagName, tag);
+          assert.equal(release.isDraft, true, 'Only the newly created draft may be published');
+          assert.equal(release.isPrerelease, false);
+          assert.deepEqual(release.assets.map(asset => asset.name).sort(), ['SHA256SUMS', 'ppt-capture.zip']);
+          for (const asset of release.assets) {
+            assert.equal(asset.state, 'uploaded', `${asset.name} upload must finish before publishing`);
+            assert.equal(asset.size, fs.statSync(asset.name).size, `${asset.name} upload size must match`);
+          }
+          console.log(gh(['release', 'edit', tag, '--repo', repo, '--draft=false', '--verify-tag']));
+          NODE
