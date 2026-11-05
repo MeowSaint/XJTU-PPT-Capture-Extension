@@ -7,11 +7,9 @@ $history = Join-Path $releaseRoot 'last-release'
 $temporary = Join-Path $releaseRoot 'tmp'
 $latest = Join-Path $releaseRoot 'ppt-capture.zip'
 $files = @('manifest.json', 'background.js', 'media.js', 'course.js', 'batch.js', 'content.js', 'page-hook.js', 'capture.html', 'capture.js', 'scanner.js', 'pdf.js', 'style.css', 'README.md', 'THIRD_PARTY_NOTICES.md')
-# Resolve the Chinese filename without relying on Windows PowerShell's ANSI decoding.
-$instructions = ([char]0x4f7f).ToString() + [char]0x7528 + [char]0x8bf4 + [char]0x660e + '.txt'
-$files += $instructions
 $files += @('vendor/hls.min.js', 'vendor/hls.LICENSE')
 $files += @('icons/icon-16.png', 'icons/icon-32.png', 'icons/icon-48.png', 'icons/icon-128.png')
+$files += @('icons/browsers/chrome.svg', 'icons/browsers/edge.svg', 'icons/browsers/brave.svg', 'icons/browsers/LICENSE.txt')
 foreach ($relative in $files) {
   if (-not (Test-Path -LiteralPath (Join-Path $releaseRoot $relative) -PathType Leaf)) { throw "Missing release file: $relative" }
 }

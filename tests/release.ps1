@@ -42,10 +42,14 @@ $zip = [System.IO.Compression.ZipFile]::OpenRead($latest)
 try {
   $reader = New-Object System.IO.StreamReader($zip.GetEntry('manifest.json').Open())
   try { $version = ($reader.ReadToEnd() | ConvertFrom-Json).version } finally { $reader.Dispose() }
-  if ($version -ne '2.4.0' -or -not $zip.GetEntry('course.js') -or -not $zip.GetEntry('batch.js')) { throw 'Latest package has wrong contents' }
+  if ($version -ne '2.4.0' -or $zip.Entries.Count -ne 24 -or -not $zip.GetEntry('course.js') -or -not $zip.GetEntry('batch.js') -or -not $zip.GetEntry('README.md')) { throw 'Latest package has wrong contents' }
   foreach ($size in @(16, 32, 48, 128)) {
     if (-not $zip.GetEntry("icons/icon-$size.png")) { throw "Latest package is missing icon-$size.png" }
   }
+  foreach ($browser in @('chrome', 'edge', 'brave')) {
+    if (-not $zip.GetEntry("icons/browsers/$browser.svg")) { throw "Latest package is missing $browser.svg" }
+  }
+  if (-not $zip.GetEntry('icons/browsers/LICENSE.txt')) { throw 'Latest package is missing browser logo license' }
   if ($zip.Entries.FullName -match '^(tests|\.git|last-release|node_modules)/') { throw 'Development/private data leaked into ZIP' }
 } finally { $zip.Dispose() }
 $beforeFailure = File-Hash $latest
