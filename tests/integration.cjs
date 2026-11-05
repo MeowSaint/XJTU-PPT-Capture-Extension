@@ -305,7 +305,10 @@ async function main() {
     assert.equal(await page.locator('#overlay').evaluate(el => el.style.pointerEvents), 'none');
     const oldCount = await page.locator('#pages article').count(); await page.locator('#shot').click();
     await page.waitForFunction(n => document.querySelectorAll('#pages article').length === n + 1, oldCount);
-    const cropSize = await page.locator('#pages article img').last().evaluate(img => ({w: img.naturalWidth, h: img.naturalHeight}));
+    const croppedImage = page.locator('#pages article img').last();
+    await croppedImage.scrollIntoViewIfNeeded();
+    const cropSize = await croppedImage.evaluate(async img => { await img.decode(); return {w: img.naturalWidth, h: img.naturalHeight}; });
+    console.log('Decoded crop dimensions:', cropSize);
     assert(cropSize.w > 600 && cropSize.w < 660); assert.equal(cropSize.h, 360);
     await page.locator('#full').click();
     await verifyCacheRelease(page, 'local video');
