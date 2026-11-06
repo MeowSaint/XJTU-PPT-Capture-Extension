@@ -800,6 +800,99 @@ function zipEntries(bytes) {
       assert.deepEqual(adjusted.observed, {x: .2, y: .1, w: .5, h: .7}); assert.equal(adjusted.override.manual, true);
       assert.equal(adjusted.override.aspect, 640 / 360); assert.equal(adjusted.confirmed, true); assert.equal(adjusted.rejected, false);
     });
+    await test('reopened crop adjustments belong to the saved batch independently of the displayed batch', async () => {
+      for (const sameCourse of [false, true]) {
+        const a = origin + '/study-capture-courses/42/preview-detail/a', b = sameCourse ? a.replace('/a', '/b') : a.replace('/42/', '/99/');
+        const url = origin + '/' + path.relative(root, fixture).split(path.sep).join('/');
+        const oldCrop = {x: .1, y: .1, w: .7, h: .7}, adjusted = {x: .2, y: .2, w: .5, h: .5};
+        const jobs = [a, b].map((page, index) => ({id: sameCourse ? 'job-' + index : 'shared', course, url: url + '?id=' + index, sourceName: '0-camera.mp4', requiresCrop: true,
+          state: 'pending', selected: true, cropConfirmed: true, options: [], cropOverride: {crop: oldCrop, aspect: 640 / 360, manual: false}}));
+        const savedLessons = [a, b].map((page, index) => lesson('owner-' + index, {page, crop: oldCrop, source: {kind: 'remote', batchJobId: jobs[index].id, page,
+          coursePage: page, url: jobs[index].url, sourceKey: 'url:' + jobs[index].url, sourceName: jobs[index].sourceName}}));
+        await seed({lessons: savedLessons, batches: [{page: a, jobs: [jobs[0]]}, {page: b, jobs: [jobs[1]]}]});
+        await page.evaluate(async () => {
+          chrome.permissions = {request: async () => true};
+          for (const snapshot of savedBatches) {
+            const job = snapshot.jobs[0]; job.cropOverride.track = PPTBatch.trackKey(job);
+            await PPTLibrary.batch(db, snapshot.page, snapshot.jobs);
+          }
+          batchJobs = structuredClone(savedBatches.find(item => item.page === batchPage).jobs);
+        });
+        await choose('owner-1'); await page.locator('#resume-load').click(); await page.waitForFunction(() => sourceReady && !busy());
+        assert.equal(await page.evaluate(async a => {
+          const active = activeBatchJob, jobs = structuredClone(batchJobs);
+          chrome.tabs = {sendMessage: async () => ({ok: true, page: a, jobs, total: jobs.length, eligible: jobs.length})};
+          await discoverBatch(1);
+          return activeBatchJob === active;
+        }, a), true, 'refreshing displayed A preserves loaded B ownership');
+        const before = await stored();
+        const retained = await page.evaluate(() => structuredClone(savedBatches));
+        assert.equal(await page.evaluate(() => batchPage), a, 'reopening B leaves displayed batch A intact');
+        await page.evaluate(async ({b, adjusted}) => {
+          const put = IDBObjectStore.prototype.put;
+          IDBObjectStore.prototype.put = function(value, key) {
+            if (this.name === 'settings' && key === 'batch:' + b) return this.add(value, 'lesson:' + activeLesson.id);
+            return put.call(this, value, key);
+          };
+          try { await setComparisonRegion(adjusted, null, 'adjusted', true); } finally { IDBObjectStore.prototype.put = put; }
+        }, {b, adjusted});
+        assert.match(await page.locator('#status').textContent(), /范围保存失败/);
+        assert.deepEqual(await stored(), before, 'owning-batch failure atomically rolls back lesson and both batches');
+        assert.deepEqual(await page.evaluate(() => savedBatches), retained, 'failed save does not publish the owning snapshot');
+        assert.deepEqual(await page.evaluate(() => crop), oldCrop);
+        await page.evaluate(async adjusted => {
+          await setComparisonRegion(adjusted, null, 'adjusted', true); saveLessonSettings(); await lessonSave;
+          const scan = PPTScanner.prototype.scan;
+          PPTScanner.prototype.scan = async () => ({saved: 0});
+          try { await fastScan(); } finally { PPTScanner.prototype.scan = scan; }
+        }, adjusted);
+        const saved = await stored();
+        assert.equal(saved.batches.find(item => item.page === b).jobs[0].state, 'done', 'manual scan status persists to B while A is displayed');
+        assert.deepEqual(saved.lessons.find(item => item.id === 'owner-1').crop, adjusted);
+        assert.deepEqual(saved.batches.find(item => item.page === b).jobs[0].cropOverride.crop, adjusted);
+        assert.deepEqual(saved.batches.find(item => item.page === a), before.batches.find(item => item.page === a));
+        assert.equal(await page.evaluate(() => batchPage), a);
+        await page.reload(); await idle(); await page.evaluate(() => { chrome.permissions = {request: async () => true}; });
+        await page.locator('#resume-load').click(); await page.waitForFunction(() => sourceReady && !busy());
+        assert.deepEqual(await page.evaluate(() => crop), adjusted);
+        assert.deepEqual((await stored()).batches.find(item => item.page === b).jobs[0].cropOverride.crop, adjusted);
+      }
+    });
+    await test('final manual preparation save failure retains the loaded zero-track crop guard', async () => {
+      for (const rejected of [false, true]) {
+        const base = origin + '/study-capture-courses/42/preview-detail/a';
+        const job = {id: 'guard', course, url: origin + '/' + path.relative(root, fixture).split(path.sep).join('/'), sourceName: '0-guard.mp4',
+          requiresCrop: true, cropConfirmed: false, state: 'needs-crop', selected: false, options: []};
+        await seed({batches: [{page: base, jobs: [job]}]});
+        const result = await page.evaluate(async rejected => {
+          const job = batchJobs[0];
+          if (rejected) job.cropOverride = {crop: {x: .1, y: .1, w: .5, h: .5}, aspect: 4 / 3, track: PPTBatch.trackKey(job), manual: false};
+          await persistBatch();
+          const save = PPTLibrary.batch, scan = PPTScanner.prototype.scan; let failures = 0, calls = 0;
+          PPTLibrary.batch = async (db, page, jobs) => {
+            if (jobs.some(item => item.state === 'manual')) { failures++; throw Error('final manual save failure'); }
+            return save(db, page, jobs);
+          };
+          try { await prepareManualBatchJob(job, Promise.resolve(true)); } finally { PPTLibrary.batch = save; }
+          const afterFailure = {ready: sourceReady, job: activeBatchJob && structuredClone(activeBatchJob), message: $('batch-status').textContent};
+          PPTScanner.prototype.scan = async () => { calls++; return {saved: 0}; };
+          try {
+            await fastScan(); const blocked = calls;
+            await setComparisonRegion({x: .2, y: .2, w: .5, h: .5}, null, 'explicit confirmation', true);
+            await fastScan();
+            return {failures, afterFailure, blocked, calls};
+          } finally { PPTScanner.prototype.scan = scan; }
+        }, rejected);
+        assert.equal(result.failures, 1); assert.match(result.afterFailure.message, /final manual save failure/);
+        assert.equal(result.blocked, 0, 'Start cannot enter scanner after only the final save fails');
+        assert.equal(result.afterFailure.ready, true); assert.equal(result.afterFailure.job.cropConfirmed, false);
+        assert.equal(Object.hasOwn(result.afterFailure.job, 'manualPrepared'), false, 'failed preparation does not publish new flags');
+        if (rejected) assert.equal(result.afterFailure.job.cropRejected, true);
+        assert.equal(result.calls, 1, 'explicit crop confirmation permits retry');
+        await page.reload(); await idle();
+        assert.deepEqual((await stored()).batches[0].jobs[0].cropOverride.crop, {x: .2, y: .2, w: .5, h: .5});
+      }
+    });
     assert.deepEqual(errors, [], 'no browser script errors'); assert.deepEqual(blocked, [], 'no nonlocal network requests');
     fs.writeFileSync(path.join(output, 'results.json'), JSON.stringify({passed, errors, blocked, output}, null, 2));
     console.log(`${passed.length} focused library groups passed. Evidence: ${output}`);

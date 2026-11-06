@@ -64,7 +64,7 @@ function persistLesson(lesson = activeLesson, relatedBatch = null) {
 }
 function saveLessonSettings() {
   if (!ready) return;
-  persistLesson(activeLesson, activeBatchJob?.requiresCrop && batchPage ? {page: batchPage, jobs: batchJobs} : null).then(renderLibrary).catch(e => status('课次设置保存失败：' + e.message));
+  persistLesson(activeLesson, activeBatchJob?.requiresCrop ? jobBatch() : null).then(renderLibrary).catch(e => status('课次设置保存失败：' + e.message));
 }
 function sameMediaSource(a, b) {
   if (!a || !b) return false;
@@ -224,7 +224,7 @@ $('library-delete').onclick = async () => {
     activeLesson = lessons.find(lesson => lesson.id === (activeRemoved ? saved.activeId : activeLesson?.id)) || null;
     const batch = savedBatches.find(item => item.page === batchPage);
     batchJobs = batch ? structuredClone(batch.jobs) : []; if (!batch) batchPage = '';
-    activeBatchJob = activeBatchJob && batchJobs.find(job => job.id === activeBatchJob.id) || null;
+    if (activeBatchJob && loadedIdentity?.coursePage === batchPage) activeBatchJob = batchJobs.find(job => job.id === activeBatchJob.id && sameMediaSource(job, loadedIdentity)) || activeBatchJob;
     if (activeRemoved) {
       if (activeLesson) applyLesson();
       else { pages = []; sourceName = ''; sourceCourse = {}; sourceCoursePage = ''; crop = {x: 0, y: 0, w: 1, h: 1}; ignoreRect = null; cancelSelection(); restoreNaming(saved.naming || {course: {}, page: '', manual: false}); }
@@ -238,9 +238,17 @@ function retainBatch(snapshot) {
   const existing = savedBatches.findIndex(item => item.page === snapshot.page);
   if (existing < 0) savedBatches.push(snapshot); else savedBatches[existing] = snapshot;
 }
-function persistBatch() {
-  if (!batchPage) return Promise.resolve();
-  const snapshot = structuredClone({page: batchPage, jobs: batchJobs});
+function jobBatch(job = activeBatchJob) {
+  if (!job) return null;
+  const page = batchJobs.includes(job) ? batchPage : loadedIdentity?.coursePage || activeLesson?.page || batchPage;
+  if (!page) return null;
+  const jobs = page === batchPage ? batchJobs : savedBatches.find(item => item.page === page)?.jobs || [];
+  return {page, jobs: jobs.some(item => item.id === job.id) ? jobs.map(item => item.id === job.id ? job : item) : [...jobs, job]};
+}
+function persistBatch(job = null) {
+  const related = job ? jobBatch(job) : batchPage ? {page: batchPage, jobs: batchJobs} : null;
+  if (!related) return Promise.resolve();
+  const snapshot = structuredClone(related);
   return PPTLibrary.batch(db, snapshot.page, snapshot.jobs).then(() => retainBatch(snapshot));
 }
 function syncWorkspace() {
@@ -822,7 +830,7 @@ async function setComparisonRegion(nextCrop, nextIgnore, message, confirmCrop = 
   }
   reviewBusy = true; controls(); draw();
   try {
-    const relatedBatch = confirmCrop && activeBatchJob?.requiresCrop && batchPage ? {page: batchPage, jobs: batchJobs} : null;
+    const relatedBatch = confirmCrop && activeBatchJob?.requiresCrop ? jobBatch() : null;
     await persistLesson(activeLesson, relatedBatch);
     status(message + (cleared ? ' 裁剪已变化，旧忽略区已清除，请重新设置。' : ''));
   } catch (error) {
@@ -1231,7 +1239,7 @@ async function fastScan({restart = false, range = null} = {}) {
     if (manualJob) {
       const count = batchPageCount(manualJob); manualJob.pages = count;
       manualJob.state = outcome ? 'done' : count ? 'partial' : 'failed'; manualJob.error = outcome ? '' : $('status').textContent;
-      try { await persistBatch(); } catch (e) { status('批量状态保存失败：' + e.message); }
+      try { await persistBatch(manualJob); } catch (e) { status('批量状态保存失败：' + e.message); }
       renderBatchJobs();
       $('batch-status').textContent = outcome ? `本节 0 路视频已完成，共 ${count} 页；可继续回看和细查。` : `本节 0 路视频未完成，已保留 ${count} 页。`;
     }
@@ -1289,13 +1297,13 @@ async function applyBatchCrop(job) {
   const valid = PPTBatch.cropMatches(job.cropOverride, loadedIdentity, video.videoWidth / video.videoHeight);
   const nextJob = {...job, cropConfirmed: valid, cropRejected: !valid, ...(valid ? {} : {selected: false, state: 'needs-crop', error: '视频轨道或宽高比与裁剪设置不匹配，请手动框选。'})};
   const nextLesson = {...activeLesson, ...(valid ? {crop: {...job.cropOverride.crop}, ignoreRect: sameCrop(crop, job.cropOverride.crop) ? ignoreRect : null} : {})};
-  const jobs = batchJobs.map(item => item.id === job.id ? nextJob : item);
-  await PPTLibrary.put(db, nextLesson, {page: batchPage, jobs});
-  Object.assign(job, nextJob); Object.assign(activeLesson, nextLesson); retainBatch(structuredClone({page: batchPage, jobs}));
+  const related = jobBatch(job), snapshot = {page: related.page, jobs: related.jobs.map(item => item.id === job.id ? nextJob : item)};
+  await PPTLibrary.put(db, nextLesson, snapshot);
+  Object.assign(job, nextJob); Object.assign(activeLesson, nextLesson); retainBatch(structuredClone(snapshot));
   crop = {...(nextLesson.crop || crop)}; ignoreRect = normalizedIgnore(nextLesson.ignoreRect); releaseDedupeContext();
   if (!valid) { selectionMode = 'crop'; selectionRect = {...crop}; }
 }
-function batchLesson(job, page = batchPage) { return lessons.find(lesson => lesson.source && PPTLibrary.key(lesson.source) === PPTLibrary.key({batchJobId: job.id, page})); }
+function batchLesson(job, page = job === activeBatchJob ? jobBatch(job)?.page || batchPage : batchPage) { return lessons.find(lesson => lesson.source && PPTLibrary.key(lesson.source) === PPTLibrary.key({batchJobId: job.id, page})); }
 function batchPages(job) { const lesson = batchLesson(job); return lesson ? allPages.filter(page => page.lessonId === lesson.id).sort((a, b) => a.order - b.order) : []; }
 function batchPageCount(job) { return batchPages(job).length; }
 function syncBatchJob(job) {
@@ -1394,7 +1402,7 @@ async function discoverBatch(tabId = Number($('course').value), automatic = fals
     await PPTLibrary.batch(db, result.page, jobs); retainBatch(structuredClone({page: result.page, jobs}));
     if (!current()) return;
     batchPage = result.page; batchJobs = jobs;
-    if (activeBatchJob) activeBatchJob = loadedIdentity?.coursePage === batchPage ? batchJobs.find(job => job.id === activeBatchJob.id && sameMediaSource(job, loadedIdentity)) || null : null;
+    if (activeBatchJob && loadedIdentity?.coursePage === batchPage) activeBatchJob = batchJobs.find(job => job.id === activeBatchJob.id && sameMediaSource(job, loadedIdentity)) || activeBatchJob;
     renderBatchJobs();
     const skipped = result.total - result.eligible, missing = result.failures?.length || 0, manual = batchJobs.filter(job => job.requiresCrop && !PPTBatch.automatic(job) && job.state !== 'done').length;
     $('batch-status').textContent = `读取完成：${result.total} 个课次，找到 ${batchJobs.length} 个视频${skipped ? `，跳过 ${skipped} 个未完成/转码中课次` : ''}${missing ? `，${missing} 个录像缺少可用视频` : ''}${manual ? `。其中 ${manual} 节只有 0 路视频，请逐节选择并框选 PPT 区域` : ''}。`;
@@ -1412,14 +1420,25 @@ async function prepareManualBatchJob(job, permission) {
     coursePage = batchPage; sourceCourse = {...job.course}; sourceCoursePage = coursePage;
     const loaded = await loadRemote(job.url, {permissionGranted: true, sourceName: job.sourceName, batchJob: job});
     if (!loaded) throw Error($('status').textContent || '视频加载失败');
-    job.state = 'manual'; job.manualPrepared = true; if (!job.cropConfirmed) { selectionMode = 'crop'; selectionRect = {...crop}; } await persistBatch(); renderBatchJobs(); controls(); draw();
+    reviewBusy = true; controls();
+    const related = jobBatch(job), nextJob = {...job, state: 'manual', manualPrepared: true};
+    const snapshot = {page: related.page, jobs: related.jobs.map(item => item.id === job.id ? nextJob : item)};
+    await PPTLibrary.batch(db, snapshot.page, snapshot.jobs);
+    Object.assign(job, nextJob); retainBatch(structuredClone(snapshot));
+    if (!job.cropConfirmed) { selectionMode = 'crop'; selectionRect = {...crop}; } renderBatchJobs(); draw();
     const prompt = job.cropConfirmed ? '已恢复本节裁剪区域，可继续提取或调整框选。' : '本节只有 0 路视频。请在预览中框选 PPT 区域，再点击“开始快速提取”。';
     status(prompt); $('batch-status').textContent = prompt;
   } catch (error) {
-    job.state = batchPageCount(job) ? 'partial' : 'failed'; job.error = error.message;
-    if (activeBatchJob === job) activeBatchJob = null;
-    renderBatchJobs(); $('batch-status').textContent = '0 路视频未就绪：' + error.message;
-  }
+    const loaded = sourceReady && activeBatchJob === job;
+    if (loaded) {
+      const retained = savedBatches.find(item => item.page === jobBatch(job)?.page)?.jobs.find(item => item.id === job.id);
+      job.state = retained?.state || (job.cropConfirmed ? 'pending' : 'needs-crop');
+    } else {
+      job.state = batchPageCount(job) ? 'partial' : 'failed'; job.error = error.message;
+      if (activeBatchJob === job) activeBatchJob = null;
+    }
+    renderBatchJobs(); $('batch-status').textContent = (loaded ? '0 路视频已加载，但准备状态保存失败；仍需确认裁剪：' : '0 路视频未就绪：') + error.message;
+  } finally { reviewBusy = false; controls(); }
 }
 async function runBatch(permission) {
   const selected = batchJobs.filter(job => PPTBatch.automatic(job) && job.selected && job.state !== 'done');
@@ -1614,8 +1633,9 @@ $('resume-load').onclick = () => {
   coursePage = activeLesson.page || ''; sourceCourse = {...activeLesson.course}; sourceCoursePage = coursePage;
   if (source.kind === 'file') { activateTab('tab-source'); $('file').click(); return; }
   if (source.kind === 'share' || !source.url) { activateTab('tab-source'); status('请重新选择视频地址或共享画面；历史截图会保留。'); return; }
-  const candidate = source.batchJobId && batchPage === coursePage && batchJobs.find(job => job.id === source.batchJobId && sameMediaSource(job, source));
-  const batchJob = source.batchJobId ? candidate || {id: source.batchJobId, url: source.url, sourceName: source.sourceName, requiresCrop: /(?:^|\/)0-[^/]+\.mp4(?:$|\?)/i.test(source.sourceName), cropConfirmed: false} : null;
+  const ownerJobs = batchPage === coursePage ? batchJobs : structuredClone(savedBatches.find(item => item.page === coursePage)?.jobs || []);
+  const candidate = source.batchJobId && ownerJobs.find(job => job.id === source.batchJobId && sameMediaSource(job, source));
+  const batchJob = source.batchJobId ? candidate || {id: source.batchJobId, course: {...activeLesson.course}, url: source.url, sourceName: source.sourceName, requiresCrop: /(?:^|\/)0-[^/]+\.mp4(?:$|\?)/i.test(source.sourceName), cropConfirmed: false} : null;
   loadRemote(candidate ? candidate.url : source.url, {sourceName: source.sourceName, batchJob});
 };
 $('restart-scan').onclick = () => { if (!busy()) fastScan({restart: true}); };
