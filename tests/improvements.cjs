@@ -150,11 +150,15 @@ async function test(name, run) { await run(); passed++; console.log('PASS ' + na
           current = c; await realTick(); const realTransition = candidate === c;
           stopRealtime();
           pages = [1, 2].map(id => ({id, w: 192, h: 108, signatureCrop: {...crop}, sourceKey: 'synthetic', sourceName: 'synthetic', sourceTime: id}));
-          PPTPageStore.assets = async () => [{sig: a}, {sig: b}]; deletePages = async ids => { deleted.push(...ids); };
-          await cleanSimilar(); const maskedCleanup = deleted.join(',') === '1';
+          const canvas = document.createElement('canvas'); canvas.width = 192; canvas.height = 108;
+          const image = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+          PPTPageStore.assets = async () => [{sig: a, image}, {sig: b, image}]; deletePages = async ids => { deleted.push(...ids); };
+          await cleanSimilar(); const deferred = deleted.length === 0 && similarReview?.pair?.length === 2;
+          await chooseSimilar('later'); const deferredConfirmation = deleted.length === 0 && similarReview.complete;
+          await $('similar-confirm').onclick(); const maskedCleanup = deferred && deferredConfirmation && deleted.join(',') === '1';
           deleted = []; delete pages[0].signatureCrop; await cleanSimilar();
-          return {ignoredTransition, ignoredConfirmation, realTransition, maskedCleanup, legacyKept: deleted.length === 0};
-        } finally { stopRealtime(); frame = originalFrame; save = originalSave; PPTPageStore.assets = originalAssets; deletePages = originalDelete; pages = originalPages; }
+          return {ignoredTransition, ignoredConfirmation, realTransition, maskedCleanup, legacyKept: deleted.length === 0 && similarReview === null};
+        } finally { closeSimilar(); stopRealtime(); frame = originalFrame; save = originalSave; PPTPageStore.assets = originalAssets; deletePages = originalDelete; pages = originalPages; }
       });
       assert.deepEqual(result, {ignoredTransition: true, ignoredConfirmation: true, realTransition: true, maskedCleanup: true, legacyKept: true});
     });

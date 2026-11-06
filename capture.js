@@ -6,7 +6,8 @@ let crop = {x: 0, y: 0, w: 1, h: 1}, drag = null, task = null, sourceName = '', 
 let realtimeTimer = null, realtimeBusy = false, candidate = null, candidateSince = 0, last = null, coursePage = '';
 let ignoreRect = null, selectionMode = null, selectionRect = null, dedupeContext = null;
 let draggedPageId = null, reviewBusy = false, exportBusy = false, pageWrites = 0, undoState = null;
-let selectedPages = new Set(), previewPageId = null, previewReturn = null, loadedIdentity = null;
+let selectedPages = new Set(), selectionAnchor = null, previewPageId = null, previewReturn = null, loadedIdentity = null;
+let similarReview = null;
 let batchJobs = [], batchPage = '', batchRunning = false, batchStopRequested = false, activeBatchJob = null, batchDiscoverySerial = 0;
 const referrerRule = 16220;
 let referrerOrigins = new Set(), referrerPage = '', referrerWrites = Promise.resolve();
@@ -50,7 +51,7 @@ function applyLesson() {
     dedupe: typeof saved.dedupe === 'boolean' ? saved.dedupe : true,
     stable: Number.isFinite(saved.stable) && saved.stable >= 0.5 && saved.stable <= 10 ? saved.stable : 1.5};
   $('mode').value = String(settings.step); $('diff').value = settings.threshold; $('dedupe').checked = settings.dedupe; $('stable').value = settings.stable;
-  selectedPages.clear(); previewPageId = null; last = candidate = null; candidateSince = 0; cancelSelection();
+  selectedPages.clear(); selectionAnchor = null; previewPageId = null; last = candidate = null; candidateSince = 0; cancelSelection();
 }
 function persistLesson(lesson = activeLesson, relatedBatch = null) {
   if (!lesson) return Promise.resolve();
@@ -124,9 +125,25 @@ function renderLibrary() {
     row.className = 'suspect-range'; seek.textContent = `${timecode(range.start)} – ${timecode(range.end)}`; seek.title = '跳转到视频中回看';
     seek.disabled = busy() || !sourceReady; seek.onclick = async () => { if (busy() || !sourceReady) return; try { await new PPTScanner(video, frame).seek(range.time ?? range.start); } catch (e) { status('回看失败：' + e.message); } };
     scan.textContent = '细查此段'; scan.disabled = busy() || !sourceReady; scan.onclick = () => { if (!busy()) fastScan({range}); };
-    row.append(seek, scan); list.append(row);
+    const dismiss = document.createElement('button'); dismiss.className = 'suspect-dismiss'; dismiss.textContent = '已确认';
+    dismiss.disabled = busy(); dismiss.onclick = () => dismissSuspect(range);
+    row.append(seek, scan, dismiss); list.append(row);
   }
   $('suspects-count').textContent = `待复核时间段 · ${activeLesson?.suspects?.length || 0}`;
+}
+async function dismissSuspect(range) {
+  if (busy() || !activeLesson?.suspects?.includes(range)) return;
+  reviewBusy = true; controls();
+  const lesson = activeLesson;
+  try {
+    await namingSave.catch(() => {}); await lessonSave.catch(() => {});
+    const index = lesson.suspects.indexOf(range);
+    if (index < 0) return;
+    const suspects = lesson.suspects.filter((_, i) => i !== index);
+    await persistLesson({...lesson, suspects});
+    lesson.suspects = suspects; renderLibrary(); status('此时间段已确认。');
+  } catch (e) { status('确认保存失败，请重试：' + e.message); }
+  finally { reviewBusy = false; controls(); }
 }
 function retainBatch(snapshot) {
   const existing = savedBatches.findIndex(item => item.page === snapshot.page);
@@ -241,7 +258,7 @@ function forgetUndo() {
   const removed = undoState?.removed.map(item => item.page.id) || []; undoState = null;
   if (removed.length) PPTPageStore.discard(db, removed).catch(() => {}); // Startup also reclaims orphaned assets.
 }
-function invalidateUndo() { forgetUndo(); selectedPages.clear(); updateSelection(); }
+function invalidateUndo() { forgetUndo(); selectedPages.clear(); selectionAnchor = null; updateSelection(); }
 async function reviewTransaction({remove = [], restore = [], naming, clear = false}) {
   await dbReady; await namingSave.catch(() => {}); await lessonSave;
   const lesson = activeLesson && {...activeLesson, course: naming.course, namingManual: naming.manual, page: naming.page, ...(clear ? {task: null, suspects: []} : {})};
@@ -330,23 +347,85 @@ async function hasSimilar(signature, threshold, context = null, signatureCrop = 
   }
   return false;
 }
+function releaseSimilarImages(review) {
+  review.urls.forEach(url => URL.revokeObjectURL(url)); review.urls = [];
+  for (const side of ['earlier', 'later']) $('similar-' + side + '-img').removeAttribute('src');
+}
+function closeSimilar() {
+  if (!similarReview) return;
+  releaseSimilarImages(similarReview); similarReview = null;
+  $('similar-dialog').close(); reviewBusy = false; controls();
+}
+async function nextSimilar(review) {
+  releaseSimilarImages(review); review.pair = null;
+  $('similar-pair').hidden = true; $('similar-choices').hidden = true; $('similar-confirm').hidden = true;
+  $('similar-status').textContent = '正在检查相邻页面…';
+  try {
+    while (review.next < review.pages.length) {
+      const a = review.pages[review.survivor], b = review.pages[review.next++];
+      if (sameTimeline(a, b) && Number.isFinite(a.sourceTime) && Number.isFinite(b.sourceTime) && a.sourceTime < b.sourceTime && a.w === b.w && a.h === b.h) {
+        const [first, second] = await PPTPageStore.assets(db, [a.id, b.id]);
+        if (similarReview !== review) return;
+        if (validSignature({...a, sig: first?.sig}) && validSignature({...b, sig: second?.sig}) && PPTCore.similar(first.sig, second.sig, review.threshold, comparisonMask(a.signatureCrop, b.signatureCrop))) {
+          if (!first.image || !second.image) throw Error('候选截图不可用，请重新提取');
+          review.pair = [a, b]; review.found = true;
+          for (const [index, side] of ['earlier', 'later'].entries()) {
+            const page = review.pair[index], image = $('similar-' + side + '-img');
+            const label = `第 ${review.pages.indexOf(page) + 1} 页 · ${timecode(page.sourceTime)}`;
+            $('similar-' + side + '-meta').textContent = label; image.alt = label;
+            const url = URL.createObjectURL([first, second][index].image); review.urls.push(url); image.src = url;
+          }
+          await Promise.all(['earlier', 'later'].map(side => $('similar-' + side + '-img').decode()));
+          if (similarReview !== review) return;
+          $('similar-status').textContent = `请选择保留方式；已暂定删除 ${review.remove.length} 页，最终确认前不会删除。`;
+          $('similar-pair').hidden = false; $('similar-choices').hidden = false; $('similar-both').focus();
+          return;
+        }
+      }
+      review.survivor = review.next - 1;
+    }
+    if (!review.found) { closeSimilar(); status('没有发现相邻的相似页面。'); return; }
+    review.complete = true;
+    $('similar-status').textContent = review.remove.length ? `对比完成。确认删除 ${review.remove.length} 页？可一次撤销；取消将放弃全部选择。` : '对比完成，所有页面都会保留。';
+    $('similar-confirm').textContent = review.remove.length ? `确认删除 ${review.remove.length} 页` : '完成并保留全部';
+    $('similar-confirm').hidden = false; $('similar-cancel').focus();
+  } catch (e) {
+    if (similarReview !== review) return;
+    closeSimilar(); status('相似页检查失败：' + e.message);
+  }
+}
 async function cleanSimilar() {
   if (busy()) return;
-  const remove = [], threshold = Math.max((Number($('diff').value) || 1.2) * 2.5, 3);
-  reviewBusy = true; controls();
-  try {
-    for (let i = 1; i < pages.length; i++) {
-      const a = pages[i - 1], b = pages[i];
-      if (!sameTimeline(a, b) || !Number.isFinite(a.sourceTime) || !Number.isFinite(b.sourceTime) || a.sourceTime >= b.sourceTime || a.w !== b.w || a.h !== b.h) continue;
-      const [first, second] = await PPTPageStore.assets(db, [a.id, b.id]);
-      if (validSignature({...a, sig: first?.sig}) && validSignature({...b, sig: second?.sig}) && PPTCore.similar(first.sig, second.sig, threshold, comparisonMask(a.signatureCrop, b.signatureCrop))) remove.push(a.id);
-    }
-  } catch (e) { status('相似页检查失败：' + e.message); return; }
-  finally { reviewBusy = false; controls(); }
-  if (remove.length) await deletePages(remove); else status('没有发现相邻的相似页面。');
+  const review = {pages: pages.slice(), survivor: 0, next: 1, remove: [], urls: [], found: false, complete: false,
+    threshold: Math.max((Number($('diff').value) || 1.2) * 2.5, 3)};
+  similarReview = review; reviewBusy = true; controls();
+  $('similar-dialog').showModal(); await nextSimilar(review);
 }
+function chooseSimilar(choice) {
+  const review = similarReview;
+  if (!review?.pair) return;
+  const [a, b] = review.pair;
+  if (choice === 'earlier') review.remove.push(b.id);
+  else {
+    if (choice === 'later') review.remove.push(a.id);
+    review.survivor = review.next - 1;
+  }
+  return nextSimilar(review);
+}
+for (const choice of ['earlier', 'later', 'both']) $('similar-' + choice).onclick = () => chooseSimilar(choice);
+$('similar-cancel').onclick = closeSimilar;
+$('similar-dialog').addEventListener('cancel', event => { event.preventDefault(); closeSimilar(); });
+$('similar-dialog').addEventListener('close', () => { if (!$('similar-dialog').open) closeSimilar(); });
+$('similar-confirm').onclick = async () => {
+  if (!similarReview?.complete) return;
+  const remove = similarReview.remove; closeSimilar();
+  if (remove.length) await deletePages(remove); else status('已保留全部页面。');
+};
 function updateSelection() {
   selectedPages = new Set([...selectedPages].filter(id => pages.some(page => page.id === id)));
+  if (!pages.some(page => page.id === selectionAnchor)) selectionAnchor = null;
+  $('lightbox-select').textContent = selectedPages.has(previewPageId) ? '取消选中 (S)' : '选中此页 (S)';
+  $('lightbox-select').setAttribute('aria-pressed', String(selectedPages.has(previewPageId)));
   $('selected-count').textContent = `已选 ${selectedPages.size} 页`;
   $('select-all').checked = pages.length > 0 && selectedPages.size === pages.length;
   $('select-all').indeterminate = selectedPages.size > 0 && selectedPages.size < pages.length;
@@ -386,7 +465,8 @@ function updatePreview() {
     }).catch(e => { if (revision === previewRevision) $('lightbox-status').textContent = '图片读取失败：' + e.message; });
   }
   $('lightbox-prev').disabled = busy() || index === 0; $('lightbox-next').disabled = busy() || index === pages.length - 1;
-  $('lightbox-delete').disabled = busy(); $('lightbox-seek').disabled = busy();
+  $('lightbox-delete').disabled = busy(); $('lightbox-seek').disabled = busy(); $('lightbox-select').disabled = busy();
+  updateSelection();
   if (!$('lightbox').contains(document.activeElement)) $('lightbox-close').focus();
 }
 function openPreview(page) {
@@ -400,12 +480,17 @@ function movePreview(delta) {
   if (page) { previewPageId = page.id; $('lightbox-status').textContent = ''; updatePreview(); }
 }
 $('select-all').onchange = () => { if (busy()) return; selectedPages = new Set($('select-all').checked ? pages.map(page => page.id) : []); updateSelection(); controls(); };
-$('clear-selection').onclick = () => { selectedPages.clear(); updateSelection(); controls(); };
+$('clear-selection').onclick = () => { if (busy()) return; selectedPages.clear(); selectionAnchor = null; updateSelection(); controls(); };
 $('delete-selected').onclick = () => deletePages([...selectedPages]);
 $('undo').onclick = undoDelete; $('clean-similar').onclick = cleanSimilar;
 $('lightbox-prev').onclick = () => movePreview(-1); $('lightbox-next').onclick = () => movePreview(1);
 $('lightbox-delete').onclick = () => deletePages([previewPageId]);
 $('lightbox-seek').onclick = () => { const page = pages.find(item => item.id === previewPageId); if (page) seekPage(page); };
+$('lightbox-select').onclick = () => {
+  if (busy() || previewPageId === null) return;
+  if (selectedPages.has(previewPageId)) selectedPages.delete(previewPageId); else selectedPages.add(previewPageId);
+  updateSelection(); controls();
+};
 $('lightbox-close').onclick = () => $('lightbox').close();
 $('lightbox').addEventListener('close', () => {
   previewRevision++; previewLoadingId = null;
@@ -427,6 +512,8 @@ document.addEventListener('keydown', event => {
   }
   if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); movePreview(event.key === 'ArrowLeft' ? -1 : 1); }
   if (event.key === 'Delete' || event.key === 'Backspace') { event.preventDefault(); deletePages([previewPageId]); }
+  if (event.key.toLowerCase() === 's') { event.preventDefault(); $('lightbox-select').click(); }
+  if (event.key.toLowerCase() === 'v') { event.preventDefault(); $('lightbox-seek').click(); }
 });
 function controls() {
   const active = busy();
@@ -447,7 +534,7 @@ function controls() {
   $('resume-load').disabled = active || !ready;
   $('restart-scan').hidden = !activeLesson?.task || !!stream; $('restart-scan').disabled = active || !sourceReady;
   $('course-zip').disabled = active || !currentCourseLessons().some(lesson => allPages.some(page => page.lessonId === lesson.id));
-  document.querySelectorAll('#suspect-ranges button').forEach(button => { button.disabled = active || !sourceReady; });
+  document.querySelectorAll('#suspect-ranges button').forEach(button => { button.disabled = active || (!button.classList.contains('suspect-dismiss') && !sourceReady); });
   $('stop').disabled = !task && !realtimeTimer && !batchRunning;
   $('shot').disabled = active || !sourceReady || !ready;
   $('clear').disabled = active || !ready || !pages.length;
@@ -473,7 +560,7 @@ function controls() {
   document.querySelectorAll('#batch-jobs .batch-manual select, #batch-jobs .batch-manual button').forEach(control => { control.disabled = active; });
   document.querySelectorAll('#batch-jobs .batch-job > button').forEach(button => {
     const job = batchJobs.find(item => item.id === button.parentElement.dataset.jobId);
-    button.disabled = active || !job || !batchPageCount(job);
+    button.disabled = active || !job || (button.classList.contains('batch-view') ? !batchLesson(job) : !batchPageCount(job));
   });
   updatePreview();
   video.controls = sourceReady && !active && !stream;
@@ -532,7 +619,14 @@ function addCard(page, index) {
   label.onclick = () => seekPage(page);
   label.onkeydown = event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); seekPage(page); } };
   choose.type = 'checkbox'; choose.className = 'page-select'; choose.setAttribute('aria-label', `选择第 ${index + 1} 页`);
-  choose.onchange = () => { if (busy()) return; if (choose.checked) selectedPages.add(page.id); else selectedPages.delete(page.id); updateSelection(); controls(); };
+  choose.onclick = event => {
+    if (busy()) { event.preventDefault(); return; }
+    const anchor = pages.findIndex(item => item.id === selectionAnchor), end = pages.findIndex(item => item.id === page.id);
+    const range = event.shiftKey && anchor >= 0 ? pages.slice(Math.min(anchor, end), Math.max(anchor, end) + 1) : [page];
+    for (const item of range) { if (choose.checked) selectedPages.add(item.id); else selectedPages.delete(item.id); }
+    if (!event.shiftKey) selectionAnchor = page.id;
+    updateSelection(); controls();
+  };
   article.title = `${page.sourceName || '历史截图'}（拖动可调整导出页序）`; button.textContent = '删除'; button.draggable = false;
   article.ondragstart = event => {
     if (busy() || event.target.closest('button, input')) { event.preventDefault(); return; }
@@ -1096,7 +1190,16 @@ function renderBatchJobs() {
       prepare.onclick = () => { if (!busy()) prepareManualBatchJob(job, chrome.permissions.request({origins: [originPattern(job.url)]})); };
       manual.append(select, prepare); row.append(manual);
     }
-    row.append(download); container.append(row);
+    const view = document.createElement('button'); view.className = 'batch-view'; view.textContent = '查看截图';
+    view.onclick = async () => {
+      if (busy()) return;
+      const lesson = batchLesson(job); if (!lesson) return;
+      await switchLesson(lesson.id);
+      if (activeLesson !== lesson || busy()) return;
+      $('suspects-panel').open = true; $('suspects-panel').scrollIntoView({block: 'nearest'});
+      $('pages').scrollTop = 0; $('pages').focus({preventScroll: true});
+    };
+    row.append(view, download); container.append(row);
   }
   const selected = batchJobs.filter(job => !job.requiresCrop && job.selected && job.state !== 'done').length, manual = batchJobs.filter(job => job.requiresCrop).length;
   $('batch-count').textContent = batchJobs.length ? `共 ${batchJobs.length} 节，自动 ${selected} 节${manual ? `，需框选 ${manual} 节` : ''}` : '未读取';

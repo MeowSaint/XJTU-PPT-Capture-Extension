@@ -232,6 +232,67 @@ function zipEntries(bytes) {
       await page.reload(); await count(2); assert.deepEqual(await ids(), [99, 13]);
     });
 
+    await test('saved batch rows jump to retained pages and suspects without loading media and reset range anchors', async () => {
+      const batchPage = 'https://example.invalid/course?courseId=synthetic', other = lesson('jump-other');
+      const saved = lesson('jump-saved', {page: batchPage, source: {kind: 'remote', batchJobId: 'job-saved', page: batchPage, url: 'https://example.invalid/unloaded.mp4'}, suspects: [{start: 1, end: 2}]});
+      const empty = lesson('jump-empty', {page: batchPage, source: {kind: 'remote', batchJobId: 'job-empty', page: batchPage}, suspects: [{start: 3, end: 4}]});
+      const jobs = ['saved', 'empty', 'missing'].map(name => ({id: 'job-' + name, course, sourceName: name, url: 'https://example.invalid/unloaded.mp4', state: 'done', selected: false}));
+      await seed({lessons: [other, saved, empty], activeId: other.id, batches: [{page: batchPage, jobs}], pages: [
+        {id: 10, lessonId: other.id}, {id: 20, lessonId: saved.id}, {id: 30, lessonId: saved.id}, {id: 40, lessonId: saved.id},
+      ]});
+      await page.locator('#pages .page-select').click();
+      await page.locator('#batch-panel').evaluate(panel => { panel.open = true; });
+      const view = name => page.locator(`[data-job-id="job-${name}"] .batch-view`);
+      assert.equal(await view('missing').isDisabled(), true); assert.equal(await view('empty').isDisabled(), false);
+      const before = await stored();
+      await page.evaluate(() => { exportBusy = true; controls(); }); assert.equal(await view('saved').isDisabled(), true);
+      await page.evaluate(() => { exportBusy = false; controls(); });
+      await view('saved').click(); await count(3); assert.deepEqual(await ids(), [20, 30, 40]);
+      assert.equal(await page.evaluate(() => activeLesson.id), saved.id);
+      assert.equal(await page.locator('#suspects-panel').evaluate(panel => panel.open), true);
+      assert.equal(await page.locator('#suspect-ranges .suspect-range').count(), 1);
+      assert.deepEqual(await page.evaluate(() => ({sourceReady, src: video.getAttribute('src'), selected: [...selectedPages], selectionAnchor})), {sourceReady: false, src: null, selected: [], selectionAnchor: null});
+      await page.locator('#pages .page-select').last().click({modifiers: ['Shift']});
+      assert.deepEqual(await page.evaluate(() => [...selectedPages]), [40]);
+      await view('empty').click(); await count(0); assert.equal(await page.locator('#suspect-ranges .suspect-range').count(), 1);
+      assert.deepEqual((await stored()).pages, before.pages); assert.deepEqual((await stored()).assets, before.assets);
+      assert.equal(await page.evaluate(() => sourceReady), false);
+    });
+
+    await test('suspect confirmation removes exactly one record write-first, retries failures and survives reload without video', async () => {
+      const suspects = [{start: 1, end: 3, time: 1}, {start: 1, end: 3, time: 1}, {start: 2, end: 4}, {start: 4, end: 5}];
+      await seed({lessons: [lesson('dismiss', {suspects}), lesson('untouched', {suspects: [{start: 1, end: 8}]})]});
+      const before = await stored();
+      await page.locator('#suspects-panel').evaluate(panel => { panel.open = true; });
+      assert.equal(await page.locator('.suspect-dismiss').first().isDisabled(), false);
+      assert.equal(await page.locator('.suspect-range button').first().isDisabled(), true);
+      await page.evaluate(() => {
+        const put = PPTLibrary.put, transaction = IDBDatabase.prototype.transaction;
+        PPTLibrary.put = async (...args) => { await new Promise(resolve => { window.releaseDismiss = resolve; }); return put(...args); };
+        window.restoreDismiss = () => { PPTLibrary.put = put; };
+        IDBDatabase.prototype.transaction = function (names, mode, ...args) {
+          const tx = transaction.call(this, names, mode, ...args);
+          if (mode === 'readwrite' && names.includes('settings')) { IDBDatabase.prototype.transaction = transaction; queueMicrotask(() => tx.abort()); }
+          return tx;
+        };
+      });
+      await page.locator('.suspect-dismiss').nth(1).click(); await page.waitForFunction(() => !!window.releaseDismiss);
+      assert.equal(await page.locator('.suspect-range').count(), 4);
+      assert.deepEqual(await page.evaluate(() => activeLesson.suspects), suspects);
+      assert.deepEqual(await stored(), before); assert.equal(await page.locator('.suspect-dismiss').first().isDisabled(), true);
+      await page.evaluate(() => { window.restoreDismiss(); window.releaseDismiss(); }); await idle();
+      assert.match(await page.locator('#status').textContent(), /确认保存失败/);
+      assert.deepEqual(await stored(), before); assert.deepEqual(await page.evaluate(() => activeLesson.suspects), suspects);
+      assert.equal(await page.locator('.suspect-range').count(), 4); assert.equal(await page.locator('.suspect-dismiss').nth(1).isDisabled(), false);
+      await page.locator('.suspect-dismiss').nth(1).click(); await idle();
+      const after = await stored(), remaining = [suspects[0], suspects[2], suspects[3]];
+      assert.deepEqual(after.lessons.find(item => item.id === 'dismiss'), {...before.lessons.find(item => item.id === 'dismiss'), suspects: remaining});
+      assert.deepEqual(after.lessons.find(item => item.id === 'untouched'), before.lessons.find(item => item.id === 'untouched'));
+      assert.deepEqual(await page.evaluate(() => activeLesson.suspects), remaining); assert.equal(await page.locator('.suspect-range').count(), 3);
+      await page.reload(); await idle(); assert.deepEqual((await stored()).lessons.find(item => item.id === 'dismiss').suspects, remaining);
+      assert.equal(await page.evaluate(() => sourceReady), false);
+    });
+
     await test('unloading preserves crop through later edits and frees video/cache when lesson persistence fails', async () => {
       const savedCrop = {x: .1, y: .15, w: .65, h: .7};
       await seed({lessons: [lesson('release', {crop: savedCrop})], pages: [{id: 60, lessonId: 'release', sourceKey: fileKey, sourceName: path.basename(fixture)}]});

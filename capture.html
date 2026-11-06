@@ -129,7 +129,7 @@
             <button id="ignore-clear" type="button" disabled>清除忽略区</button>
           </div>
           <p id="ignore-status" class="note" aria-live="polite">未设置忽略区。仅影响画面比较，截图和导出保留完整内容。框选时可用方向键移动，Shift+方向键调整大小，Enter 确认，Esc 取消。</p>
-          <p class="note pane-note">如果截到了动画过渡帧，点右侧“清理相似页”会自动保留每组最后一张。</p>
+          <p class="note pane-note">如果截到了动画过渡帧，可点右侧“清理相似页”逐对比较；确认全部选择后才会删除。</p>
         </section>
 
         <section id="panel-export" class="setting-panel" role="tabpanel" aria-labelledby="tab-export" tabindex="0" hidden>
@@ -217,7 +217,7 @@
             <button id="undo" type="button" disabled>撤销删除</button>
             <button id="clean-similar" class="button-quiet" type="button" disabled>清理相似页</button>
           </div>
-          <p id="review-notice" class="note" hidden>拖动卡片调序，点缩略图放大预览，点时间跳回视频对应位置。</p>
+          <p id="review-notice" class="note" hidden>拖动卡片调序，Shift+勾选可连续选择或取消；点缩略图放大，点时间回看视频。</p>
           <section id="pages" tabindex="0" aria-label="幻灯片列表" data-empty-hint="加载视频后，点击“开始快速提取”或“保存当前页”。"></section>
         </section>
       </main>
@@ -232,11 +232,29 @@
     <div class="lightbox-tools" role="group" aria-label="预览操作">
       <button id="lightbox-prev" type="button">上一页</button>
       <button id="lightbox-next" type="button">下一页</button>
-      <button id="lightbox-seek" type="button">回看视频</button>
+      <button id="lightbox-select" type="button" aria-pressed="false">选中此页 (S)</button>
+      <button id="lightbox-seek" type="button">回看视频 (V)</button>
       <button id="lightbox-delete" class="button-danger" type="button">删除</button>
       <span class="note">← → 翻页 · Delete 删除 · Esc 关闭</span>
     </div>
     <p id="lightbox-status" class="note" role="status" aria-live="polite"></p>
+  </dialog>
+  <dialog id="similar-dialog" class="workspace-dialog" aria-labelledby="similar-title" aria-describedby="similar-status">
+    <h2 id="similar-title">比较相邻的相似页</h2>
+    <div id="similar-pair" hidden>
+      <figure><figcaption id="similar-earlier-meta"></figcaption><img id="similar-earlier-img" alt=""></figure>
+      <figure><figcaption id="similar-later-meta"></figcaption><img id="similar-later-img" alt=""></figure>
+    </div>
+    <p id="similar-status" class="note" role="status" aria-live="polite"></p>
+    <div id="similar-choices" class="dialog-actions" hidden>
+      <button id="similar-earlier" type="button">保留前页</button>
+      <button id="similar-later" type="button">保留后页</button>
+      <button id="similar-both" type="button">两页都保留</button>
+    </div>
+    <div class="dialog-actions">
+      <button id="similar-cancel" type="button" autofocus>取消全部选择</button>
+      <button id="similar-confirm" type="button" hidden>确认删除</button>
+    </div>
   </dialog>
   <dialog id="terms-dialog" class="workspace-dialog" aria-labelledby="terms-title" aria-describedby="terms-status">
     <h2 id="terms-title">课程资料使用约定</h2>

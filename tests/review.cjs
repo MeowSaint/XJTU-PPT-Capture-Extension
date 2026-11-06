@@ -47,6 +47,9 @@ async function stored() {
 }
 async function seed(specs, exportNaming = naming) {
   await idle();
+  const captureURL = page.url();
+  await page.evaluate(async () => { await namingSave.catch(() => {}); await lessonSave.catch(() => {}); db.close(); });
+  await page.goto(new URL('/fixture.html', captureURL).href);
   await page.evaluate(async ({specs, images, naming}) => {
     const prepared = await Promise.all(specs.map(async (spec, index) => {
       const data = images[spec.image || 0], image = new Image(); image.src = data; await image.decode();
@@ -60,7 +63,6 @@ async function seed(specs, exportNaming = naming) {
       if (spec.signature === 'short') record.sig = new Uint8ClampedArray(4);
       return record;
     }));
-    await namingSave.catch(() => {}); await lessonSave.catch(() => {}); db.close();
     await new Promise((resolve, reject) => {
       const request = indexedDB.deleteDatabase('course-ppt');
       request.onsuccess = resolve; request.onerror = () => reject(request.error);
@@ -79,7 +81,7 @@ async function seed(specs, exportNaming = naming) {
       };
     });
   }, {specs, images, naming: exportNaming});
-  await page.reload(); await count(specs.length);
+  await page.goto(captureURL); await count(specs.length);
 }
 async function abortNextReview() {
   await page.evaluate(() => {
@@ -133,6 +135,7 @@ function zipEntries(bytes) {
     }));
     // OPFS requires a trusted origin; file:// cannot exercise disk-backed exports.
     server = http.createServer((req, res) => {
+      if (req.url === '/fixture.html') { res.writeHead(200, {'Content-Type': 'text/html'}); res.end('<!doctype html><title>Synthetic fixture setup</title>'); return; }
       const file = path.resolve(root, '.' + decodeURIComponent(new URL(req.url, 'http://localhost').pathname));
       if (!file.startsWith(root + path.sep)) { res.writeHead(403); res.end(); return; }
       fs.readFile(file, (error, bytes) => {
@@ -214,6 +217,58 @@ function zipEntries(bytes) {
       assert.equal(await page.locator('#undo').isDisabled(), true); assert.equal((await stored()).pages.length, 0);
     });
 
+    await test('Shift checkbox ranges follow reordered display order, deselect and reset invalid anchors', async () => {
+      await seed([{id: 10, order: 4096}, {id: 20, order: 1024}, {id: 30, order: 3072}, {id: 40, order: 2048}]);
+      const check = id => page.locator(`#pages article[data-page-id="${id}"] .page-select`);
+      const selected = () => page.evaluate(() => pages.filter(item => selectedPages.has(item.id)).map(item => item.id));
+      assert.deepEqual(await ids(), [20, 40, 30, 10]);
+      await check(40).click(); await check(10).click({modifiers: ['Shift']}); assert.deepEqual(await selected(), [40, 30, 10]);
+      await check(10).click(); await check(40).click({modifiers: ['Shift']}); assert.deepEqual(await selected(), []);
+      await check(20).focus(); await page.keyboard.press('Space'); assert.deepEqual(await selected(), [20]);
+      await page.locator('#pages').evaluate(container => {
+        const [first, second] = container.children, transfer = new DataTransfer(), r = second.getBoundingClientRect();
+        first.dispatchEvent(new DragEvent('dragstart', {bubbles: true, dataTransfer: transfer}));
+        second.dispatchEvent(new DragEvent('drop', {bubbles: true, dataTransfer: transfer, clientX: r.right - 1, clientY: r.y + 5}));
+        first.dispatchEvent(new DragEvent('dragend', {bubbles: true, dataTransfer: transfer}));
+      });
+      await idle(); assert.deepEqual(await ids(), [40, 20, 30, 10]);
+      await check(10).click({modifiers: ['Shift']}); assert.deepEqual(await selected(), [20, 30, 10]);
+      await page.locator('#pages article[data-page-id="20"] button').click(); await count(3);
+      await check(40).click({modifiers: ['Shift']}); assert.deepEqual(await selected(), [40, 30, 10]);
+      await page.locator('#clear-selection').click(); await check(10).click({modifiers: ['Shift']}); assert.deepEqual(await selected(), [10]);
+      page.once('dialog', dialog => dialog.accept()); await page.locator('#clear').click(); await count(0);
+      assert.equal(await page.evaluate(() => selectionAnchor), null);
+    });
+
+    await test('lightbox selection and S/V shortcuts synchronize cards and ignore editable controls', async () => {
+      await seed([{id: 1}, {id: 2, image: 1}]);
+      await page.locator('#pages article img').first().click();
+      await page.locator('#lightbox-select').click(); assert.equal(await page.locator('#lightbox-select').getAttribute('aria-pressed'), 'true');
+      assert.equal(await page.locator('#pages .page-select').first().isChecked(), true);
+      await page.keyboard.press('s'); assert.equal(await page.locator('#pages .page-select').first().isChecked(), false);
+      await page.keyboard.press('ArrowRight'); await page.keyboard.press('S');
+      assert.equal(await page.locator('#pages .page-select').nth(1).isChecked(), true);
+      await page.keyboard.press('v'); assert.match(await page.locator('#lightbox-status').textContent(), /重新加载/);
+      const original = await stored();
+      for (const tag of ['input', 'textarea', 'select', 'div']) {
+        await page.evaluate(tag => {
+          const field = document.createElement(tag); field.id = 'review-editable';
+          if (tag === 'div') field.contentEditable = 'true';
+          if (tag === 'select') field.innerHTML = '<option>value</option>';
+          $('lightbox').append(field); field.focus(); $('lightbox-status').textContent = 'unchanged';
+        }, tag);
+        for (const key of ['s', 'v', 'ArrowLeft', 'Backspace', 'Delete']) await page.keyboard.press(key);
+        assert.match(await page.locator('#lightbox-meta').textContent(), /第 2 \/ 2 页/);
+        assert.equal(await page.locator('#pages .page-select').nth(1).isChecked(), true);
+        assert.equal(await page.locator('#lightbox-status').textContent(), 'unchanged');
+        assert.deepEqual(await stored(), original);
+        await page.locator('#review-editable').evaluate(field => field.remove());
+      }
+      await page.locator('#lightbox-close').click(); await page.locator('#pages .page-select').nth(1).click();
+      await page.locator('#pages article img').nth(1).click(); assert.equal(await page.locator('#lightbox-select').getAttribute('aria-pressed'), 'false');
+      await page.keyboard.press('Escape');
+    });
+
     await test('lightbox keyboard, focus containment/restoration and safe last-page close', async () => {
       await seed([{id: 1}, {id: 2, image: 1}, {id: 3, image: 2}]);
       await page.locator('#pages article img').first().focus(); await page.keyboard.press('Enter');
@@ -250,8 +305,105 @@ function zipEntries(bytes) {
       for (const index of [1, 2, 3, 4]) { await page.locator('#pages .slide-time').nth(index).click(); assert.match(await page.locator('#status').textContent(), /来源不一致/); assert.equal(await page.locator('#video').evaluate(video => video.currentTime), 2.5); }
       await page.locator('#pages .slide-time').first().focus(); await page.keyboard.press('Enter');
       await page.waitForFunction(() => Math.abs(document.querySelector('#video').currentTime - 1.25) < 0.01);
+      await atTime(2.5); await page.locator('#pages article img').first().click(); await page.keyboard.press('v');
+      await page.waitForFunction(() => Math.abs(document.querySelector('#video').currentTime - 1.25) < 0.01);
+      await page.keyboard.press('Escape');
       await page.locator('#release-cache').click(); await idle(); await page.locator('#pages .slide-time').first().click();
       assert.match(await page.locator('#status').textContent(), /重新加载/); await count(5);
+    });
+
+    await test('similar review cancels unchanged, follows the survivor through chains and releases candidate URLs', async () => {
+      const specs = [1, 2, 3].map(id => ({id, sourceTime: id, sourceKey: 'file:chain'}));
+      await seed(specs); const original = await stored();
+      await page.evaluate(() => { const revoke = URL.revokeObjectURL; window.reviewRevoked = []; URL.revokeObjectURL = url => { window.reviewRevoked.push(url); revoke(url); }; });
+      await page.locator('#clean-similar').click(); await page.locator('#similar-both').waitFor({state: 'visible'});
+      assert.equal(await page.evaluate(() => document.activeElement.id), 'similar-both');
+      assert.match(await page.locator('#similar-earlier-meta').textContent(), /第 1 页.*00:01/);
+      assert.match(await page.locator('#similar-later-meta').textContent(), /第 2 页.*00:02/);
+      const firstURLs = await page.evaluate(() => similarReview.urls.slice());
+      await page.locator('#similar-earlier').click(); await page.locator('#similar-both').waitFor({state: 'visible'});
+      assert.deepEqual(await page.evaluate(() => similarReview.pair.map(item => item.id)), [1, 3]);
+      assert(await page.evaluate(urls => urls.every(url => window.reviewRevoked.includes(url)), firstURLs));
+      const secondURLs = await page.evaluate(() => similarReview.urls.slice());
+      await page.keyboard.press('Escape'); await idle(); assert.deepEqual(await stored(), original);
+      assert(await page.evaluate(urls => urls.every(url => window.reviewRevoked.includes(url)), secondURLs));
+      assert.equal(await page.locator('#undo').isDisabled(), true);
+      await page.locator('#clean-similar').click(); await page.locator('#similar-earlier').click(); await page.locator('#similar-later').click();
+      await page.locator('#similar-confirm').waitFor({state: 'visible'}); assert.deepEqual(await stored(), original);
+      await page.locator('#similar-cancel').click(); await idle(); assert.deepEqual(await stored(), original);
+      await page.locator('#clean-similar').click(); await page.locator('#similar-earlier').click(); await page.locator('#similar-later').click();
+      await page.locator('#similar-confirm').click(); await count(1); assert.deepEqual(await ids(), [3]);
+      await page.locator('#undo').click(); await count(3); assert.deepEqual(await stored(), original);
+      await page.waitForFunction(() => [...document.querySelectorAll('#pages img')].every(image => image.complete && image.naturalWidth));
+      await page.locator('#clean-similar').click(); await page.locator('#similar-both').click(); await page.locator('#similar-earlier').click();
+      await page.locator('#similar-confirm').click(); await count(2); assert.deepEqual(await ids(), [1, 2]);
+      await page.locator('#undo').click(); await count(3);
+      await page.locator('#clean-similar').click(); await page.locator('#similar-later').click(); await page.locator('#similar-both').click();
+      await page.locator('#similar-confirm').click(); await count(2); assert.deepEqual(await ids(), [2, 3]);
+      await page.locator('#undo').click(); await count(3);
+      await page.locator('#clean-similar').click(); await page.locator('#similar-both').click(); await page.locator('#similar-both').click();
+      await page.locator('#similar-confirm').click(); await count(3); assert.deepEqual(await stored(), original);
+    });
+
+    await test('cancellation during a candidate read ignores late results and advance failure releases images', async () => {
+      await seed([1, 2, 3].map(id => ({id, sourceTime: id, sourceKey: 'file:chain'}))); const original = await stored();
+      await page.evaluate(() => {
+        const read = PPTPageStore.assets;
+        PPTPageStore.assets = async (...args) => {
+          PPTPageStore.assets = read; const assets = await read(...args);
+          await new Promise(resolve => { window.releaseCandidate = resolve; }); return assets;
+        };
+      });
+      await page.locator('#clean-similar').click(); await page.waitForFunction(() => !!window.releaseCandidate);
+      await page.locator('#similar-cancel').click(); await idle();
+      await page.evaluate(async () => { window.releaseCandidate(); await new Promise(resolve => requestAnimationFrame(resolve)); });
+      assert.equal(await page.locator('#similar-dialog').evaluate(dialog => dialog.open), false);
+      assert.equal(await page.locator('#similar-earlier-img').getAttribute('src'), null); assert.deepEqual(await stored(), original);
+      await page.evaluate(() => {
+        const read = PPTPageStore.assets, revoke = URL.revokeObjectURL; let reads = 0;
+        window.reviewRevoked = []; URL.revokeObjectURL = url => { window.reviewRevoked.push(url); revoke(url); };
+        PPTPageStore.assets = async (...args) => {
+          if (++reads === 2) { PPTPageStore.assets = read; throw Error('Injected advance failure'); }
+          return read(...args);
+        };
+      });
+      await page.locator('#clean-similar').click(); await page.locator('#similar-both').waitFor({state: 'visible'});
+      const urls = await page.evaluate(() => similarReview.urls.slice());
+      await page.locator('#similar-earlier').click(); await idle();
+      assert.match(await page.locator('#status').textContent(), /Injected advance failure/);
+      assert(await page.evaluate(urls => urls.every(url => window.reviewRevoked.includes(url)), urls));
+      assert.equal(await page.locator('#similar-dialog').evaluate(dialog => dialog.open), false);
+      assert.deepEqual(await stored(), original);
+    });
+
+    await test('similar review reevaluates nontransitive candidates and preserves pages on read or commit failure', async () => {
+      await seed([1, 2, 3].map(id => ({id, sourceTime: id, sourceKey: 'file:chain'})));
+      await page.evaluate(async () => {
+        const signatures = [0, .5, 1].map(percent => {
+          const sig = new Uint8ClampedArray(192 * 108 * 4);
+          for (let i = 0; i < Math.floor(192 * 108 * percent / 100); i++) sig.fill(255, i * 4, i * 4 + 3);
+          return sig;
+        });
+        if (!PPTCore.similar(signatures[0], signatures[1], 3) || !PPTCore.similar(signatures[1], signatures[2], 3) || PPTCore.similar(signatures[0], signatures[2], 3)) throw Error('Invalid nontransitive fixture');
+        const assets = await PPTPageStore.assets(db, [1, 2, 3]), tx = db.transaction(['assets'], 'readwrite');
+        assets.forEach((asset, i) => tx.objectStore('assets').put({...asset, sig: signatures[i]}));
+        await new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onabort = () => reject(tx.error); });
+      });
+      const original = await stored();
+      await page.locator('#clean-similar').click(); await page.locator('#similar-earlier').click();
+      await page.locator('#similar-confirm').waitFor({state: 'visible'});
+      assert.deepEqual(await page.evaluate(() => similarReview.remove), [2], 'A/C must be compared after retaining A, not the deleted B/C pair');
+      await abortNextReview(); await page.locator('#similar-confirm').click(); await count(3);
+      assert.match(await page.locator('#status').textContent(), /删除失败/); assert.deepEqual(await stored(), original);
+      await page.evaluate(() => { const read = PPTPageStore.assets; PPTPageStore.assets = async () => { PPTPageStore.assets = read; throw Error('Injected candidate read failure'); }; });
+      await page.locator('#clean-similar').click(); await idle(); assert.deepEqual(await stored(), original);
+      assert.match(await page.locator('#status').textContent(), /Injected candidate read failure/);
+      assert.equal(await page.locator('#similar-dialog').evaluate(dialog => dialog.open), false);
+      assert.equal(await page.locator('#similar-earlier-img').getAttribute('src'), null);
+      await seed([{id: 1, sourceTime: 1, sourceKey: 'a'}, {id: 2, sourceTime: 2, sourceKey: 'a', w: 320}]);
+      await page.locator('#clean-similar').click(); await idle(); assert.match(await page.locator('#status').textContent(), /没有发现/);
+      await seed([]); assert.equal(await page.locator('#clean-similar').isDisabled(), true);
+      await page.evaluate(() => cleanSimilar()); await count(0); assert.equal(await page.locator('#similar-dialog').evaluate(dialog => dialog.open), false);
     });
 
     await test('conservative adjacent cleanup requires persisted identity and is one reversible deletion batch', async () => {
@@ -268,11 +420,19 @@ function zipEntries(bytes) {
       await seed(specs); const original = await stored(), legacy = original.pages.slice(-2);
       assert(legacy.every(record => !Object.hasOwn(record, 'sourceKey') && record.sig.length === 192 * 108 * 4));
       assert.deepEqual(legacy[0].sig, legacy[1].sig); assert(legacy[0].sourceTime < legacy[1].sourceTime);
-      await page.locator('#clean-similar').click(); await count(14);
+      await page.locator('#clean-similar').click();
+      await page.locator('#similar-later').click(); await page.locator('#similar-later').click();
+      await page.locator('#similar-confirm').waitFor({state: 'visible'});
+      assert.deepEqual(await stored(), original, 'pending decisions never delete before final confirmation');
+      await page.locator('#similar-confirm').click(); await count(14);
       assert.deepEqual(await ids(), Array.from({length: 14}, (_, i) => i + 3));
       assert.deepEqual((await stored()).pages.slice(-2), legacy, 'keyless legacy pair is retained unchanged');
       await page.locator('#undo').click(); await count(16); assert.deepEqual(await stored(), original);
-      await page.locator('#clean-similar').click(); await count(14);
+      await page.locator('#clean-similar').click();
+      await page.locator('#similar-later').click(); await page.locator('#similar-later').click();
+      await page.locator('#similar-confirm').waitFor({state: 'visible'});
+      assert.deepEqual(await stored(), original, 'pending decisions never delete before final confirmation');
+      await page.locator('#similar-confirm').click(); await count(14);
     });
 
     await test('ZIP and A4 handout download every retained page regardless of selection; invalid naming surfaces export pane', async () => {

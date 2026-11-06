@@ -189,6 +189,13 @@ progress::-moz-progress-bar { background: var(--accent); }
 .dialog-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 20px; }
 .workspace-dialog a { color: var(--accent); text-underline-offset: 3px; }
 #terms-accept:not(:disabled) { background: var(--accent); border-color: var(--accent); color: var(--surface); }
+#similar-dialog { width: min(1100px, calc(100vw - 48px)); }
+#similar-pair:not([hidden]) { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+#similar-pair figure { margin: 0; min-width: 0; }
+#similar-pair figcaption { margin-bottom: 8px; }
+#similar-pair img { display: block; width: 100%; max-height: 55dvh; object-fit: contain; background: var(--frame); }
+#lightbox-select[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+@media (max-width: 600px) { #similar-pair:not([hidden]) { grid-template-columns: 1fr; } }
 
 @media (prefers-contrast: more) {
   :root { --control: #68798b; --border: #9ba9b9; --muted: #3e4d60; }
