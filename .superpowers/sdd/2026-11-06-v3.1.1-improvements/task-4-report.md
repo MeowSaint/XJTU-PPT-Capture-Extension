@@ -65,3 +65,23 @@ All succeeded. Used `read_image` on every rendered output:
 Reviewed the final diff against all six Task 4 interfaces and global constraints. Checked saved option rollback, caller propagation, snapshots before asynchronous work, selection versus retained behavior, displayed batch independence, default byte compatibility and stream backpressure. No remaining implementation concern identified. Changed/staged only the five authorized code/test files and this report; synthetic output remains local and untracked/ignored.
 
 Used only loopback synthetic fixtures and isolated Playwright contexts, never live courses, credentials, external network or personal browser profiles. No push/merge/publish. Did not run the full nine-suite regression or packaging/version checks, which are reserved for Task 5. Actual runtime execution used the supplied modern Chromium and Node 26; Chrome 114 and Node 20 were not separately launched. Added syntax/APIs are within those minimums. Outline destinations were parsed and verified structurally with pdf-lib; manual PDF-viewer clicking was not exercised. Parent must perform the requested fresh combined specification and quality review.
+
+## Review fix round 1 — pending naming writes and main course scope
+
+Status: DONE, ready for re-review. Starting HEAD was `f9ce7d8dfe3be39ef5504c5e31853d048011ba31`. Addressed Important I1 from [task-4-review.md](task-4-review.md). Code/tests commit: `aa65c75c5d6c4f2e84d0ae793e8c217701cc9815` (`fix: resolve main course export after pending naming saves`). This addendum is committed separately.
+
+The main course ZIP button now calls `exportCourseZIP()` without capturing a course key. The shared function acquires its existing busy guard and snapshots PDF options first, waits for `namingSave` and `lessonSave`, then resolves the current course key when the argument is `undefined`. Explicit batch keys remain captured from the displayed batch and are not replaced; an explicit missing batch scope still reports the missing-list error. Existing page metadata snapshots, image streaming and other export behavior are unchanged. Source changes are confined to [capture.js](../../../capture.js); the regression is in [tests/improvements.cjs](../../../tests/improvements.cjs).
+
+The new regression uses two nonempty local lessons with no course-ID URL in the same name group. It holds the actual naming write transaction open using queued IndexedDB reads, edits the active lesson's name, clicks the main course ZIP button while the write remains pending, and verifies the export busy guard is held. After releasing the transaction, it checks the ZIP member count, exact intended JPEG sequence/PDF sheet count, member name and archive filename. The sibling retains the old name, so a stale-key export would succeed with the wrong lesson rather than merely fail as empty. The existing independent batch-scope and snapshot tests run in the same suite.
+
+The exact command was run once before the source fix and once after:
+
+```sh
+PPT_TEST_BROWSER='/Users/jasondai/Library/Caches/ms-playwright/chromium-1248/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing' node tests/improvements.cjs
+```
+
+- Before fix: exit **1**, existing **19 groups passed**, then the new regression failed in `inspectPDF` with `AssertionError [ERR_ASSERTION]: Expected values to be strictly equal: 1 !== 2`. The stale course exported the old sibling's one-sheet PDF instead of the intended active lesson's two-sheet PDF. Collected job `bash-099ef251ec684366`; artifacts: [.test-output/v3.1.1/task4-8XeU2n](../../../.test-output/v3.1.1/task4-8XeU2n/).
+- After fix: exit **0**, **20/20 groups passed**, no unexpected external requests or browser page errors. Collected job `bash-9a1c37251fa0481e`; artifacts: [.test-output/v3.1.1/task4-L5XtVQ](../../../.test-output/v3.1.1/task4-L5XtVQ/).
+- `git diff --check`: passed. Reviewed the minimal diff; only the main entry point delays key resolution. No PDF generator, image, geometry, layout, version or dependency edits. As requested, did not rerun Node/PDF tests, Poppler renders or the full regression for this controller timing fix; their prior results above remain historical evidence, not new runs.
+
+The parent's audit document had an unstaged change during this round; it was left untouched and excluded from both implementation commits. All round-1 modifications are limited to the two authorized source/test files and this appended report.
