@@ -513,11 +513,22 @@ async function main() {
     await page.waitForFunction(() => !task && batchJobs.find(job => job.id === 'batch-c')?.state === 'done', {timeout: 60000});
     console.log('Two 0-channel videos: selected screen, renewed URLs, immediate crop/full-frame reload, paused checkpoint and missing-channel invalidation passed');
     const fallbackLessonId = await page.evaluate(() => activeLesson.id), beforeFallbackClear = await storedPageSnapshot(page);
+    const confirmedFallbackCrop = await page.evaluate(() => ({crop: activeLesson.crop, cropOverride: batchJobs.find(job => job.id === 'batch-c').cropOverride}));
+    assert(confirmedFallbackCrop.cropOverride, 'the completed 0-only lesson has a reusable confirmed crop');
     page.once('dialog', dialog => dialog.accept()); await page.locator('#clear').click();
-    await page.waitForFunction(() => pages.length === 0 && !busy() && batchJobs.filter(job => !job.requiresCrop).every(job => job.state === 'done') && batchJobs.find(job => job.requiresCrop)?.state === 'needs-crop');
+    await page.waitForFunction(() => pages.length === 0 && !busy() && batchJobs.filter(job => !job.requiresCrop).every(job => job.state === 'done') && batchJobs.find(job => job.id === 'batch-c')?.state === 'pending' && batchJobs.find(job => job.id === 'batch-c').selected);
+    assert.deepEqual(await page.evaluate(() => {
+      const job = batchJobs.find(job => job.id === 'batch-c');
+      return {crop: activeLesson.crop, cropOverride: job.cropOverride, cropConfirmed: job.cropConfirmed, cropRejected: !!job.cropRejected,
+        state: job.state, selected: job.selected, task: activeLesson.task, suspects: activeLesson.suspects};
+    }), {...confirmedFallbackCrop, cropConfirmed: true, cropRejected: false, state: 'pending', selected: true, task: null, suspects: []}, 'clear retains the confirmed crop and queues the eligible 0-only lesson while resetting extraction state');
     assert.deepEqual(await page.evaluate(() => batchJobs.map(job => batchPages(job).length)), [4, 4, 0]);
     assert.deepEqual(await storedPageSnapshot(page), beforeFallbackClear.filter(item => item.lessonId !== fallbackLessonId), 'clearing the 0-only lesson preserves both completed automatic lessons and original data');
-    assert.equal(await page.locator('#batch-start').isDisabled(), true, 'completed automatic lessons are not queued again');
+    assert.equal(await fallbackRow.locator('input[type="checkbox"]').isChecked(), true, 'the cleared eligible 0-only lesson checkbox reflects its selected model');
+    await fallbackRow.locator('input[type="checkbox"]').uncheck();
+    assert.equal(await page.evaluate(() => batchJobs.find(job => job.id === 'batch-c').selected), false, 'only the cleared 0-only lesson is explicitly deselected');
+    assert.deepEqual(await page.evaluate(() => batchJobs.filter(job => !job.requiresCrop).map(job => ({id: job.id, state: job.state}))), [{id: 'batch-a', state: 'done'}, {id: 'batch-b', state: 'done'}], 'both completed native lessons remain done');
+    assert.equal(await page.locator('#batch-start').isDisabled(), true, 'completed automatic lessons are not queued again when the cleared 0-only lesson is unselected');
     const repeatLessonId = await page.evaluate(() => batchLesson(batchJobs.find(job => job.id === 'batch-a')).id);
     await page.locator('#lesson-select').selectOption(repeatLessonId);
     await page.waitForFunction(id => activeLesson.id === id && pages.length === 4 && !busy(), repeatLessonId);
