@@ -1,8 +1,4 @@
-<p align="center">
-  <img src="icons/logo-1024.png" width="128" height="128" alt="XJTU 课程 PPT 截取图标">
-</p>
-
-# XJTU PPT Capture Extension
+![XJTU PPT Capture Extension — 西安交大课程 PPT 截取工具](icons/readme-banner.svg)
 
 **不发 PPT？那我就自己爬！**
 

@@ -20,7 +20,7 @@ const files = [
   'README.md', 'THIRD_PARTY_NOTICES.md', 'LICENSE', 'vendor/hls.min.js', 'vendor/hls.LICENSE',
   'icons/icon-16.png', 'icons/icon-32.png', 'icons/icon-48.png', 'icons/icon-128.png',
   'icons/browsers/chrome.svg', 'icons/browsers/edge.svg', 'icons/browsers/brave.svg',
-  'icons/browsers/LICENSE.txt', 'icons/logo-1024.png',
+  'icons/browsers/LICENSE.txt', 'icons/logo-1024.png', 'icons/readme-banner.svg',
 ];
 
 function fixture(label, omitted) {
@@ -161,14 +161,14 @@ const oldZips = [
   },
 ];
 
-test('packs exactly 32 members with original LICENSE, notices and every resource byte', () => {
+test('packs exactly 33 members with original LICENSE, notices and every resource byte', () => {
   const root = fixture('contents');
   fs.writeFileSync(path.join(root, '.env'), 'must never be packaged');
   fs.mkdirSync(path.join(root, 'tests'));
   fs.writeFileSync(path.join(root, 'tests', 'private.txt'), 'must never be packaged');
   build(root);
   const entries = inspectZip(latest(root));
-  assert.equal(entries.size, 32);
+  assert.equal(entries.size, 33);
   assert.deepEqual([...entries.keys()].sort(), [...files].sort());
   for (const name of files) assert.deepEqual(entries.get(name), fs.readFileSync(path.join(root, name)), name);
   assert.deepEqual(entries.get('LICENSE'), fs.readFileSync(path.join(project, 'LICENSE')));
@@ -270,7 +270,7 @@ test('explicit Chinese and space root works from an unrelated cwd, including rel
   build(path.relative(cwd, root), { cwd });
   const version = JSON.parse(inspectZip(old).get('manifest.json')).version;
   assert.deepEqual(fs.readFileSync(path.join(root, 'last-release', `ppt-capture-v${version}.zip`)), old);
-  assert.equal(inspectZip(latest(root)).size, 32);
+  assert.equal(inspectZip(latest(root)).size, 33);
 });
 
 test('CLI defaults to its own repository root independently of cwd', () => {
@@ -280,7 +280,7 @@ test('CLI defaults to its own repository root independently of cwd', () => {
   fs.copyFileSync(release, script);
   const cwd = fs.mkdtempSync(path.join(suite, 'default-unrelated-'));
   build(undefined, { script, cwd });
-  assert.equal(inspectZip(latest(root)).size, 32);
+  assert.equal(inspectZip(latest(root)).size, 33);
   assert.deepEqual(fs.readdirSync(cwd), [], 'must not create archives in cwd');
 });
 
