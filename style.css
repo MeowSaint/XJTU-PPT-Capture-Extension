@@ -62,6 +62,11 @@ input[type="file"]::file-selector-button { min-height: 26px; margin-right: 6px; 
 #pdf { padding-inline: 16px; }
 .editor-layout { display: grid; grid-template-columns: 240px minmax(0, 1fr); min-height: 0; padding: 0 8px 8px 0; }
 .workspace-tools { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+.library-tools { padding: 6px 16px 12px; flex-shrink: 0; }
+#resume-status { margin-top: 8px; }
+#suspects-panel { margin-top: 12px; }
+.suspect-range { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.suspect-range button { font-size: 12px; }
 .setting-tabs { display: grid; grid-template-columns: repeat(3, 1fr); flex-shrink: 0; margin: 0 16px; border-bottom: 1px solid var(--border); }
 .setting-tabs [role="tab"] { padding: 10px 4px 8px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; color: var(--muted); }
 .setting-tabs [aria-selected="true"] { border-bottom-color: var(--accent); color: var(--accent); font-weight: 600; }

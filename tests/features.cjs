@@ -5,7 +5,7 @@ const fs = require('node:fs'), path = require('node:path'), os = require('node:o
 const {spawnSync} = require('node:child_process'), {createHash} = require('node:crypto');
 const {dependency, browserOptions} = require('./runtime.cjs');
 const {chromium} = dependency('playwright'), sharp = dependency('sharp');
-const root = path.resolve(__dirname, '..'), reportRoot = path.join(root, '.test-output', 'v3.0.1');
+const root = path.resolve(__dirname, '..'), reportRoot = path.join(root, '.test-output', 'v3.1.0');
 fs.mkdirSync(reportRoot, {recursive: true});
 const output = fs.mkdtempSync(path.join(reportRoot, 'features-'));
 const github = 'https://api.github.com/repos/MeowSaint/XJTU-PPT-Capture-Extension/releases/latest';
@@ -14,7 +14,7 @@ const campus = 'https://rms-v5.xjtu.edu.cn', courseURL = code => `${campus}/my-c
 const results = [], errors = [], unexpected = [], requests = [], updateRequests = [], keyboardTrace = [], timers = new Set();
 const pending = {old: [], update: [], load: []};
 const consentKey = 'ppt-study-consent', updateKey = 'ppt-update-state';
-let context, server, worker, temp, extensionOrigin, origin, alternate, updateOrigin, retained, initialActive = 0, initialPeak = 0;
+let context, server, worker, temp, extensionOrigin, origin, alternate, updateOrigin, retained, retainedPages, initialActive = 0, initialPeak = 0;
 const copiedHashes = {}, finalHashes = {};
 let updateMode = 'current', holdUpdate = false, holdLoad = false, fixturePhase = 'initial';
 const transport = 'Temporary background fetch wrapper substitutes ONLY the exact fixed GitHub API URL with local /__update, forwarding the original fetch options. PPTState parsing/cache/storage and serialized background messages are unchanged. Chromium service-worker fetches bypass Playwright context.route.';
@@ -35,7 +35,7 @@ function sources(phase) {
   return ['video.mp4', 'lecture.m3u8', 'login.mp4', 'data.mp4', 'unknown.mp4'].map(name => `${origin}/initial/${name}`);
 }
 function releaseJSON() {
-  const tag = updateMode === 'prerelease' ? 'v9.0.0-beta.1' : updateMode === 'current' ? 'v3.0.1' : 'v3.10.0';
+  const tag = updateMode === 'prerelease' ? 'v9.0.0-beta.1' : updateMode === 'current' ? 'v3.1.0' : 'v3.10.0';
   return {tag_name: tag, draft: false, prerelease: updateMode === 'prerelease', published_at: '2026-11-05T00:00:00Z',
     html_url: `${repository}/releases/tag/${tag}`, assets: [{name: 'ppt-capture.zip', browser_download_url: `${repository}/releases/download/${tag}/ppt-capture.zip`}]};
 }
@@ -47,7 +47,7 @@ async function setup() {
   assert.equal(hls.status, 0, hls.stderr || hls.error?.message);
   const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360"><rect width="640" height="360" fill="#f8f5ef"/><rect x="35" y="40" width="570" height="80" fill="#a52a35"/><text x="55" y="92" fill="white" font-family="sans-serif" font-size="29">LOCAL TEST FIXTURE</text><text x="55" y="190" font-family="sans-serif" font-size="25">Synthetic retained page</text></svg>';
   const jpeg = await sharp(Buffer.from(svg)).jpeg().toBuffer(); fs.writeFileSync(path.join(output, 'local-retained-page.jpg'), jpeg);
-  retained = {id: 42, order: 1024, data: 'data:image/jpeg;base64,' + jpeg.toString('base64'), w: 640, h: 360, time: 1793808000000,
+  retained = {id: 42, lessonId: 'features-retained', order: 1024, data: 'data:image/jpeg;base64,' + jpeg.toString('base64'), w: 640, h: 360, time: 1793808000000,
     sourceName: 'LOCAL TEST FIXTURE', course: {name: 'Local fixture', date: '2026-11-05', start: '08:00:00'}, coursePage: ''};
   const mp4 = fs.readFileSync(fixture);
   server = http.createServer((req, res) => {
@@ -86,7 +86,7 @@ async function setup() {
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
   origin = `http://127.0.0.1:${server.address().port}`; alternate = `http://localhost:${server.address().port}`; updateOrigin = `http://updates.test:${server.address().port}`;
   temp = fs.mkdtempSync(path.join(os.tmpdir(), 'ppt-features-')); const ext = path.join(temp, 'extension'); fs.mkdirSync(ext);
-  for (const name of ['manifest.json', 'background.js', 'media.js', 'course.js', 'batch.js', 'page-hook.js', 'content.js', 'capture.html', 'capture.js', 'page-store.js', 'disk-cache.js', 'scanner.js', 'style.css', 'pdf.js', 'extension-state.js', 'preflight.js', 'workspace.js', 'vendor', 'icons']) {
+  for (const name of ['manifest.json', 'background.js', 'media.js', 'course.js', 'batch.js', 'page-hook.js', 'content.js', 'capture.html', 'capture.js', 'page-store.js', 'library.js', 'disk-cache.js', 'scanner.js', 'style.css', 'pdf.js', 'extension-state.js', 'preflight.js', 'workspace.js', 'vendor', 'icons']) {
     fs.cpSync(path.join(root, name), path.join(ext, name), {recursive: true});
     if (fs.statSync(path.join(ext, name)).isFile()) copiedHashes[name] = createHash('sha256').update(fs.readFileSync(path.join(ext, name))).digest('hex');
   }
@@ -159,9 +159,12 @@ async function settled(page) {
 async function statusOf(page, url) { return page.locator('#sources option').evaluateAll((options, value) => { const option = options.find(option => option.value === value); return option ? {status: option.dataset.status, disabled: option.disabled, group: option.parentElement.label, title: option.title} : null; }, url); }
 async function screenshots(page, name, dialog) {
   for (const [width, height] of [[1280, 800], [1440, 900], [1920, 1080]]) {
-    await page.setViewportSize({width, height}); await page.reload();
+    await page.setViewportSize({width, height}); await page.reload(); await page.waitForFunction(() => ready);
+    if (name === 'normal') {
+      await page.locator('#file').setInputFiles(path.join(output, 'local-fixture.mp4')); await page.waitForFunction(() => !document.querySelector('#run').disabled);
+      if (!await page.locator('#pages article').count()) { await page.locator('#shot').click(); await page.waitForFunction(() => document.querySelectorAll('#pages article').length === 1 && !busy()); }
+    }
     await page.locator('#pages article').first().waitFor();
-    if (name === 'normal') { await page.locator('#file').setInputFiles(path.join(output, 'local-fixture.mp4')); await page.waitForFunction(() => !document.querySelector('#run').disabled); }
     if (name === 'update') { await page.waitForFunction(() => !document.querySelector('#check-updates').disabled); await page.locator('#check-updates').click(); }
     if (dialog) await page.locator(dialog + '[open]').waitFor();
     await page.evaluate(() => document.fonts.ready.then(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))));
@@ -233,7 +236,10 @@ async function closeTools() { for (const page of context.pages()) if (page.url()
     await test('real manual MP4 and cross-host HLS decode; preflight preserves HLS segment Referer', async () => {
       await page.locator('summary').filter({hasText: '手动视频地址'}).click(); await page.locator('#url').fill(`${origin}/initial/video.mp4`); await page.locator('#load-url').click();
       await page.waitForFunction(() => !document.querySelector('#run').disabled); assert((await page.locator('#video').evaluate(video => video.duration)) > 0);
+      assert.equal(await page.locator('#pages article').count(), 0, 'a new MP4 lesson starts with its own empty review list');
+      assert.deepEqual(await storedPages(), [retained], 'loading a new lesson preserves the original screenshot exactly');
       await page.locator('#sources').selectOption(`${origin}/initial/lecture.m3u8`); await page.locator('#load').click(); await page.waitForFunction(() => !document.querySelector('#run').disabled);
+      assert.equal(await page.locator('#pages article').count(), 0, 'HLS has a separate review list'); assert.deepEqual(await storedPages(), [retained]);
       const before = requests.length; await page.locator('#preflight-authorize').click();
       await until(() => requests.length > before, 'HLS retry did not issue a real probe'); await settled(page);
       const afterPreflight = requests.length;
@@ -241,6 +247,9 @@ async function closeTools() { for (const page of context.pages()) if (page.url()
       await until(() => requests.slice(afterPreflight).some(item => item.path.endsWith('.ts')), 'new HLS segment did not reach local server after preflight');
       const segments = requests.slice(afterPreflight).filter(item => item.path.endsWith('.ts')); assert(segments.every(item => item.referer === courseURL('initial')), 'new HLS segments retain course Referer after preflight');
       await page.locator('#video').evaluate(video => video.pause()); await screenshots(page, 'normal');
+      retainedPages = await storedPages(); assert.equal(retainedPages.length, 2);
+      assert.deepEqual(retainedPages.filter(record => record.id === retained.id), [retained], 'synthetic local captures leave the original lesson unchanged');
+      assert.equal(await page.locator('#pages article').count(), 1, 'only the local video lesson is displayed');
       await page.locator('#release-cache').click(); await page.waitForFunction(() => !document.querySelector('#discover').disabled);
     });
     await test('domain permission is requested inside the real click gesture before any probe', async () => {
@@ -275,7 +284,7 @@ async function closeTools() { for (const page of context.pages()) if (page.url()
       await until(async () => (await Promise.all(tabs.map(tab => tab.locator('#update-dialog').evaluate(node => node.open)))).filter(Boolean).length === 1, 'expected exactly one automatic update dialog');
       assert.equal(updateRequests.length - before, 1, 'background serial queue shares one cached GET');
       const opened = await Promise.all(tabs.map(tab => tab.locator('#update-dialog').evaluate(node => node.open))); page = tabs[opened.indexOf(true)];
-      assert.equal(await page.locator('#update-current').textContent(), '3.0.1'); assert.equal(await page.locator('#update-version').textContent(), '3.10.0');
+      assert.equal(await page.locator('#update-current').textContent(), '3.1.0'); assert.equal(await page.locator('#update-version').textContent(), '3.10.0');
       assert.equal(await page.locator('#update-release').getAttribute('href'), `${repository}/releases/tag/v3.10.0`);
       assert.equal(await page.locator('#update-download').getAttribute('href'), `${repository}/releases/download/v3.10.0/ppt-capture.zip`);
       await screenshots(page, 'update', '#update-dialog');
@@ -321,7 +330,7 @@ async function closeTools() { for (const page of context.pages()) if (page.url()
       await page.screenshot({path: path.join(output, 'manual-update-during-load.png')});
       await page.locator('#update-later').click(); assert.equal(await page.locator('#stop').isEnabled(), true);
       holdLoad = false; release('load'); await page.waitForFunction(() => !document.querySelector('#run').disabled);
-      assert.deepEqual(await storedPages(), [retained]); await page.close();
+      assert.deepEqual(await storedPages(), retainedPages, 'dialogs and remote loads preserve every saved lesson'); await page.close();
     });
     await test('terms and manual update do not require screenshot storage to initialize', async () => {
       await resetUpdate('current'); page = await context.newPage(); page.setDefaultTimeout(12000);
@@ -345,14 +354,18 @@ async function closeTools() { for (const page of context.pages()) if (page.url()
       assert.equal(await page.locator('#update-release').isVisible(), false); assert.match(await page.locator('#update-status').textContent(), /稳定|最新/); await page.close();
       await resetUpdate('offline'); page = await openTool(); await page.waitForFunction(() => !document.querySelector('#check-updates').disabled);
       assert.equal(await page.locator('#update-dialog').evaluate(node => node.open), false); await page.locator('#file').setInputFiles(fixture);
-      await page.waitForFunction(() => !document.querySelector('#shot').disabled); await page.locator('#shot').click(); await page.waitForFunction(() => document.querySelectorAll('#pages article').length === 2);
-      await page.close();
+      await page.waitForFunction(() => !document.querySelector('#shot').disabled);
+      assert.equal(await page.locator('#pages article').count(), 0, 'a local video on this course has its own empty lesson');
+      await page.locator('#shot').click(); await page.waitForFunction(() => document.querySelectorAll('#pages article').length === 1 && !busy());
+      const saved = await storedPages(), oldIds = new Set(retainedPages.map(record => record.id));
+      assert.equal(saved.length, retainedPages.length + 1); assert.deepEqual(saved.filter(record => oldIds.has(record.id)), retainedPages, 'offline extraction preserves every existing screenshot exactly');
+      retainedPages = saved; await page.close();
     });
     await test('obsolete consent version prompts again through actual checkbox and acceptance', async () => {
       await worker.evaluate(key => chrome.storage.local.set({[key]: {version: 'course-materials-v0', acceptedAt: 1}}), consentKey);
       page = await openTool(); await page.locator('#terms-dialog[open]').waitFor(); assert.equal(await page.locator('.app-shell').evaluate(node => node.inert), true);
       assert.equal(await page.locator('#terms-accept').isDisabled(), true); await accepted(page);
-      assert.equal((await storedPages()).length, 2); await page.close();
+      assert.deepEqual(await storedPages(), retainedPages, 'renewing consent preserves all lessons and original image bytes'); await page.close();
     });
     assert(updateRequests.every(item => !item.cookie && !item.referer && item.method === 'GET'), 'update transport sends no course cookies or Referer');
     assert.deepEqual(errors, [], 'page errors must fail'); assert.deepEqual([...new Set(unexpected)], [], 'unexpected external requests must fail');
@@ -367,7 +380,7 @@ async function closeTools() { for (const page of context.pages()) if (page.url()
     const changedDuringRun = Object.keys(copiedHashes).filter(name => copiedHashes[name] !== finalHashes[name]);
     const report = {status: process.exitCode ? 'fail' : 'pass', scope: process.argv.includes('--focus-diagnostic') ? 'focus diagnostic only' : 'full feature suite', output, transport, copiedHashes, finalHashes, changedDuringRun, permissionTest: 'Only the disposable extension grants localhost; faithful UI contains/request shim exercises an already-granted host without a headless native prompt.', results, counters: {mediaAndAPI: requests.length, updateGET: updateRequests.length, initialPeak}, requests, updateRequests, keyboardTrace, errors, unexpected: [...new Set(unexpected)], failure};
     fs.writeFileSync(path.join(output, 'results.json'), JSON.stringify(report, null, 2));
-    fs.writeFileSync(path.join(reportRoot, 'feature-test-report.md'), `# v3.0.1 independent browser features\n\nStatus: ${report.status}; scope: ${report.scope}\n\nEvidence: ${path.relative(reportRoot, output)}/results.json\n\n${transport}\n\nPermission timing uses a faithful Chrome API stub over an already-granted local test host. All media and retained pages are synthetic local fixtures.\n\n${results.map(result => `- ${result.status.toUpperCase()}: ${result.name}`).join('\n')}\n\nCounters: ${JSON.stringify(report.counters)}\n\nPage errors: ${errors.length}; unexpected external requests: ${report.unexpected.length}.\n${failure ? '\nFailure:\n```\n' + failure + '\n```\n' : ''}`);
+    fs.writeFileSync(path.join(reportRoot, 'feature-test-report.md'), `# v3.1.0 independent browser features\n\nStatus: ${report.status}; scope: ${report.scope}\n\nEvidence: ${path.relative(reportRoot, output)}/results.json\n\n${transport}\n\nPermission timing uses a faithful Chrome API stub over an already-granted local test host. All media and retained pages are synthetic local fixtures.\n\n${results.map(result => `- ${result.status.toUpperCase()}: ${result.name}`).join('\n')}\n\nCounters: ${JSON.stringify(report.counters)}\n\nPage errors: ${errors.length}; unexpected external requests: ${report.unexpected.length}.\n${failure ? '\nFailure:\n```\n' + failure + '\n```\n' : ''}`);
     console.log('Feature evidence: ' + output);
   }
 })();

@@ -13,7 +13,7 @@
       <div class="brand-block">
         <img class="app-mark" src="icons/icon-32.png" width="28" height="28" alt="">
         <h1>课程 PPT 截取</h1>
-        <span class="version">3.0.1</span>
+        <span class="version">3.1.0</span>
         <button id="check-updates" class="button-quiet" type="button">检查更新</button>
         <button id="terms-open" class="button-quiet" type="button">使用约定</button>
       </div>
@@ -25,6 +25,10 @@
 
     <div class="editor-layout">
       <aside id="workspace-tools" class="workspace-tools" aria-label="视频与设置">
+        <div class="library-tools">
+          <label class="field-stack" for="lesson-select"><span>本机课次</span><select id="lesson-select"><option value="">尚未保存课次</option></select></label>
+          <button id="resume-load" class="source-load" type="button" hidden>加载本节原视频</button>
+        </div>
         <div class="setting-tabs" role="tablist" aria-label="工作台设置">
           <button id="tab-source" type="button" role="tab" aria-selected="true" aria-controls="panel-source">视频</button>
           <button id="tab-extraction" type="button" role="tab" aria-selected="false" aria-controls="panel-extraction" tabindex="-1">提取</button>
@@ -147,7 +151,8 @@
               <option value="handout">笔记讲义 · A4 每页两张</option>
             </select>
           </label>
-          <p class="note pane-note">点右上角按钮会按当前顺序导出全部保留页面（卡片上的勾选框只用来批量删除）。</p>
+          <button id="course-zip" class="source-load" type="button" disabled>下载整课 PDF 包</button>
+          <p class="note pane-note">右上角导出本节全部保留页面；整课 PDF 包会把同课程各节分别保存为 PDF。卡片勾选框只用来批量删除。</p>
           <p class="note pane-note">笔记讲义为 A4 双联并带手写横线；图片包内为按页序命名的原图 JPEG。</p>
         </section>
       </aside>
@@ -171,6 +176,7 @@
           <div class="video-tools">
             <div class="extraction-actions" role="group" aria-label="提取操作">
               <button id="run" type="button" disabled>开始快速提取</button>
+              <button id="restart-scan" type="button" disabled hidden>从头重扫</button>
               <button id="stop" type="button" disabled>停止并保留结果</button>
               <button id="shot" type="button" disabled>保存当前页</button>
             </div>
@@ -183,7 +189,13 @@
           <div class="capture-feedback">
             <progress id="progress" max="1" value="0" aria-label="提取进度"></progress>
             <p id="status" class="status-line" role="status" aria-live="polite">尚未加载视频</p>
+            <p id="resume-status" class="note">每节截图、裁剪和提取设置会保存在本机。</p>
           </div>
+          <details id="suspects-panel" class="drawer">
+            <summary id="suspects-count">待复核时间段 · 0</summary>
+            <p class="note">过渡画面可能漏页，加载原视频后可回看或只细查这一段。细查仍不稳定时会继续保留记录。</p>
+            <div id="suspect-ranges"></div>
+          </details>
         </section>
 
         <section id="results" aria-label="幻灯片校对">
@@ -238,7 +250,7 @@
   </dialog>
   <dialog id="update-dialog" class="workspace-dialog" aria-labelledby="update-title" aria-describedby="update-status">
     <h2 id="update-title">扩展更新</h2>
-    <p>当前版本 <span id="update-current">3.0.1</span><span id="update-available" hidden> · 新版本 <strong id="update-version"></strong></span></p>
+    <p>当前版本 <span id="update-current">3.1.0</span><span id="update-available" hidden> · 新版本 <strong id="update-version"></strong></span></p>
     <p id="update-status" class="note" role="status" aria-live="polite"></p>
     <div class="dialog-actions">
       <a id="update-release" target="_blank" rel="noopener noreferrer" hidden>查看更新</a>
@@ -256,6 +268,7 @@
   <script src="preflight.js"></script>
   <script src="disk-cache.js"></script>
   <script src="page-store.js"></script>
+  <script src="library.js"></script>
   <script src="capture.js"></script>
   <script src="workspace.js"></script>
 </body>

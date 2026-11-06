@@ -7,7 +7,7 @@ const {dependency, browserOptions} = require('./runtime.cjs');
 const {chromium} = dependency('playwright'), sharp = dependency('sharp');
 const {PDFDocument} = dependency('pdf-lib');
 const root = path.resolve(__dirname, '..');
-const scratch = path.join(root, '.test-output', 'v3.0.0');
+const scratch = path.join(root, '.test-output', 'v3.1.0');
 fs.mkdirSync(scratch, {recursive: true});
 const output = fs.mkdtempSync(path.join(scratch, 'review-'));
 const fixture = path.join(output, 'review-video.mp4');
@@ -29,7 +29,8 @@ async function stored() {
       request.onsuccess = () => {
         const database = request.result, tx = database.transaction(['pages', 'settings', 'assets']);
         const pages = tx.objectStore('pages').getAll(), naming = tx.objectStore('settings').get('exportNaming'), assets = tx.objectStore('assets').getAll();
-        tx.oncomplete = () => { database.close(); resolve({pages: pages.result.sort((a, b) => a.order - b.order), naming: naming.result, assets: assets.result}); };
+        const lesson = tx.objectStore('settings').get('lesson:' + activeLesson?.id);
+        tx.oncomplete = () => { database.close(); resolve({pages: pages.result.sort((a, b) => a.order - b.order), naming: naming.result, assets: assets.result, lesson: lesson.result}); };
         tx.onerror = () => { database.close(); reject(tx.error); };
       };
     });
@@ -41,7 +42,7 @@ async function stored() {
       });
       return {...metadata, data, ...(asset.sig === undefined ? {} : {sig: asset.sig})};
     }));
-    return {pages, naming: snapshot.naming};
+    return {pages, naming: snapshot.naming, lesson: snapshot.lesson};
   });
 }
 async function seed(specs, exportNaming = naming) {
@@ -51,7 +52,7 @@ async function seed(specs, exportNaming = naming) {
       const data = images[spec.image || 0], image = new Image(); image.src = data; await image.decode();
       const canvas = document.createElement('canvas'); canvas.width = 192; canvas.height = 108;
       const ctx = canvas.getContext('2d'); ctx.drawImage(image, 0, 0, 192, 108);
-      const record = {id: index + 1, order: (index + 1) * 1024, data, w: 640, h: 360, time: 1793808000000,
+      const record = {id: index + 1, lessonId: 'review-fixture', order: (index + 1) * 1024, data, w: 640, h: 360, time: 1793808000000,
         sourceName: 'review-video.mp4', sourceTime: index / 4, course: naming.course, coursePage: '', batchJobId: '',
         sig: ctx.getImageData(0, 0, 192, 108).data, ...spec};
       delete record.image; delete record.signature;
@@ -59,7 +60,7 @@ async function seed(specs, exportNaming = naming) {
       if (spec.signature === 'short') record.sig = new Uint8ClampedArray(4);
       return record;
     }));
-    await namingSave.catch(() => {}); db.close();
+    await namingSave.catch(() => {}); await lessonSave.catch(() => {}); db.close();
     await new Promise((resolve, reject) => {
       const request = indexedDB.deleteDatabase('course-ppt');
       request.onsuccess = resolve; request.onerror = () => reject(request.error);
@@ -197,10 +198,15 @@ function zipEntries(bytes) {
       await page.locator('#undo').click(); await count(4); assert.deepEqual(await stored(), original);
     });
 
-    await test('last-page Undo restores naming atomically and clear invalidates history', async () => {
+    await test('last-page deletion retains lesson naming, Undo is atomic and clear invalidates history', async () => {
       await seed([{id: 12, order: 8128}], {...naming, course: {...naming.course, name: '删除前命名'}});
       const original = await stored(); await page.locator('#pages article button').click(); await count(0);
-      assert.equal(await page.locator('#course-name').inputValue(), '');
+      assert.equal(await page.locator('#course-name').inputValue(), '删除前命名');
+      const empty = await stored(); assert.deepEqual(empty.naming, original.naming); assert.deepEqual(empty.lesson, original.lesson);
+      await page.reload(); await count(0); assert.equal(await page.locator('#course-name').inputValue(), '删除前命名');
+      assert.deepEqual(await stored(), empty, 'empty lesson naming persists after reload');
+      await seed([{id: 12, order: 8128}], {...naming, course: {...naming.course, name: '删除前命名'}});
+      await page.locator('#pages article button').click(); await count(0);
       await page.locator('#pages').focus(); await page.keyboard.press(modifier + '+z'); await count(1);
       assert.deepEqual(await stored(), original); await page.reload(); await count(1); assert.deepEqual(await stored(), original);
       await seed([{id: 1}, {id: 2, image: 1}]); await page.locator('#pages article button').first().click(); await count(1);
@@ -231,19 +237,21 @@ function zipEntries(bytes) {
       const captured = (await stored()).pages[0]; assert.match(captured.sourceKey, /^file:/);
       await atTime(2.5); await page.locator('#pages .slide-time').click();
       await page.waitForFunction(() => Math.abs(document.querySelector('#video').currentTime - 1.25) < 0.01);
-      await load(wrong); await atTime(2.5); await page.locator('#pages .slide-time').click();
-      assert.match(await page.locator('#status').textContent(), /来源不一致/);
-      assert.equal(await page.locator('#video').evaluate(video => video.currentTime), 2.5, 'same name does not prove same video');
+      await load(wrong); await atTime(2.5); await count(0);
+      const wrongKey = await page.evaluate(() => loadedIdentity.sourceKey);
+      assert.notEqual(wrongKey, captured.sourceKey, 'same-name files with different bytes have distinct persisted identities');
+      assert.notEqual(await page.evaluate(() => activeLesson.id), captured.lessonId, 'loading a different file selects its own lesson');
+      assert.deepEqual((await stored()).pages, [captured], 'the original lesson retains its exact screenshot and metadata');
       await seed([{id: 1, sourceTime: 1.25, sourceKey: captured.sourceKey},
         {id: 2, sourceTime: 1.25, sourceKey: captured.sourceKey, coursePage: 'https://example.invalid/other-course'},
         {id: 3, sourceTime: 1.25, sourceKey: captured.sourceKey, batchJobId: 'other-batch'},
-        {id: 4, sourceTime: 1.25}]);
+        {id: 4, sourceTime: 1.25}, {id: 5, sourceTime: 1.25, sourceKey: wrongKey}]);
       await load(fixture); await atTime(2.5);
-      for (const index of [1, 2, 3]) { await page.locator('#pages .slide-time').nth(index).click(); assert.match(await page.locator('#status').textContent(), /来源不一致/); assert.equal(await page.locator('#video').evaluate(video => video.currentTime), 2.5); }
+      for (const index of [1, 2, 3, 4]) { await page.locator('#pages .slide-time').nth(index).click(); assert.match(await page.locator('#status').textContent(), /来源不一致/); assert.equal(await page.locator('#video').evaluate(video => video.currentTime), 2.5); }
       await page.locator('#pages .slide-time').first().focus(); await page.keyboard.press('Enter');
       await page.waitForFunction(() => Math.abs(document.querySelector('#video').currentTime - 1.25) < 0.01);
       await page.locator('#release-cache').click(); await idle(); await page.locator('#pages .slide-time').first().click();
-      assert.match(await page.locator('#status').textContent(), /重新加载/); await count(4);
+      assert.match(await page.locator('#status').textContent(), /重新加载/); await count(5);
     });
 
     await test('conservative adjacent cleanup requires persisted identity and is one reversible deletion batch', async () => {
@@ -289,7 +297,8 @@ function zipEntries(bytes) {
     });
 
     await test('1280×800, 1440×900 and 1920×1080 keep video beside a bounded independently scrolling contact sheet', async () => {
-      await seed(Array.from({length: 72}, (_, i) => ({id: i + 1, image: i % 3, sourceTime: i / 20}))); await load(fixture); await atTime(0.25);
+      await seed([]); await load(fixture); const sourceKey = await page.evaluate(() => loadedIdentity.sourceKey);
+      await seed(Array.from({length: 72}, (_, i) => ({id: i + 1, image: i % 3, sourceTime: i / 20, sourceKey}))); await load(fixture); await atTime(0.25);
       const geometry = [];
       for (const [width, height] of [[1280, 800], [1440, 900], [1920, 1080]]) {
         await page.setViewportSize({width, height});
