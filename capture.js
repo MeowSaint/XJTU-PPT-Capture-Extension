@@ -1545,7 +1545,7 @@ async function realTick() {
 $('run').onclick = () => {
   if (busy()) return;
   if (activeBatchJob?.requiresCrop && !activeBatchJob.cropConfirmed) {
-    startSelection('crop');
+    if (selectionMode !== 'crop') startSelection('crop');
     const prompt = '请先在 0 路视频画面中框选 PPT 区域；PPT 已占满画面时，点击“使用完整画面”即可。';
     status(prompt); $('batch-status').textContent = prompt; return;
   }
