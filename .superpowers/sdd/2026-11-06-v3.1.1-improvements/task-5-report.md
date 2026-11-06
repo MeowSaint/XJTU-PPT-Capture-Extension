@@ -1,6 +1,6 @@
 # Task 5 实施报告：3.1.1 元数据、使用说明与完整回归
 
-状态：**BLOCKED**。Task5 元数据、说明和测试探针适配已完成；八个其他套件通过。integration 证明了 Task1 的裁剪扫描保护缺陷，须由原拥有者修复并独立复核后，再恢复 Task5 完成验证。父任务已确认该裁定，当前不声称完整回归或 3.1.1 发布准备已完成。
+状态：**BLOCKED**。Task5 元数据、说明和测试探针适配已完成。首次 integration 发现的 Task1 裁剪保护缺陷已由原拥有者修复并独立批准；恢复后的 integration 越过该边界和获批的清空状态适配，却在真实复选框取消勾选后发现模型仍选中的新失败，已再次报告父任务。保留首次八个套件的通过记录，并复用源码修复后的 improvements 20/20；当前不声称完整回归或 3.1.1 发布准备已完成。
 
 ## 范围与实现
 
@@ -13,13 +13,47 @@ BASE: 25758e1092ce1aafa25da0e1f3c38a314a2955ba
 original main: 40c02bb（未操作）
 ```
 
-依据 Task5 brief、批准的全局计划及 61 行设计实施。Task1–4 在本任务前已独立批准；下文计数均为本次重新运行的完整回归，没有沿用历史通过记录。使用 ponytail full 控制修改范围，并以 humanizer-zh 校正新增中文说明。未委派、未使用真实课程或日常浏览器资料、未访问外网、未变更运行时依赖，未执行项目根目录的打包、发布或远程 Git 操作。
+依据 Task5 brief、批准的全局计划及 61 行设计实施。Task1–4 在本任务前已独立批准；首次串行表的计数均为本任务执行结果，没有混入历史 Task1–4 记录。恢复阶段则明确区分自己新跑的 integration 与复用的原拥有者修复后证据，不声称重新执行九套。使用 ponytail full 控制修改范围，并以 humanizer-zh 校正新增中文说明。未委派、未使用真实课程或日常浏览器资料、未访问外网、未变更运行时依赖，未执行项目根目录的打包、发布或远程 Git 操作。
 
 - 将 manifest、package、lockfile 两个根版本字段、界面两处版本标签和 README 当前版本统一为 `3.1.1`。lockfile 已与基线逐项比较，除这两个版本字段外完全一致。
 - 更新 features 的“当前版本”响应、界面断言和报告标签，以及 integration 的当前发布响应、review/library 的当前产物目录；保留 `3.10.0`、预发布和其他有意比较旧版本的 fixture。
 - 增加 `test:improvements` 脚本，补齐浏览器测试前提、自定义浏览器/依赖路径、串行顺序和本地合成验证的边界。
 - README 说明 0.5 秒精细采样的耗时与漏页边界、旧 2/8 秒设置保留、单个比较忽略区与原始截图保留、逐对相似页决策/取消/一次撤销、Shift 连选/取消、预览 S/V 与导航、单条待复核确认、历史删除确认和大小估算、逐条读取旧素材、同机位 0 路裁剪复用与实际比例/轨道检查、所选导出页序、普通导出保留全部、默认关闭的时间/书签和讲义布局、批量 ZIP 的显示课程范围。
 - 父任务在初次 integration 失败后明确扩展白名单，允许仅将四处旧 `cropEditing` 探针适配为 `selectionMode`：需要框选时严格比较 `'crop'`，已确认时严格比较 `null`。其余裁剪确认、换轨、断点、重载和图片保留断言原样保留；已允许套件内未发现其他同名旧探针。
+
+## 恢复后的验证与第二个阻塞
+
+恢复基线：`38334bea57e9e78fb19c948ba1858418e658efa7`，已核实分支和干净工作树。首次任务基线仍为 `25758e1092ce1aafa25da0e1f3c38a314a2955ba`，用于父任务完整 Task5 审核，不把恢复基线误当作全任务起点。
+
+父任务要求先读原拥有者的 follow-up report/review 和更新后的 21 行 brief。源码修复提交 `a3f1ee080b3d0a5b6344fb0961ee89c4133b6ce9` 仅在 Run 保护中增加 `selectionMode !== 'crop'` 条件，使重复保护点击保留已有裁剪。新独立复核批准，Critical/Important/Minor 均为 0。本任务没有修改生产源码。
+
+| 验证阶段 | 证据与结果 | 复用边界 |
+| --- | --- | --- |
+| 首次 Task5、源码修复前 | 下文九条串行命令中的八个其他套件通过，integration 失败 | 历史记录，不声称修复后重跑了九套 |
+| Task1 源码修复后、原拥有者执行 | `task1-followup-integration.log`：裁剪保护、真实拖动、持久化、重载、续签、断点、换轨、完整画面与提取通过，旧清空预期第 517 行超时；`task1-followup-improvements.log`：20/20、exit 0 | 采用拥有者已收取的执行结果；job 为 `bash-6090b6ac8f7a4fd7` / `bash-683e365ad21848d2`，未由本任务重复执行；导出产物 `task4-DgxRYO/` |
+| Task5 恢复、按新 brief 适配清空 fixture 后 | `npm run test:integration`，job `bash-7dd65de3ae0041aa`，exit 1，完整日志 `task5-test-integration-final.log` | 已收取最终状态；无其他套件重跑或生产源码修改 |
+
+上述新日志和导出产物的根目录都是 `.test-output/v3.1.1/`。本次恢复运行的精确命令如下；运行前 `node --check tests/integration.cjs` 与 `git diff --check` 均通过：
+
+```sh
+set -o pipefail
+PPT_TEST_BROWSER='/Users/jasondai/Library/Caches/ms-playwright/chromium-1248/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing' npm run test:integration 2>&1 | tee .test-output/v3.1.1/task5-test-integration-final.log
+```
+
+原拥有者后续报告、父任务和新复核人已独立裁定：清空事务仅移除页面并重置 task/suspects，保留已确认裁剪和 override；`PPTBatch.automatic(job)` 允许未被拒绝的已确认 0 路裁剪自动排队。因此旧的 `needs-crop` 及无队列假设过时。本次窄适配严格验证裁剪/override 原值、确认、未拒绝、pending/selected、task=null、suspects=[]，保留 `[4,4,0]` 及其他课次原字节和顺序断言；随后仅通过该课次的真实 checkbox 取消勾选，再保留原 A 单独清空和重跑检查。未跳过场景或修改产品来满足 fixture。
+
+恢复运行已通过原裁剪保护/真实拖动及上述清空保持断言；在 `tests/integration.cjs:528` 的新增真实取消勾选检查失败：
+
+```text
+AssertionError [ERR_ASSERTION]: only the cleared 0-only lesson is explicitly deselected
+true !== false
+```
+
+只读检查定位到界面与模型失配的顺序：`capture.js:1358` 先用旧 `job.selected` 设置 checkbox.checked；`capture.js:1362` 才调用 `syncBatchJob(job)`，其第 1348 行把已清空的完成课次改为 pending/selected=true。controls 第 681–683 行仅刷新 disabled，不刷新 checked。原先未选中的手工 0 路课次因而显示未勾选，而模型已选中；Playwright 的真实 `uncheck()` 对已未勾选控件不会发送 change，随后严格模型断言仍为 true。这一 DOM 状态没有另作运行时快照；证据是已通过的严格模型状态、实际 checkbox 操作后的失败以及同步源码顺序。onchange 第 1359 行同步更新模型，不是等待持久化的问题。
+
+父任务独立读过这一顺序，接受为具体产品缺陷，要求交回原 Task3 拥有者修复。按明确授权，在原真实 uncheck 前增加 `assert.equal(await fallbackRow.locator('input[type="checkbox"]').isChecked(), true, ...)`，直接保护用户可见勾选状态；其后的真实取消勾选、模型 false、原生 A/B 已完成、无队列、A 单独重跑和精确其他课次数据断言均保留。该新增 DOM 断言尚未执行；父任务明确不重复运行 RED，已存在的实际操作失败和源码顺序足以交接。没有 check→uncheck、强制派发事件、额外 render、等待或全选切换绕行，也没有产品修改或错误/网络/PDF 完整通过声明。
+
+恢复测试提交：`208561cfc7e4152a0110cfc30e6e6bb66e41a42c`（`test: cover confirmed crop queue selection after clear`），仅 `tests/integration.cjs`，13 行新增、2 行删除。最终 `node --check tests/integration.cjs` 与 `git diff --check` 均 exit 0。报告单独提交，SHA 由最终交接消息提供。所有本任务后台作业已收取，无遗留作业。当前按父任务裁定停止修改；下一步由原 Task3 拥有者作窄范围渲染顺序修复，运行覆盖该状态的当前源码 integration 并取得新独立审核。若源码保持不变，Task5 恢复时复用该最终 integration 证据和已记录的其他结果，不重复九套。
 
 ## 实际验证环境
 
@@ -36,7 +70,7 @@ pdftoppm: /opt/homebrew/bin/pdftoppm, 26.10.0
 
 使用已有父目录 node_modules，未安装或下载任何内容。默认 Chromium 1234 缺失；每个浏览器命令均显式设置上面的同一个 `PPT_TEST_BROWSER`。套件只使用合成数据、隔离上下文或测试临时扩展配置及本地/拦截响应，不使用 Brave MCP 或专用/日常用户资料。
 
-## 本次串行回归
+## 首次串行回归（源码修复前）
 
 每条命令均通过 `set -o pipefail` 与 `tee` 捕获完整日志；下表命令前的浏览器环境变量与上文完全一致。输出根目录为当前工作目录。
 
@@ -76,7 +110,7 @@ bridge 断言无页面错误；review、features、library 断言无页面错误
 
 memory 实测缩略图最大并发读取为 2，1000 页签名缓存按 32 页分批读取，释放 82,944,000 字节；256 MiB 合成流的采样 JS 堆增量为 51,544 字节。这些值反映此次 JavaScript 堆与缓存行为，不代表浏览器进程 RSS 或真实课程的固定占用。
 
-## 失败、裁定与修正
+## 首次失败、裁定与修正（历史）
 
 第一次 integration 到达 MP4/HLS/本地提取与自动批量完成后，在原第 426 行等待已移除的变量时终止：
 
@@ -130,11 +164,11 @@ overlay 始终完整可见，矩形为 x=264、y=132.5、width=496、height=279�
 
 导出证据目录包含 default-all、selected-one、selected-many、annotated-single、annotated-handout、annotated-selected、snapshot 等 PDF，以及 JPEG ZIP、course-A、batch-course-B 和 renamed-local-course 等课程 ZIP；覆盖页序、图片字节、PDF 结构、讲义/书签及异步快照。
 
-## 提交、自查与交接边界
+## 首次提交、自查与交接边界
 
 实现提交：`e5029ebad6cf6632838c395d8e697880ff3397be`（`chore: prepare v3.1.1 metadata and usage docs`），包含 10 个白名单文件，66 行新增、33 行删除。按父任务的阻塞交接要求先提交已完成部分及严格回归探针；这是 BLOCKED 交接，不是通过批准。报告另作单独提交，其 SHA 在最终交接消息中提供。自查仅限本任务白名单 diff；临时诊断代码已移除，未削弱原断言。最终语法和 `git diff --check` 已通过。父任务修改的计划、brief、audit/ledger 未纳入本任务提交，忽略目录的合成输出未提交。
 
-下一步必须由父任务恢复原 Task1 拥有者修复扫描保护并取得新一轮范围内审核；随后恢复 Task5，重新运行受影响的 integration 和父任务指定验证。当前八个通过结果均产生于生产源码修复前。此处停止修改，不自行扩大范围或重复运行已经通过的八个套件。
+首次交接时，父任务须恢复原 Task1 拥有者修复扫描保护并重新审核；这一轮现已完成。当前八个首次通过结果仍标明产生于该源码修复前，新增修复后 improvements 和本次恢复 integration 的结果分别见上方证据矩阵。第二次阻塞须交回原 Task3 拥有者；不自行扩大范围或重复运行已经通过的套件。
 
 Chrome 114、Node.js 20 和真实课程站点没有验证。浏览器原生授权提示由测试替身验证请求时机，未声称测试真实用户点击授权或实际站点登录。精细扫描仍可能漏掉短于采样/稳定确认窗口的画面；大小为图片数据估算；相同机位须由用户确认。没有音频或 ASR 实现及承诺。
 
