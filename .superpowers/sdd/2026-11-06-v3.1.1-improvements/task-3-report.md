@@ -82,3 +82,53 @@ New tests cover byte metadata/sequential legacy reads; cancel and asynchronous t
 ## Limits and intentionally skipped work
 
 Validation is local synthetic Chromium/Node coverage, not a live authenticated university recording check. Crop tests decode real local MP4s; scanner methods are stubbed only to observe the crop at entry and inject deterministic stop/failure outcomes. Existing scanner/library regressions exercise real scan behavior separately. No benchmark, full repository suite, real user data deletion, external site interaction, version update or export redesign was performed. Cross-window coordinated UI updates are not added; existing asset lease behavior is preserved. Parent fresh spec/quality review remains the next gate.
+
+## Review fix round 1 — I1 and I2
+
+Status: **DONE**, pending parent rereview. This section supersedes the initial self-review's “no known unresolved defect” statement: the independent review found two important caller/lifecycle defects, both addressed here. Rereview base: `343688d5e4574f7432e26f52ff7addbb2a6be9e1`; the fix began at `ad005e9ed2d9b498713c15a8007c333fefe251b8` after the parent committed review material. Implementation/test commit: `13cf51d009bf36f762e44cb5225ece8223cf27f5`.
+
+### I1 — owning batch versus displayed batch
+
+Before the fix, reopening lesson B while batch A remained displayed either used a fallback job or persisted B's crop with A's batch snapshot. B's saved override could therefore replace the new crop on reload. Added `jobBatch(job = activeBatchJob)` to resolve the loaded job's owning page and snapshot; `persistBatch(job = null)` retains the existing displayed-batch default while allowing manual scan completion to save the owning job. Crop confirmation, actual-load crop validation and lesson-setting saves now use that ownership. Resume loads clone the owning saved batch when it differs from the displayed batch. Discovery and library deletion preserve an unrelated loaded job's association instead of clearing or replacing it by a colliding displayed job ID. Batch display scope remains independent of active lesson scope; export logic was not changed.
+
+The regression covers different courses sharing a job ID and different batch pages of one course with distinct job IDs. It refreshes A while B is loaded, injects an asynchronous IndexedDB failure only on B's batch write, checks exact disk/live crop and retained-snapshot rollback, retries, manually scans B, checks B's completion/override and unchanged A, then reloads B and checks its crop again. Shared setting-save and scan-completion callers are included.
+
+### I2 — failed final preparation save
+
+Before the fix, a successful zero-track load followed by failure of the final manual-job save cleared `activeBatchJob`, leaving `sourceReady` true and bypassing the scan crop guard. Final preparation now writes a proposed snapshot before publishing `manualPrepared`/manual state. A final-save failure preserves the loaded job association and crop restriction, restores its retained state label, and reports the failed save. The final save is busy-gated. Failed actual loads still detach unusable jobs.
+
+The regression rejects only the final manual-state batch write, after the source is ready. It covers both unconfirmed crop and an aspect-rejected override, verifies no scanner entry and no newly published `manualPrepared` flag, then explicitly confirms a crop, retries successfully and checks the override after reload.
+
+### Red/green evidence and commands
+
+Every browser invocation used the following executable assignment; no download or default executable fallback was used:
+
+```sh
+PPT_TEST_BROWSER='/Users/jasondai/Library/Caches/ms-playwright/chromium-1248/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing'
+```
+
+The exact focused commands were:
+
+```sh
+PPT_TEST_FILTER='reopened crop adjustments' PPT_TEST_BROWSER='/Users/jasondai/Library/Caches/ms-playwright/chromium-1248/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing' node tests/library.cjs
+PPT_TEST_FILTER='final manual preparation save failure' PPT_TEST_BROWSER='/Users/jasondai/Library/Caches/ms-playwright/chromium-1248/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing' node tests/library.cjs
+PPT_TEST_FILTER='reopened crop adjustments|final manual preparation save failure' PPT_TEST_BROWSER='/Users/jasondai/Library/Caches/ms-playwright/chromium-1248/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing' node tests/library.cjs
+```
+
+- **I1 red, exit 1:** `.test-output/v3.1.0/library-CAB6hu/results.json`, with `failure.png`. The B-only batch fault was never reached; status was `adjusted` instead of matching `/范围保存失败/`. This ran before wiring the owning-batch helper into crop callers; the additive helper existed but was unused on that path.
+- **I2 red, exit 1:** `.test-output/v3.1.0/library-P1OC6g/results.json`, with `failure.png`. `Start cannot enter scanner after only the final save fails`: observed **1** scanner call instead of **0**. This ran before changing preparation failure handling.
+- **Green, exit 0:** `.test-output/v3.1.0/library-329EXe/results.json`, **2/2** new groups.
+- **Final strengthened green, exit 0:** `.test-output/v3.1.0/library-LZTPIc/results.json`, **2/2**, after adding the shared manual-scan completion assertion. No production edits followed the full affected-suite run below.
+- Fixture corrections: the initial fixture omitted `options: []` (`job.options is not iterable`, `.test-output/v3.1.0/library-Gux9bX/results.json`); a later same-course fixture reused one job ID for two different lessons despite the library's course+job identity (`.test-output/v3.1.0/library-y0yExp/results.json`). Corrected the fixtures to use distinct job IDs within one course, while retaining the intentional same-ID cross-course case. Neither failure was counted as a product regression or a passing test.
+
+Final affected-suite command:
+
+```sh
+node --check capture.js && git diff --check && PPT_TEST_BROWSER='/Users/jasondai/Library/Caches/ms-playwright/chromium-1248/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing' node tests/library.cjs && PPT_TEST_BROWSER='/Users/jasondai/Library/Caches/ms-playwright/chromium-1248/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing' node tests/improvements.cjs
+```
+
+Exit **0**: library **22/22**, improvements **13/13**, **35 distinct browser groups** in this round. Full library evidence: `.test-output/v3.1.0/library-5fXwm7/results.json`. Improvements prints its assertions to stdout rather than an evidence file; completed harness job `bash-5bb29e2891c0477f` contains all 13 PASS lines, including exact-field rollback, atomic lesson+batch failure and retained snapshot publication. Both suites reported no external requests or browser script errors. Final `git diff --check` passed. Node and review suites were not rerun in this scoped fix round; their earlier 8/8 and 13/13 results remain historical, not newly claimed validation.
+
+### Fix-round self-review and limitations
+
+Reviewed every new ownership-helper caller, clone-before-edit boundaries, commit-before-publication, unchanged displayed scope, failure guards and the native transaction fault. Only `capture.js` and `tests/library.cjs` changed in the implementation commit; this report is a separate commit. No dependency, version, export, external-site or parent-worktree changes. Tests use isolated local synthetic videos and deterministic scanner probes; the final-preparation fault is injected at the batch persistence interface, while owning-batch atomicity uses a real asynchronous IndexedDB transaction abort. No known remaining I1/I2 defect; parent fresh rereview is required before proceeding.
