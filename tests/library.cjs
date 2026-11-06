@@ -227,7 +227,7 @@ function zipEntries(bytes) {
       assert(cleared.assets.some(asset => asset.id === 99) && cleared.assets.some(asset => asset.id === 13));
       await choose(secondId); await count(2); assert.deepEqual(await ids(), [99, 13]);
       assert.equal(await page.locator('#course-name').inputValue(), course.name);
-      assert.equal(await page.locator('#mode').inputValue(), '2'); assert.equal(await page.locator('#dedupe').isChecked(), true);
+      assert.equal(await page.locator('#mode').inputValue(), '0.5'); assert.equal(await page.locator('#dedupe').isChecked(), true);
       assert.deepEqual(await page.evaluate(() => crop), full);
       await page.reload(); await count(2); assert.deepEqual(await ids(), [99, 13]);
     });
@@ -287,10 +287,10 @@ function zipEntries(bytes) {
     });
 
     await test('a stable-slide checkpoint resumes without extra pages when dedupe is off', async () => {
-      await seed(); await load(continuity); await page.locator('#tab-extraction').click(); await page.locator('#dedupe').uncheck(); await settled();
+      await seed(); await load(continuity); await page.locator('#tab-extraction').click(); await page.locator('#mode').selectOption('2'); await page.locator('#dedupe').uncheck(); await settled();
       await page.locator('#run').click(); await page.waitForFunction(() => !busy() && activeLesson.task?.state === 'done');
       const uninterrupted = (await stored()).pages.map(page => page.sourceTime); assert.deepEqual(uninterrupted, [.25, 10.25]);
-      await seed(); await load(continuity); await page.locator('#tab-extraction').click(); await page.locator('#dedupe').uncheck(); await settled();
+      await seed(); await load(continuity); await page.locator('#tab-extraction').click(); await page.locator('#mode').selectOption('2'); await page.locator('#dedupe').uncheck(); await settled();
       await page.evaluate(() => {
         const put = PPTLibrary.put; window.continuityProbe = {held: false};
         PPTLibrary.put = async (...args) => {
@@ -341,7 +341,7 @@ function zipEntries(bytes) {
 
     await test('committed partial intervals resume the same task without duplicates and reject same-name different files', async () => {
       await seed(); await load();
-      await page.locator('#tab-extraction').click(); await page.locator('#dedupe').uncheck(); await settled();
+      await page.locator('#tab-extraction').click(); await page.locator('#mode').selectOption('2'); await page.locator('#dedupe').uncheck(); await settled();
       await page.evaluate(() => {
         const add = PPTPageStore.add, put = PPTLibrary.put;
         window.libraryProbe = {committed: [], checkpoints: [], inflight: 0, held: false};

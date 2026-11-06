@@ -258,15 +258,23 @@ async function workspace() {
       assert.equal(result.maxReads, 2); assert.equal(result.bounded && result.oldRevoked && result.reused, true); assert.ok(result.activeURLs > 0 && result.activeURLs <= result.allowedImages && result.activeURLs < 100);
       return result;
     }, page);
-    await test('signature deduplication reads no more than 32 assets per batch', async () => {
+    await test('task signature cache reads 1000 assets once in batches of 32 and releases 82944000 bytes', async () => {
       const result = await page.evaluate(async () => {
-        const original = PPTPageStore.assets, batches = [];
+        const original = PPTPageStore.assets, batches = [], context = createDedupeContext();
         PPTPageStore.assets = (db, ids) => { batches.push(ids.length); return original(db, ids); };
-        try { return {similar: await hasSimilar(new Uint8ClampedArray(192 * 108 * 4).fill(250), 0.1), batches}; }
-        finally { PPTPageStore.assets = original; }
+        try {
+          const sig = new Uint8ClampedArray(192 * 108 * 4).fill(250);
+          const first = await hasSimilar(sig, .1, context), initial = batches.length;
+          const second = await hasSimilar(sig, .1, context);
+          const bytes = [...context.signatures.values()].reduce((sum, sig) => sum + (sig?.buffer.byteLength || 0), 0);
+          const count = context.signatures.size, typedOnly = [...context.signatures.values()].every(sig => sig === null || sig instanceof Uint8Array || sig instanceof Uint8ClampedArray);
+          releaseDedupeContext(context);
+          return {first, second, initial, batches, bytes, count, typedOnly, released: context.signatures.size === 0 && dedupeContext === null};
+        } finally { PPTPageStore.assets = original; releaseDedupeContext(context); }
       });
-      assert.equal(result.similar, false); assert.equal(Math.max(...result.batches), 32); assert.equal(result.batches.reduce((sum, count) => sum + count, 0), 1000);
-      return {batchCount: result.batches.length, maximumBatch: Math.max(...result.batches)};
+      assert.equal(result.first || result.second, false); assert.equal(Math.max(...result.batches), 32); assert.equal(result.batches.reduce((sum, count) => sum + count, 0), 1000);
+      assert.equal(result.batches.length, result.initial); assert.equal(result.count, 1000); assert.equal(result.bytes, 82944000); assert(result.typedOnly && result.released);
+      return result;
     }, page);
     await test('preview switches and close revoke all full-size image URLs', async () => {
       const used = [];

@@ -107,9 +107,9 @@
           <label class="field-stack">
             <span>采样模式</span>
             <select id="mode">
-              <option value="2" selected>均衡 · 每 2 秒</option>
-              <option value="0.5">细查 · 每 0.5 秒</option>
-              <option value="8">快速 · 每 8 秒</option>
+              <option value="0.5" selected>精细 · 每 0.5 秒（推荐）</option>
+              <option value="2">粗采样 · 每 2 秒</option>
+              <option value="8">粗采样 · 每 8 秒</option>
             </select>
           </label>
           <label class="field-inline spaced-field">
@@ -123,7 +123,12 @@
             <input id="dedupe" type="checkbox" checked>
             <span>去除重复页</span>
           </label>
-          <p class="note pane-note">漏页时可换“细查”再扫一遍，新截到的页面会按视频时间自动插进现有列表。</p>
+          <p class="note pane-note">2 秒、8 秒粗采样可能漏掉短暂翻页。精细采样也可能漏过短于采样间隔或稳定确认窗口的画面；漏页时可细查对应时间段。</p>
+          <div class="bar">
+            <button id="ignore-select" type="button" aria-pressed="false" disabled>框选忽略区</button>
+            <button id="ignore-clear" type="button" disabled>清除忽略区</button>
+          </div>
+          <p id="ignore-status" class="note" aria-live="polite">未设置忽略区。仅影响画面比较，截图和导出保留完整内容。框选时可用方向键移动，Shift+方向键调整大小，Enter 确认，Esc 取消。</p>
           <p class="note pane-note">如果截到了动画过渡帧，点右侧“清理相似页”会自动保留每组最后一张。</p>
         </section>
 
@@ -166,7 +171,7 @@
           <div class="media-canvas">
             <div id="preview">
               <video id="video" muted controls playsinline preload="metadata"></video>
-              <canvas id="overlay"></canvas>
+              <canvas id="overlay" tabindex="0" aria-label="框选截取范围或忽略区；方向键移动，Shift 加方向键调整大小，Enter 确认，Escape 取消"></canvas>
               <div id="preview-empty">
                 <p class="preview-empty-title">加载视频后预览画面</p>
                 <p>选择课程，或导入本地视频</p>

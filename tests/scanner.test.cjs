@@ -6,6 +6,29 @@ const vm = require('node:vm');
 const Scanner = vm.runInNewContext(fs.readFileSync(require.resolve('../scanner.js'), 'utf8') + '\nPPTScanner', {
   PPTCore: {...require('../media.js'), similar: (a, b) => a === b},
 });
+test('default precise sampling retains a one-second A to B to A excursion', async () => {
+  const {scanner} = rangeFixture(4, time => time >= 1 && time < 2 ? 'B' : 'A');
+  const saved = [];
+  await scanner.scan(options({step: undefined, dedupe: false, save: async frame => saved.push(frame.sig)}));
+  assert.deepEqual(saved, ['A', 'B', 'A']);
+});
+test('optional comparator masks animation in transitions, confirmations and fallback dedupe', async () => {
+  const core = require('../media.js'), mask = core.ignoreMask({x: .5, y: 0, w: .5, h: 1}, 4, 2);
+  const scanner = new Scanner({duration: 3}, null), saved = [], thresholds = new Set();
+  scanner.seek = async time => {
+    const sig = new Uint8ClampedArray(4 * 2 * 4);
+    for (let p = 0; p < 8; p++) {
+      const value = mask[p] ? Math.round(time * 100) % 256 : time >= 1 && time < 2 ? 200 : 0;
+      sig.set([value, value, value, 255], p * 4);
+    }
+    return {sig, sourceTime: time};
+  };
+  const result = await scanner.scan(options({step: undefined,
+    compare: (a, b, threshold) => { thresholds.add(threshold); return core.similar(a, b, threshold, mask); },
+    save: async frame => saved.push(frame.sourceTime)}));
+  assert.equal(result.unstable, 0); assert.deepEqual(saved, [.25, 1.25]);
+  assert.deepEqual([...thresholds].sort(), [.8, 1.2]);
+});
 function fixture() {
   const scanner = new Scanner({duration: 4}, null);
   scanner.seek = async time => ({sig: ['A', 'B', 'A', 'C'][Math.floor(time)], sourceTime: time});

@@ -2,8 +2,9 @@
 const $ = id => document.getElementById(id), video = $('video'), overlay = $('overlay');
 const status = message => { $('status').textContent = message; syncWorkspace(); };
 let db, pages = [], ready = false, sourceReady = false, studyAccepted = false, stream = null, hls = null, objectURL = null;
-let crop = {x: 0, y: 0, w: 1, h: 1}, drag = null, cropEditing = false, task = null, sourceName = '', sources = [], pendingOrigins = [], pendingURL = '';
+let crop = {x: 0, y: 0, w: 1, h: 1}, drag = null, task = null, sourceName = '', sources = [], pendingOrigins = [], pendingURL = '';
 let realtimeTimer = null, realtimeBusy = false, candidate = null, candidateSince = 0, last = null, coursePage = '';
+let ignoreRect = null, selectionMode = null, selectionRect = null, dedupeContext = null;
 let draggedPageId = null, reviewBusy = false, exportBusy = false, pageWrites = 0, undoState = null;
 let selectedPages = new Set(), previewPageId = null, previewReturn = null, loadedIdentity = null;
 let batchJobs = [], batchPage = '', batchRunning = false, batchStopRequested = false, activeBatchJob = null, batchDiscoverySerial = 0;
@@ -31,18 +32,29 @@ function syncAllPages() {
   if (activeLesson) allPages = [...allPages.filter(page => page.lessonId !== activeLesson.id), ...pages];
 }
 function lessonLabel(lesson) { return [lesson.course?.name || lesson.source?.sourceName || '未命名课次', lesson.course?.date, lesson.course?.start?.slice(0, 5)].filter(Boolean).join(' · '); }
+function normalizedIgnore(rect) {
+  try { return PPTCore.ignoreMask(rect) ? {x: rect.x, y: rect.y, w: rect.w, h: rect.h} : null; }
+  catch { return null; }
+}
+function sameCrop(a, b) { return !!a && !!b && ['x', 'y', 'w', 'h'].every(key => Number.isFinite(a[key]) && a[key] === b[key]); }
 function applyLesson() {
+  releaseDedupeContext();
   pages = allPages.filter(page => page.lessonId === activeLesson.id).sort((a, b) => a.order - b.order);
   namingManual = !!activeLesson.namingManual; setNaming(activeLesson.course || {}, activeLesson.page || '');
   sourceName = activeLesson.source?.sourceName || ''; sourceCourse = {...activeLesson.course}; sourceCoursePage = activeLesson.page || '';
   crop = {...(activeLesson.crop || {x: 0, y: 0, w: 1, h: 1})};
-  const settings = activeLesson.settings || {step: 2, threshold: 1.2, dedupe: true, stable: 1.5};
+  ignoreRect = normalizedIgnore(activeLesson.ignoreRect);
+  const saved = activeLesson.settings || activeLesson.task?.settings || {};
+  const settings = {step: [0.5, 2, 8].includes(saved.step) ? saved.step : 0.5,
+    threshold: Number.isFinite(saved.threshold) && saved.threshold >= 0.2 && saved.threshold <= 10 ? saved.threshold : 1.2,
+    dedupe: typeof saved.dedupe === 'boolean' ? saved.dedupe : true,
+    stable: Number.isFinite(saved.stable) && saved.stable >= 0.5 && saved.stable <= 10 ? saved.stable : 1.5};
   $('mode').value = String(settings.step); $('diff').value = settings.threshold; $('dedupe').checked = settings.dedupe; $('stable').value = settings.stable;
-  selectedPages.clear(); previewPageId = null; last = null;
+  selectedPages.clear(); previewPageId = null; last = candidate = null; candidateSince = 0; cancelSelection();
 }
 function persistLesson(lesson = activeLesson) {
   if (!lesson) return Promise.resolve();
-  if (lesson === activeLesson) Object.assign(lesson, {course: namingInfo(), page: namingPage || lesson.page || '', namingManual, settings: scanSettings(), crop: {...crop}});
+  if (lesson === activeLesson) Object.assign(lesson, {course: namingInfo(), page: namingPage || lesson.page || '', namingManual, settings: scanSettings(), crop: {...crop}, ignoreRect: ignoreRect && {...ignoreRect}});
   const snapshot = structuredClone(lesson);
   lessonSave = lessonSave.catch(() => {}).then(() => PPTLibrary.put(db, snapshot));
   return lessonSave;
@@ -61,12 +73,12 @@ async function bindLesson(source) {
   const key = PPTLibrary.key(source);
   let lesson = lessons.find(item => item.source && PPTLibrary.key(item.source) === key);
   if (!lesson) {
-    lesson = {id: crypto.randomUUID(), course: {...sourceCourse}, page: source.page || '', source, crop: {x: 0,y: 0,w: 1,h: 1}, settings: scanSettings(), suspects: [], created: Date.now(), namingManual: false};
+    lesson = {id: crypto.randomUUID(), course: {...sourceCourse}, page: source.page || '', source, crop: {x: 0,y: 0,w: 1,h: 1}, settings: {...scanSettings(), step: 0.5}, suspects: [], created: Date.now(), namingManual: false};
     if (!activeLesson) { lesson.course = namingInfo(); lesson.namingManual = namingManual; }
     await PPTLibrary.put(db, lesson); lessons.push(lesson);
   } else {
     const changedChannel = source.batchJobId && !sameMediaSource(lesson.source, source);
-    const next = {...lesson, source: {...lesson.source, ...source}, ...(changedChannel ? {crop: {x: 0,y: 0,w: 1,h: 1}, task: null, suspects: []} : {})};
+    const next = {...lesson, source: {...lesson.source, ...source}, ...(changedChannel ? {crop: {x: 0,y: 0,w: 1,h: 1}, ignoreRect: null, task: null, suspects: []} : {})};
     await PPTLibrary.put(db, next); Object.assign(lesson, next);
     if (changedChannel && activeBatchJob) activeBatchJob.cropConfirmed = false;
   }
@@ -86,7 +98,7 @@ async function switchLesson(id) {
 }
 function canResume() {
   const scan = activeLesson?.task;
-  return !!scan?.id && ['paused', 'failed', 'running'].includes(scan.state) && Number.isFinite(scan.checkpoint) && scan.checkpoint >= 0 && sourceReady && JSON.stringify(scan.settings) === JSON.stringify(scanSettings()) && JSON.stringify(scan.crop) === JSON.stringify(crop);
+  return !!scan?.id && ['paused', 'failed', 'running'].includes(scan.state) && Number.isFinite(scan.checkpoint) && scan.checkpoint >= 0 && sourceReady && JSON.stringify(scan.settings) === JSON.stringify(scanSettings()) && JSON.stringify(scan.crop) === JSON.stringify(crop) && JSON.stringify(normalizedIgnore(scan.ignoreRect)) === JSON.stringify(ignoreRect);
 }
 function currentCourseLessons() {
   const key = PPTLibrary.courseKey(activeLesson?.page || '', activeLesson?.course || namingInfo());
@@ -275,12 +287,41 @@ function sameTimeline(a, b) {
 function validSignature(page) {
   return (page.sig instanceof Uint8ClampedArray || page.sig instanceof Uint8Array) && page.sig.length === 192 * 108 * 4 && Number.isFinite(page.w) && Number.isFinite(page.h) && page.w > 0 && page.h > 0;
 }
-async function hasSimilar(signature, threshold) {
-  const scope = pages;
+function createDedupeContext(signal) {
+  releaseDedupeContext();
+  const context = {lessonId: activeLesson?.id, crop: {...crop}, mask: PPTCore.ignoreMask(ignoreRect), signal, signatures: new Map(), valid: true};
+  dedupeContext = context;
+  return context;
+}
+function releaseDedupeContext(context = dedupeContext) {
+  if (!context) return;
+  context.valid = false; context.signatures.clear(); context.mask = null;
+  if (dedupeContext === context) dedupeContext = null;
+}
+function checkDedupeContext(context) {
+  context?.signal?.throwIfAborted();
+  if (context && (!context.valid || context.lessonId !== activeLesson?.id)) throw new DOMException('比较任务已停止', 'AbortError');
+}
+function cacheSignature(context, id, sig) {
+  if (!context?.valid || context.signatures.size >= 1000 && !context.signatures.has(id)) return;
+  const valid = (sig instanceof Uint8ClampedArray || sig instanceof Uint8Array) && sig.length === 192 * 108 * 4;
+  context.signatures.set(id, valid ? (sig.buffer.byteLength === sig.byteLength ? sig : sig.slice()) : null);
+}
+function comparisonMask(a, b, geometry = crop, mask = PPTCore.ignoreMask(ignoreRect)) {
+  return sameCrop(a, geometry) && sameCrop(b, geometry) ? mask : null;
+}
+async function hasSimilar(signature, threshold, context = null, signatureCrop = crop) {
+  const scope = pages, geometry = context?.crop || crop, mask = context ? context.mask : PPTCore.ignoreMask(ignoreRect);
   for (let offset = 0; offset < scope.length; offset += 32) {
-    task?.signal.throwIfAborted();
-    const records = await PPTPageStore.assets(db, scope.slice(offset, offset + 32).map(page => page.id));
-    if (records.some(record => record?.sig && PPTCore.similar(signature, record.sig, threshold))) return true;
+    checkDedupeContext(context);
+    const batch = scope.slice(offset, offset + 32), missing = batch.filter(page => !context?.signatures.has(page.id));
+    const records = missing.length ? await PPTPageStore.assets(db, missing.map(page => page.id)) : [];
+    checkDedupeContext(context);
+    for (let i = 0; i < missing.length; i++) cacheSignature(context, missing[i].id, records[i]?.sig);
+    for (const page of batch) {
+      const sig = context?.signatures.has(page.id) ? context.signatures.get(page.id) : records[missing.indexOf(page)]?.sig;
+      if (validSignature({...page, sig}) && PPTCore.similar(signature, sig, threshold, comparisonMask(signatureCrop, page.signatureCrop, geometry, mask))) return true;
+    }
   }
   return false;
 }
@@ -293,7 +334,7 @@ async function cleanSimilar() {
       const a = pages[i - 1], b = pages[i];
       if (!sameTimeline(a, b) || !Number.isFinite(a.sourceTime) || !Number.isFinite(b.sourceTime) || a.sourceTime >= b.sourceTime || a.w !== b.w || a.h !== b.h) continue;
       const [first, second] = await PPTPageStore.assets(db, [a.id, b.id]);
-      if (validSignature({...a, sig: first?.sig}) && validSignature({...b, sig: second?.sig}) && PPTCore.similar(first.sig, second.sig, threshold)) remove.push(a.id);
+      if (validSignature({...a, sig: first?.sig}) && validSignature({...b, sig: second?.sig}) && PPTCore.similar(first.sig, second.sig, threshold, comparisonMask(a.signatureCrop, b.signatureCrop))) remove.push(a.id);
     }
   } catch (e) { status('相似页检查失败：' + e.message); return; }
   finally { reviewBusy = false; controls(); }
@@ -388,8 +429,13 @@ function controls() {
   $('load').disabled = active || !$('sources').value;
   $('full').disabled = active || !sourceReady;
   $('crop-select').disabled = active || !sourceReady;
-  $('crop-select').textContent = cropEditing ? '取消框选' : '框选 PPT 区域';
-  $('crop-select').setAttribute('aria-pressed', String(cropEditing));
+  $('crop-select').textContent = selectionMode === 'crop' ? '取消框选' : '框选 PPT 区域';
+  $('crop-select').setAttribute('aria-pressed', String(selectionMode === 'crop'));
+  $('ignore-select').disabled = active || !sourceReady;
+  $('ignore-clear').disabled = active || !sourceReady || !ignoreRect;
+  $('ignore-select').textContent = selectionMode === 'ignore' ? '取消忽略区框选' : '框选忽略区';
+  $('ignore-select').setAttribute('aria-pressed', String(selectionMode === 'ignore'));
+  $('ignore-status').textContent = `${ignoreRect ? '已设置忽略区，虚线内不参与比较。' : '未设置忽略区。'}截图和导出保留完整内容。框选时方向键移动，Shift+方向键调整大小，Enter 确认，Esc 取消。`;
   $('run').disabled = active || !sourceReady || !ready;
   $('run').textContent = stream ? '开始实时截取' : canResume() ? `继续提取 · ${timecode(activeLesson.task.checkpoint)}` : '开始快速提取';
   $('lesson-select').disabled = active || !ready || !lessons.length;
@@ -426,7 +472,7 @@ function controls() {
   });
   updatePreview();
   video.controls = sourceReady && !active && !stream;
-  overlay.style.pointerEvents = active || !sourceReady || !cropEditing ? 'none' : 'auto';
+  overlay.style.pointerEvents = active || !sourceReady || !selectionMode ? 'none' : 'auto';
   syncWorkspace();
   window.PPTWorkspace?.syncControls();
 }
@@ -546,10 +592,15 @@ function draw() {
   const ctx = overlay.getContext('2d'), b = bounds();
   ctx.clearRect(0, 0, overlay.width, overlay.height);
   if (sourceReady && crop) {
-    ctx.strokeStyle = '#fff'; ctx.lineWidth = 4;
-    ctx.strokeRect(b.x + crop.x * b.w, b.y + crop.y * b.h, crop.w * b.w, crop.h * b.h);
-    ctx.strokeStyle = '#9e2437'; ctx.lineWidth = 2;
-    ctx.strokeRect(b.x + crop.x * b.w, b.y + crop.y * b.h, crop.w * b.w, crop.h * b.h);
+    const shownCrop = selectionMode === 'crop' && selectionRect || crop;
+    const stroke = r => ctx.strokeRect(b.x + r.x * b.w, b.y + r.y * b.h, r.w * b.w, r.h * b.h);
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 4; stroke(shownCrop);
+    ctx.strokeStyle = '#9e2437'; ctx.lineWidth = 2; stroke(shownCrop);
+    const ignored = selectionMode === 'ignore' ? selectionRect : ignoreRect && {x: crop.x + ignoreRect.x * crop.w, y: crop.y + ignoreRect.y * crop.h, w: ignoreRect.w * crop.w, h: ignoreRect.h * crop.h};
+    if (ignored) {
+      ctx.setLineDash([7, 5]); ctx.strokeStyle = '#fff'; ctx.lineWidth = 4; stroke(ignored);
+      ctx.strokeStyle = '#9e2437'; ctx.lineWidth = 2; stroke(ignored);
+    }
   }
 }
 new ResizeObserver(draw).observe(video);
@@ -557,19 +608,72 @@ function pos(event) {
   const rect = overlay.getBoundingClientRect(), b = bounds();
   return {x: Math.max(0, Math.min(1, (event.clientX - rect.left - b.x) / b.w)), y: Math.max(0, Math.min(1, (event.clientY - rect.top - b.y) / b.h))};
 }
-overlay.onpointerdown = event => { if (!sourceReady || !cropEditing || busy()) return; drag = pos(event); overlay.setPointerCapture(event.pointerId); };
+function cancelSelection() { drag = null; selectionMode = null; selectionRect = null; }
+function startSelection(mode) {
+  if (busy() || !sourceReady) return;
+  if (selectionMode === mode) cancelSelection();
+  else {
+    selectionMode = mode;
+    const rect = mode === 'ignore' ? ignoreRect || {x: .6, y: .6, w: .3, h: .3} : {x: 0, y: 0, w: 1, h: 1};
+    selectionRect = {x: crop.x + rect.x * crop.w, y: crop.y + rect.y * crop.h, w: rect.w * crop.w, h: rect.h * crop.h};
+    overlay.focus();
+  }
+  controls(); draw(); status(selectionMode ? `请框选${mode === 'ignore' ? '忽略区' : 'PPT 区域'}；可拖动或用方向键，Enter 确认，Esc 取消。` : '已取消框选。');
+}
+async function setComparisonRegion(nextCrop, nextIgnore, message, confirmCrop = false) {
+  const previous = {crop, ignoreRect, lesson: activeLesson && structuredClone(activeLesson), confirmed: activeBatchJob?.cropConfirmed};
+  const cleared = !sameCrop(crop, nextCrop) && !!ignoreRect;
+  crop = {...nextCrop}; ignoreRect = nextIgnore && {...nextIgnore};
+  last = candidate = null; candidateSince = 0; cancelSelection(); releaseDedupeContext();
+  if (confirmCrop && activeBatchJob?.requiresCrop) activeBatchJob.cropConfirmed = true;
+  reviewBusy = true; controls(); draw();
+  try {
+    await persistLesson(); if (activeBatchJob?.requiresCrop) await persistBatch();
+    status(message + (cleared ? ' 裁剪已变化，旧忽略区已清除，请重新设置。' : ''));
+  } catch (error) {
+    crop = previous.crop; ignoreRect = previous.ignoreRect;
+    if (activeLesson && previous.lesson) Object.assign(activeLesson, previous.lesson);
+    if (activeBatchJob) activeBatchJob.cropConfirmed = previous.confirmed;
+    status('范围保存失败，已恢复原设置：' + error.message);
+  } finally { reviewBusy = false; controls(); draw(); renderLibrary(); }
+}
+function commitSelection() {
+  if (!selectionMode || !selectionRect || busy()) return;
+  if (selectionMode === 'crop') {
+    const next = selectionRect.w < .03 || selectionRect.h < .03 ? {x: 0, y: 0, w: 1, h: 1} : selectionRect;
+    return setComparisonRegion(next, sameCrop(crop, next) ? ignoreRect : null, '截取范围已设置，可以开始提取。', true);
+  }
+  const left = Math.max(crop.x, selectionRect.x), top = Math.max(crop.y, selectionRect.y);
+  const right = Math.min(crop.x + crop.w, selectionRect.x + selectionRect.w), bottom = Math.min(crop.y + crop.h, selectionRect.y + selectionRect.h);
+  const rect = {x: (left - crop.x) / crop.w, y: (top - crop.y) / crop.h, w: (right - left) / crop.w, h: (bottom - top) / crop.h};
+  // Clamp roundoff at the normalized right/bottom edges before validation.
+  rect.w = Math.min(rect.w, 1 - rect.x); rect.h = Math.min(rect.h, 1 - rect.y);
+  try { PPTCore.ignoreMask(rect); }
+  catch (error) { cancelSelection(); controls(); draw(); status(error.message + '，原忽略区已保留。'); return; }
+  return setComparisonRegion(crop, rect, '忽略区已设置，仅影响比较；截图和导出保留原图。');
+}
+overlay.onpointerdown = event => { if (!sourceReady || !selectionMode || busy()) return; drag = pos(event); overlay.setPointerCapture(event.pointerId); };
 overlay.onpointermove = event => {
   if (!drag) return;
-  const p = pos(event); crop = {x: Math.min(p.x, drag.x), y: Math.min(p.y, drag.y), w: Math.abs(p.x - drag.x), h: Math.abs(p.y - drag.y)}; draw();
+  const p = pos(event); selectionRect = {x: Math.min(p.x, drag.x), y: Math.min(p.y, drag.y), w: Math.abs(p.x - drag.x), h: Math.abs(p.y - drag.y)}; draw();
 };
-overlay.onpointerup = () => {
-  if (!drag) return; drag = null;
-  if (crop.w < 0.03 || crop.h < 0.03) crop = {x: 0, y: 0, w: 1, h: 1};
-  last = null; cropEditing = false; if (activeBatchJob?.requiresCrop) activeBatchJob.cropConfirmed = true; saveLessonSettings(); controls(); draw(); status('截取范围已设置，可以开始提取。');
+overlay.onpointerup = () => { if (!drag) return; drag = null; commitSelection(); };
+overlay.onpointercancel = () => { cancelSelection(); controls(); draw(); };
+overlay.onkeydown = event => {
+  if (!selectionMode || busy()) return;
+  if (!['Escape', 'Enter', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return;
+  event.preventDefault(); event.stopPropagation();
+  if (event.key === 'Escape') { cancelSelection(); controls(); draw(); status('已取消框选，原设置已保留。'); return; }
+  if (event.key === 'Enter') { commitSelection(); return; }
+  const r = selectionRect, horizontal = ['ArrowLeft', 'ArrowRight'].includes(event.key), delta = ['ArrowLeft', 'ArrowUp'].includes(event.key) ? -.01 : .01;
+  const key = event.shiftKey ? horizontal ? 'w' : 'h' : horizontal ? 'x' : 'y';
+  const maximum = event.shiftKey ? 1 - r[horizontal ? 'x' : 'y'] : 1 - r[horizontal ? 'w' : 'h'];
+  r[key] = Math.max(event.shiftKey ? .01 : 0, Math.min(maximum, r[key] + delta)); draw();
 };
-overlay.onpointercancel = () => { drag = null; };
-$('crop-select').onclick = () => { if (busy()) return; cropEditing = !cropEditing; controls(); status(cropEditing ? '请在视频中拖动框选 PPT 区域。' : '已退出框选，可以操作视频播放控件。'); };
-$('full').onclick = () => { if (busy()) return; crop = {x: 0, y: 0, w: 1, h: 1}; last = null; cropEditing = false; if (activeBatchJob?.requiresCrop) activeBatchJob.cropConfirmed = true; saveLessonSettings(); controls(); draw(); status('将截取整个视频画面。'); };
+$('crop-select').onclick = () => startSelection('crop');
+$('ignore-select').onclick = () => startSelection('ignore');
+$('ignore-clear').onclick = () => { if (!busy() && sourceReady) setComparisonRegion(crop, null, '已清除忽略区。'); };
+$('full').onclick = () => { if (busy() || !sourceReady) return; const full = {x: 0, y: 0, w: 1, h: 1}; setComparisonRegion(full, sameCrop(crop, full) ? ignoreRect : null, '将截取整个视频画面。', true); };
 function frame(sourceTime = video.currentTime) {
   if (video.readyState < 2 || !video.videoWidth) throw Error('视频画面尚未就绪');
   const canvas = document.createElement('canvas');
@@ -577,15 +681,19 @@ function frame(sourceTime = video.currentTime) {
   canvas.getContext('2d').drawImage(video, video.videoWidth * crop.x, video.videoHeight * crop.y, video.videoWidth * crop.w, video.videoHeight * crop.h, 0, 0, canvas.width, canvas.height);
   const small = document.createElement('canvas'); small.width = 192; small.height = 108;
   const ctx = small.getContext('2d', {willReadFrequently: true}); ctx.drawImage(canvas, 0, 0, 192, 108);
-  return {canvas, sig: ctx.getImageData(0, 0, 192, 108).data, sourceTime};
+  return {canvas, sig: ctx.getImageData(0, 0, 192, 108).data, sourceTime, signatureCrop: {...crop}};
 }
-async function save(f) {
-  await dbReady;
+async function save(f, context = null) {
+  const signal = context?.signal || task?.signal, lessonId = activeLesson?.id;
+  const check = () => { signal?.throwIfAborted(); checkDedupeContext(context); if (activeLesson?.id !== lessonId) throw new DOMException('课次已切换', 'AbortError'); };
+  await dbReady; check();
   if (scanId && pages.some(page => page.scanId === scanId && Math.abs(page.sourceTime - f.sourceTime) < 0.001)) return false;
   if (pages.length >= 1000) throw Error('本节已达 1000 页，请先导出 PDF，再清空本节继续');
   if (!pages.length) await persistNaming();
+  check();
   const asset = {...await PPTPageStore.encode(f.canvas), sig: f.sig};
-  const page = {lessonId: activeLesson?.id, scanId, w: f.canvas.width, h: f.canvas.height, time: Date.now(), sourceTime: f.sourceTime, sourceName, sourceKey: loadedIdentity?.sourceKey || '', course: {...sourceCourse}, coursePage, batchJobId: activeBatchJob?.id || ''};
+  check();
+  const page = {lessonId, signatureCrop: f.signatureCrop && {...f.signatureCrop}, scanId, w: f.canvas.width, h: f.canvas.height, time: Date.now(), sourceTime: f.sourceTime, sourceName, sourceKey: loadedIdentity?.sourceKey || '', course: {...sourceCourse}, coursePage, batchJobId: activeBatchJob?.id || ''};
   let insertAt = pages.length, lastMatch = -1;
   if (Number.isFinite(page.sourceTime)) {
     for (let i = 0; i < pages.length; i++) {
@@ -601,17 +709,19 @@ async function save(f) {
   else if (Number.isFinite(before)) page.order = before + 1024;
   else if (Number.isFinite(after)) page.order = after - 1024;
   else page.order = 1024;
-  page.id = await writePage(page, asset); pages.splice(insertAt, 0, page); syncAllPages(); forgetUndo(); last = f.sig;
+  page.id = await writePage(page, asset); cacheSignature(context, page.id, f.sig);
+  pages.splice(insertAt, 0, page); syncAllPages(); forgetUndo(); last = f.sig;
   render(); return true;
 }
 async function releaseSource() {
+  releaseDedupeContext(); cancelSelection();
   let persistenceError;
   if (activeLesson && ready && sourceReady) try { await persistLesson(); } catch (error) { persistenceError = error; }
   window.PPTWorkspace?.cancelPreflight();
   if (stream) { stream.getTracks().forEach(track => { track.onended = null; track.stop(); }); stream = null; }
   hls?.destroy(); hls = null; video.pause(); video.srcObject = null; video.removeAttribute('src'); video.load();
   if (objectURL) URL.revokeObjectURL(objectURL); objectURL = null; sourceReady = false; loadedIdentity = null;
-  crop = {...(activeLesson?.crop || {x: 0, y: 0, w: 1, h: 1})}; cropEditing = false; drag = null; candidate = null; candidateSince = 0; last = null; controls(); draw();
+  crop = {...(activeLesson?.crop || {x: 0, y: 0, w: 1, h: 1})}; ignoreRect = normalizedIgnore(activeLesson?.ignoreRect); candidate = null; candidateSince = 0; last = null; controls(); draw();
   referrerOrigins.clear(); referrerPage = '';
   referrerWrites = referrerWrites.catch(() => {}).then(() => window.chrome?.declarativeNetRequest?.updateSessionRules({removeRuleIds: [referrerRule]})).catch(() => {});
   const cached = videoCache; videoCache = null;
@@ -872,16 +982,18 @@ async function fastScan({restart = false, range = null} = {}) {
   const start = range ? range.start : hasBaseline ? activeLesson.task.checkpoint : 0, end = range ? Math.min(range.end, video.duration) : video.duration;
   task = new AbortController(); const controller = task, before = pages.length, manualJob = activeBatchJob?.requiresCrop && !batchRunning && !range ? activeBatchJob : null;
   scanId = resume ? activeLesson.task.id : crypto.randomUUID();
-  if (!range) activeLesson.task = {id: scanId, state: 'running', checkpoint: start, baselineTime, duration: video.duration, settings, crop: {...crop}};
+  if (!range) activeLesson.task = {id: scanId, state: 'running', checkpoint: start, baselineTime, duration: video.duration, settings, crop: {...crop}, ignoreRect: ignoreRect && {...ignoreRect}};
+  const context = createDedupeContext(controller.signal);
   let outcome = null, discovered = [];
-  cropEditing = false; controls(); video.pause(); $('progress').value = 0;
+  cancelSelection(); controls(); video.pause(); $('progress').value = 0;
   status(range ? '正在细查所选时间段…' : resume ? `正在从 ${timecode(start)} 继续扫描…` : '正在快速扫描，请保持工具页打开…');
   const started = performance.now();
   try {
     await persistLesson();
     const scanner = new PPTScanner(video, frame);
-    const result = await scanner.scan({step: range ? 0.5 : settings.step, threshold: settings.threshold, dedupe: range ? true : settings.dedupe, start, end, baselineTime, signal: controller.signal, save,
-      isDuplicate: hasSimilar,
+    const result = await scanner.scan({step: range ? 0.5 : settings.step, threshold: settings.threshold, dedupe: range ? true : settings.dedupe, start, end, baselineTime, signal: controller.signal, save: f => save(f, context),
+      compare: (a, b, threshold) => PPTCore.similar(a, b, threshold, context.mask),
+      isDuplicate: (sig, threshold) => hasSimilar(sig, threshold, context, context.crop),
       suspect: async item => {
         discovered = PPTLibrary.mergeRanges(discovered, item);
         const previous = activeLesson.suspects; activeLesson.suspects = PPTLibrary.mergeRanges(previous, item);
@@ -910,7 +1022,7 @@ async function fastScan({restart = false, range = null} = {}) {
     try { await persistLesson(); } catch (storage) { message += '；任务状态未能保存：' + storage.message; }
     status(message);
   } finally {
-    scanId = ''; task = null; video.pause();
+    releaseDedupeContext(context); scanId = ''; task = null; video.pause();
     if (manualJob) {
       const count = batchPageCount(manualJob); manualJob.pages = count;
       manualJob.state = outcome ? 'done' : count ? 'partial' : 'failed'; manualJob.error = outcome ? '' : $('status').textContent;
@@ -1019,7 +1131,7 @@ async function prepareManualBatchJob(job, permission) {
     coursePage = batchPage; sourceCourse = {...job.course}; sourceCoursePage = coursePage;
     const loaded = await loadRemote(job.url, {permissionGranted: true, sourceName: job.sourceName, batchJob: job});
     if (!loaded) throw Error($('status').textContent || '视频加载失败');
-    job.state = 'manual'; cropEditing = !job.cropConfirmed; await persistBatch(); renderBatchJobs(); controls(); draw();
+    job.state = 'manual'; if (!job.cropConfirmed) { selectionMode = 'crop'; selectionRect = {...crop}; } await persistBatch(); renderBatchJobs(); controls(); draw();
     const prompt = job.cropConfirmed ? '已恢复本节裁剪区域，可继续提取或调整框选。' : '本节只有 0 路视频。请在预览中框选 PPT 区域，再点击“开始快速提取”。';
     status(prompt); $('batch-status').textContent = prompt;
   } catch (error) {
@@ -1072,18 +1184,20 @@ $('batch-start').onclick = () => {
   const permission = origins.length ? chrome.permissions.request({origins}) : Promise.resolve(false);
   runBatch(permission);
 };
-function stopRealtime() { clearInterval(realtimeTimer); realtimeTimer = null; candidate = null; controls(); }
+function stopRealtime() { clearInterval(realtimeTimer); realtimeTimer = null; candidate = last = null; candidateSince = 0; releaseDedupeContext(); controls(); }
 async function realTick() {
   if (realtimeBusy || !realtimeTimer) return;
   realtimeBusy = true;
+  const context = dedupeContext;
   try {
+    checkDedupeContext(context);
     const f = frame(), threshold = Math.max(0.2, Math.min(10, Number($('diff').value) || 1.2));
-    if (last && PPTCore.similar(f.sig, last, threshold)) { candidate = null; return; }
-    if (!candidate || !PPTCore.similar(f.sig, candidate, 0.8)) { candidate = f.sig; candidateSince = Date.now(); return; }
+    if (last && PPTCore.similar(f.sig, last, threshold, context?.mask)) { candidate = null; return; }
+    if (!candidate || !PPTCore.similar(f.sig, candidate, 0.8, context?.mask)) { candidate = f.sig; candidateSince = Date.now(); return; }
     if (Date.now() - candidateSince >= (Number($('stable').value) || 1.5) * 1000) {
-      const duplicate = $('dedupe').checked && await hasSimilar(f.sig, threshold);
+      const duplicate = $('dedupe').checked && await hasSimilar(f.sig, threshold, context, f.signatureCrop);
       if (!realtimeTimer) return;
-      if (!duplicate) { await save(f); status(`实时截取：已保存 ${pages.length} 页。`); }
+      if (!duplicate) { await save(f, context); status(`实时截取：已保存 ${pages.length} 页。`); }
       last = f.sig; candidate = null;
     }
   } catch (e) { stopRealtime(); status('实时截取已停止：' + e.message); }
@@ -1092,11 +1206,11 @@ async function realTick() {
 $('run').onclick = () => {
   if (busy()) return;
   if (activeBatchJob?.requiresCrop && !activeBatchJob.cropConfirmed) {
-    cropEditing = true; controls(); draw();
+    startSelection('crop');
     const prompt = '请先在 0 路视频画面中框选 PPT 区域；PPT 已占满画面时，点击“使用完整画面”即可。';
     status(prompt); $('batch-status').textContent = prompt; return;
   }
-  if (stream) { realtimeTimer = setInterval(realTick, 350); controls(); status('正在实时截取，请保持课程视频播放。'); }
+  if (stream) { cancelSelection(); last = candidate = null; candidateSince = 0; createDedupeContext(); realtimeTimer = setInterval(realTick, 350); controls(); status('正在实时截取，请保持课程视频播放。'); }
   else fastScan();
 };
 $('stop').onclick = () => {

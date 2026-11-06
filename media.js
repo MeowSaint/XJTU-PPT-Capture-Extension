@@ -70,23 +70,37 @@
     visit(payload, 0);
     return [...found];
   }
-  function frameDistance(a, b) {
-    if (!a || !b || a.length !== b.length) return {changed: 100, mean: 100};
-    let total = 0, changed = 0, biasR = 0, biasG = 0, biasB = 0;
-    for (let i = 0; i < a.length; i += 4) { biasR += a[i] - b[i]; biasG += a[i + 1] - b[i + 1]; biasB += a[i + 2] - b[i + 2]; }
-    const pixels = a.length / 4;
+  function ignoreMask(rect, width = 192, height = 108) {
+    if (rect == null) return null;
+    const {x, y, w, h} = rect;
+    if (![x, y, w, h].every(Number.isFinite) || x < 0 || y < 0 || w <= 0 || h <= 0 || x + w > 1 || y + h > 1 || !Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) throw Error('忽略区范围无效');
+    const left = Math.floor(x * width), top = Math.floor(y * height), right = Math.min(width, Math.ceil((x + w) * width)), bottom = Math.min(height, Math.ceil((y + h) * height));
+    if ((right - left) * (bottom - top) >= width * height) throw Error('忽略区不能覆盖整个 PPT 区域');
+    const mask = new Uint8Array(width * height);
+    for (let row = top; row < bottom; row++) mask.fill(1, row * width + left, row * width + right);
+    return mask;
+  }
+  function frameDistance(a, b, mask = null) {
+    if (!a || !b || !a.length || a.length % 4 || a.length !== b.length || (mask && mask.length !== a.length / 4)) return {changed: 100, mean: 100};
+    let total = 0, changed = 0, biasR = 0, biasG = 0, biasB = 0, pixels = 0;
+    for (let i = 0; i < a.length; i += 4) {
+      if (mask?.[i / 4]) continue;
+      pixels++; biasR += a[i] - b[i]; biasG += a[i + 1] - b[i + 1]; biasB += a[i + 2] - b[i + 2];
+    }
+    if (!pixels) return {changed: 100, mean: 100};
     biasR = Math.abs(biasR / pixels) <= 8 ? biasR / pixels : 0;
     biasG = Math.abs(biasG / pixels) <= 8 ? biasG / pixels : 0;
     biasB = Math.abs(biasB / pixels) <= 8 ? biasB / pixels : 0;
     for (let i = 0; i < a.length; i += 4) {
+      if (mask?.[i / 4]) continue;
       const dr = Math.abs(a[i] - b[i] - biasR), dg = Math.abs(a[i + 1] - b[i + 1] - biasG), db = Math.abs(a[i + 2] - b[i + 2] - biasB);
       total += dr + dg + db;
       if (Math.max(dr, dg, db) >= 24) changed++;
     }
-    return {changed: changed * 100 / (a.length / 4), mean: total * 100 / (a.length / 4 * 765)};
+    return {changed: changed * 100 / pixels, mean: total * 100 / (pixels * 765)};
   }
-  function similar(a, b, threshold = 1.2) {
-    const d = frameDistance(a, b);
+  function similar(a, b, threshold = 1.2, mask = null) {
+    const d = frameDistance(a, b, mask);
     return d.changed < threshold && d.mean < Math.max(0.25, threshold / 2);
   }
   function sampleTimes(duration, step, start = 0) {
@@ -110,7 +124,7 @@
   function isLocalMessage(event, target) {
     return event.source === target && event.origin === messageOrigin(target);
   }
-  const api = {mediaInfo, extractUrls, frameDistance, similar, sampleTimes, postLocalMessage, isLocalMessage};
+  const api = {mediaInfo, extractUrls, ignoreMask, frameDistance, similar, sampleTimes, postLocalMessage, isLocalMessage};
   root.PPTCore = api;
   if (typeof module !== 'undefined') module.exports = api;
 })(globalThis);

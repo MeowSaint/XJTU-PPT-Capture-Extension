@@ -3,6 +3,25 @@ const assert = require('node:assert/strict');
 const vm = require('node:vm');
 const fs = require('node:fs');
 const core = require('../media.js');
+test('ignore masks rasterize edges and reject invalid or fully covered comparison images', () => {
+  assert.equal(core.ignoreMask(null), null);
+  assert.deepEqual([...core.ignoreMask({x: .26, y: 0, w: .25, h: .5}, 4, 2)], [0, 1, 1, 0, 0, 0, 0, 0]);
+  for (const rect of [{x: -1, y: 0, w: 1, h: 1}, {x: 0, y: 0, w: 0, h: 1}, {x: 0, y: NaN, w: 1, h: 1}, {x: 0, y: 0, w: 2, h: 1}, {x: 0, y: 0, w: 1, h: 1}, {x: .001, y: .001, w: .998, h: .998}]) assert.throws(() => core.ignoreMask(rect));
+  const a = new Uint8Array(8);
+  assert.equal(core.similar(a, a, 1.2, new Uint8Array([1, 1])), false);
+  assert.equal(core.similar(a, a, 1.2, new Uint8Array(1)), false);
+});
+test('masked comparison excludes ignored pixels from bias and both denominators without mutation', () => {
+  const a = new Uint8ClampedArray([100, 100, 100, 255, 0, 0, 0, 255, 0, 0, 0, 255]);
+  const b = new Uint8ClampedArray([107, 107, 107, 255, 255, 255, 255, 255, 255, 255, 255, 255]);
+  const mask = new Uint8Array([0, 1, 1]), original = [a.slice(), b.slice(), mask.slice()];
+  assert.deepEqual(core.frameDistance(a, b, mask), {changed: 0, mean: 0});
+  b[0] = b[1] = b[2] = 151;
+  assert.deepEqual(core.frameDistance(a, b, mask), {changed: 100, mean: 20});
+  b[0] = b[1] = b[2] = 107;
+  assert.deepEqual([a, b, mask], original);
+  assert.equal(core.similar(a, b), false);
+});
 global.PPTCourse = require('../course.js');
 const batch = require('../batch.js');
 test('parses video URLs equally without filename preference; excludes segments', () => {

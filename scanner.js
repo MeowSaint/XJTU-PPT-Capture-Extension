@@ -18,7 +18,7 @@ class PPTScanner {
     signal?.throwIfAborted();
     return this.capture(time);
   }
-  async scan({step, threshold, dedupe, signal, save, progress, previous = [], isDuplicate,
+  async scan({step = 0.5, threshold, dedupe, signal, save, progress, previous = [], isDuplicate, compare = PPTCore.similar,
     start = 0, end = this.video.duration, baselineTime = null, checkpoint = async () => {}, suspect = async () => {}}) {
     const duration = this.video.duration;
     if (!(duration > 0) || !Number.isFinite(duration) || !(step > 0) || !Number.isFinite(step) || duration + step === duration) throw Error('视频时长或采样间隔无效');
@@ -29,7 +29,7 @@ class PPTScanner {
     if (times.at(-1) !== limit) times.push(limit);
     const seen = isDuplicate ? null : previous.filter(Boolean).slice();
     let baseline = null, lastCoarse = null, previousTime = start, saved = 0, unstable = 0;
-    const same = (a, b) => PPTCore.similar(a, b, threshold);
+    const same = (a, b) => compare(a, b, threshold);
     if (baselineTime !== null) {
       signal.throwIfAborted();
       baseline = (await this.seek(baselineTime, signal)).sig;
@@ -41,7 +41,7 @@ class PPTScanner {
       if (baseline && same(first.sig, baseline)) return;
       const confirmTime = Math.min(limit, time + 0.25);
       const confirmed = confirmTime > time + 0.02 ? await this.seek(confirmTime, signal) : first;
-      if (!PPTCore.similar(first.sig, confirmed.sig, Math.min(threshold, 0.8))) {
+      if (!compare(first.sig, confirmed.sig, Math.min(threshold, 0.8))) {
         unstable++;
         await suspect({start: Math.max(start, time - 0.5), end: Math.min(end, time + 0.5), time});
         signal.throwIfAborted();
