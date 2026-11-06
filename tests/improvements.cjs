@@ -1,9 +1,10 @@
-/* Task 1 integration: loopback only, synthetic canvas/video and a fresh browser context. */
+/* Improvement integrations: loopback only, synthetic canvas/video and fresh browser contexts. */
 'use strict';
 const assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path'), http = require('node:http');
 const {dependency, browserOptions} = require('./runtime.cjs');
 const {chromium} = dependency('playwright');
+const {PDFDocument, PDFName} = dependency('pdf-lib');
 const root = path.resolve(__dirname, '..');
 let browser, server, page, passed = 0;
 const blocked = [];
@@ -292,6 +293,170 @@ async function test(name, run) { await run(); passed++; console.log('PASS ' + na
       await page.reload(); await page.waitForFunction(() => ready);
       assert.deepEqual(await page.evaluate(() => savedBatches), result.before);
     });
+    // Task 4 gets its own empty browser storage; all JPEGs are synthetic canvas drawings.
+    await context.close();
+    const exportContext = await browser.newContext({viewport: {width: 1440, height: 1000}});
+    await exportContext.route('**/*', route => {
+      if (route.request().url().startsWith(origin + '/')) return route.continue();
+      blocked.push(route.request().url()); return route.abort();
+    });
+    page = await exportContext.newPage();
+    const errors = []; page.on('pageerror', error => errors.push(error.message));
+    await page.goto(origin + '/capture.html'); await page.waitForFunction(() => ready);
+    await page.locator('#terms-agree').check(); await page.locator('#terms-accept').click();
+    const scratch = path.join(root, '.test-output', 'v3.1.1'); fs.mkdirSync(scratch, {recursive: true});
+    const output = fs.mkdtempSync(path.join(scratch, 'task4-')); console.log('Task4 artifacts: ' + output);
+    const idle = () => page.waitForFunction(() => ready && !busy());
+    const download = async (selector, label) => {
+      const [file] = await Promise.all([page.waitForEvent('download'), page.locator(selector).click()]);
+      const destination = path.join(output, label + path.extname(file.suggestedFilename())); await file.saveAs(destination); await idle();
+      return {name: file.suggestedFilename(), bytes: fs.readFileSync(destination)};
+    };
+    function members(bytes) {
+      const end = bytes.length - 22; assert.equal(bytes.readUInt32LE(end), 0x06054b50);
+      let at = bytes.readUInt32LE(end + 16); const entries = [];
+      for (let i = 0; i < bytes.readUInt16LE(end + 10); i++) {
+        assert.equal(bytes.readUInt32LE(at), 0x02014b50);
+        const size = bytes.readUInt32LE(at + 20), nameLength = bytes.readUInt16LE(at + 28), local = bytes.readUInt32LE(at + 42);
+        const start = local + 30 + bytes.readUInt16LE(local + 26) + bytes.readUInt16LE(local + 28);
+        entries.push({name: bytes.toString('utf8', at + 46, at + 46 + nameLength), bytes: bytes.subarray(start, start + size)});
+        at += 46 + nameLength + bytes.readUInt16LE(at + 30) + bytes.readUInt16LE(at + 32);
+      }
+      return entries;
+    }
+    async function inspectPDF(bytes, expected, {annotated = false, sheets = expected.length} = {}) {
+      const pdf = await PDFDocument.load(bytes); assert.equal(pdf.getPageCount(), sheets);
+      const actual = [], titles = [], texts = [];
+      for (const sheet of pdf.getPages()) {
+        const images = sheet.node.Resources().lookup(PDFName.of('XObject'));
+        for (const key of images.keys()) actual.push(Buffer.from(images.lookup(key).contents));
+        texts.push(Buffer.from(pdf.context.lookup(sheet.node.get(PDFName.of('Contents'))).contents).toString('ascii'));
+      }
+      assert.deepEqual(actual, expected.map(image => Buffer.from(image, 'base64')));
+      let ref = pdf.catalog.lookup(PDFName.of('Outlines'))?.get(PDFName.of('First'));
+      while (ref) { const item = pdf.context.lookup(ref); titles.push(item.get(PDFName.of('Title')).decodeText()); ref = item.get(PDFName.of('Next')); }
+      assert.equal(titles.length, annotated ? expected.length : 0);
+      if (annotated) assert.match(texts.join('\n'), /\d{2}:\d{2}:\d{2}/);
+      return {pdf, titles, texts};
+    }
+    let images;
+    await test('PDF defaults, zero selection guards, and synthetic export fixtures', async () => {
+      assert(await page.locator('#selected-pdf').isDisabled()); assert(await page.locator('#selected-zip').isDisabled());
+      assert(await page.locator('#batch-course-zip').isDisabled());
+      assert.deepEqual(await page.evaluate(() => pdfOptions()), {layout: 'single', timestamps: false, bookmarks: false});
+      images = await page.evaluate(async () => {
+        const A = {name: 'Synthetic A', date: '2026-11-06', start: '08:00:00'}, B = {...A, name: 'Synthetic B'};
+        const aPage = 'https://rms-v5.xjtu.edu.cn/study-capture-courses/101/preview-detail/a';
+        const bPage = 'https://rms-v5.xjtu.edu.cn/study-capture-courses/202/preview-detail/b';
+        const make = (id, course, page, state) => ({id, course, page, source: {kind: 'file', sourceKey: id, sourceName: id, page, batchJobId: id === 'B' ? 'B-job' : ''},
+          crop: {x: 0, y: 0, w: 1, h: 1}, suspects: [], created: 1, namingManual: true, task: {state}});
+        lessons = [make('A', A, aPage, 'done'), make('B', B, bPage, 'paused'), make('B-empty', B, bPage, 'done')];
+        for (const lesson of lessons) await PPTLibrary.put(db, lesson);
+        const originals = []; allPages = [];
+        for (let i = 0; i < 5; i++) {
+          const canvas = document.createElement('canvas'); canvas.width = i === 1 ? 540 : 960; canvas.height = i === 1 ? 960 : 540;
+          const ctx = canvas.getContext('2d'); ctx.fillStyle = ['#e6f1ff', '#ffe6d9', '#def5e4', '#f2e6ff', '#fff3c4'][i]; ctx.fillRect(0, 0, canvas.width, canvas.height);
+          ctx.strokeStyle = '#203040'; ctx.lineWidth = 4; ctx.strokeRect(8, 8, canvas.width - 16, canvas.height - 16);
+          ctx.fillStyle = '#203040'; ctx.font = '36px sans-serif'; ctx.fillText(`Synthetic ${i < 3 ? 'A' : 'B'} slide ${i + 1}`, 24, 64);
+          ctx.font = '20px sans-serif'; ctx.fillText('Image edges must remain visible', 24, canvas.height - 30);
+          const encoded = await PPTPageStore.encode(canvas); originals.push(btoa(String.fromCharCode(...new Uint8Array(await encoded.image.arrayBuffer()))));
+          const metadata = {lessonId: i < 3 ? 'A' : 'B', order: [2048, 3072, 1024, 2048, 1024][i], w: canvas.width, h: canvas.height,
+            sourceTime: i === 1 ? null : 61 + i, time: 1, course: i < 3 ? A : B};
+          metadata.id = await PPTPageStore.add(db, metadata, encoded); allPages.push(metadata);
+        }
+        batchPage = bPage; batchJobs = [{id: 'B-job', course: B, sourceName: 'B', state: 'partial', requiresCrop: false, selected: false},
+          {id: 'B-future', course: B, sourceName: 'Upcoming', state: 'pending', requiresCrop: false, selected: true}];
+        await persistBatch(); activeLesson = lessons[0]; await PPTLibrary.activate(db, activeLesson.id); applyLesson(); render(); renderLibrary(); renderBatchJobs(); controls();
+        return originals;
+      });
+      await idle(); assert(await page.locator('#selected-pdf').isDisabled());
+      const all = await download('#pdf', 'default-all'); assert(!all.name.includes('-selected'));
+      await inspectPDF(all.bytes, [images[2], images[0], images[1]]);
+    });
+    await test('selected PDF/image ZIP export zero, one and many in displayed order; all-retained ignores selection', async () => {
+      const cards = page.locator('#pages article');
+      await cards.nth(2).locator('.page-select').check();
+      const one = await download('#selected-pdf', 'selected-one'); assert.match(one.name, /-selected\.pdf$/);
+      await inspectPDF(one.bytes, [images[1]]);
+      const oneZIP = await download('#selected-zip', 'selected-one-images'); assert.match(oneZIP.name, /-selected-slides\.zip$/);
+      assert.deepEqual(members(oneZIP.bytes).map(x => x.bytes), [Buffer.from(images[1], 'base64')]);
+      await cards.nth(0).locator('.page-select').check();
+      const selected = await download('#selected-pdf', 'selected-many'); await inspectPDF(selected.bytes, [images[2], images[1]]);
+      const zip = await download('#selected-zip', 'selected-images'); assert.match(zip.name, /-selected-slides\.zip$/);
+      assert.deepEqual(members(zip.bytes).map(x => x.bytes), [images[2], images[1]].map(x => Buffer.from(x, 'base64')));
+      const all = await download('#pdf', 'all-with-selection'); await inspectPDF(all.bytes, [images[2], images[0], images[1]]);
+      const allZIP = await download('#export-zip', 'all-images'); assert(!allZIP.name.includes('-selected'));
+      assert.deepEqual(members(allZIP.bytes).map(x => x.bytes), [images[2], images[0], images[1]].map(x => Buffer.from(x, 'base64')));
+      await page.locator('#clear-selection').click(); assert(await page.locator('#selected-pdf').isDisabled()); assert(await page.locator('#selected-zip').isDisabled());
+    });
+    await test('PDF preferences persist, normalize old records, and roll back storage failure', async () => {
+      await page.locator('#tab-export').click();
+      await page.locator('#pdf-timestamps').check(); await idle(); await page.locator('#pdf-bookmarks').check(); await idle();
+      await page.reload(); await idle();
+      assert.deepEqual(await page.evaluate(() => pdfOptions()), {layout: 'single', timestamps: true, bookmarks: true});
+      const single = await download('#pdf', 'annotated-single'); await inspectPDF(single.bytes, [images[2], images[0], images[1]], {annotated: true});
+      await page.locator('#tab-export').click(); await page.locator('#pdf-layout').selectOption('handout'); await idle();
+      const failure = await page.evaluate(async () => {
+        const original = IDBObjectStore.prototype.put;
+        IDBObjectStore.prototype.put = function(value, key) { if (this.name === 'settings' && key === 'exportPDF') { this.transaction.abort(); throw Error('synthetic PDF settings failure'); } return original.call(this, value, key); };
+        try { $('pdf-timestamps').checked = false; await $('pdf-timestamps').onchange(); }
+        finally { IDBObjectStore.prototype.put = original; }
+        return {options: pdfOptions(), message: $('status').textContent};
+      });
+      assert.deepEqual(failure.options, {layout: 'handout', timestamps: true, bookmarks: true}); assert.match(failure.message, /synthetic PDF settings failure/);
+      await page.reload(); await idle(); assert.deepEqual(await page.evaluate(() => pdfOptions()), failure.options);
+      await page.evaluate(async () => { const tx = db.transaction('settings', 'readwrite'); tx.objectStore('settings').put({layout: 'unknown', timestamps: 'true', bookmarks: 1}, 'exportPDF'); await new Promise(resolve => tx.oncomplete = resolve); });
+      await page.reload(); await idle(); assert.deepEqual(await page.evaluate(() => pdfOptions()), {layout: 'single', timestamps: false, bookmarks: false});
+      await page.locator('#tab-export').click();
+      await page.locator('#pdf-layout').selectOption('handout'); await idle(); await page.locator('#pdf-timestamps').check(); await idle(); await page.locator('#pdf-bookmarks').check(); await idle();
+    });
+    await test('annotations reach all/selected PDFs, per-job PDFs and both course ZIP entry points with independent batch scope', async () => {
+      const all = await download('#pdf', 'annotated-handout'); await inspectPDF(all.bytes, [images[2], images[0], images[1]], {annotated: true, sheets: 2});
+      await page.locator('#pages article').nth(1).locator('.page-select').check();
+      const selected = await download('#selected-pdf', 'annotated-selected'); await inspectPDF(selected.bytes, [images[0]], {annotated: true, sheets: 1});
+      await page.locator('#tab-export').click();
+      const course = await download('#course-zip', 'course-A'); assert.equal(course.name, 'Synthetic A-课次PDF.zip');
+      const entries = members(course.bytes); assert.equal(entries.length, 1); await inspectPDF(entries[0].bytes, [images[2], images[0], images[1]], {annotated: true, sheets: 2});
+      await page.locator('#tab-source').click(); await page.locator('#batch-panel').evaluate(panel => { panel.open = true; });
+      // Switching lessons must not redirect the batch panel to the active lesson's course.
+      await page.locator('#lesson-select').selectOption('B'); await idle(); await page.locator('#lesson-select').selectOption('A'); await idle();
+      const job = await download('[data-job-id="B-job"] button:not(.batch-view)', 'job-B');
+      const jobPDF = await inspectPDF(job.bytes, [images[4], images[3]], {annotated: true, sheets: 1});
+      assert.equal(jobPDF.titles.length, 2); assert(jobPDF.texts[0].includes('00:01:05'));
+      const batch = await download('#batch-course-zip', 'batch-course-B'); assert.equal(batch.name, 'Synthetic B-课次PDF.zip');
+      const batchEntries = members(batch.bytes); assert.equal(batchEntries.length, 1);
+      assert.deepEqual(batchEntries[0].bytes, job.bytes);
+      const message = await page.locator('#batch-status').textContent(); assert.match(message, /共 2 页/); assert.match(message, /跳过 2 个空课次/); assert.match(message, /1 节尚未完成/);
+      assert.equal(await page.locator('#lesson-select').inputValue(), 'A');
+    });
+    await test('selected export snapshots metadata/options before asynchronous writes and locks competing exports', async () => {
+      await page.locator('#select-all').click();
+      await page.evaluate(() => {
+        window.originalCreate = PPTDiskCache.create;
+        PPTDiskCache.create = async kind => { await new Promise(resolve => window.releaseExport = resolve); return originalCreate(kind); };
+        window.exportPromise = exportRetained('pdf', true);
+      });
+      await page.waitForFunction(() => !!window.releaseExport);
+      for (const id of ['selected-pdf', 'selected-zip', 'pdf', 'export-zip', 'course-zip', 'batch-course-zip', 'pdf-timestamps', 'pdf-bookmarks']) assert(await page.locator('#' + id).isDisabled());
+      const event = page.waitForEvent('download');
+      await page.evaluate(() => { selectedPages.clear(); pages.reverse(); pages[1].sourceTime = 999; $('pdf-timestamps').checked = false; $('pdf-bookmarks').checked = false; releaseExport(); });
+      const file = await event; const destination = path.join(output, 'snapshot.pdf'); await file.saveAs(destination);
+      await page.evaluate(async () => { await exportPromise; PPTDiskCache.create = originalCreate; pages.reverse(); pages[1].sourceTime = 61; applyPDFOptions(savedPDFOptions); render(); controls(); });
+      await inspectPDF(fs.readFileSync(destination), [images[2], images[0], images[1]], {annotated: true, sheets: 2});
+    });
+    await test('batch course ZIP reports missing scope, empty courses and unavailable images without sticking busy', async () => {
+      const result = await page.evaluate(async () => {
+        const messages = []; await exportCourseZIP(null, 'batch-status'); messages.push($('batch-status').textContent);
+        await exportCourseZIP('missing-course', 'batch-status'); messages.push($('batch-status').textContent);
+        const read = PPTPageStore.imageBytes; PPTPageStore.imageBytes = async () => { throw Error('synthetic unavailable image'); };
+        try { await exportCourseZIP(batchCourseKey(), 'batch-status'); messages.push($('batch-status').textContent); }
+        finally { PPTPageStore.imageBytes = read; }
+        return {messages, busy: busy(), enabled: !$('batch-course-zip').disabled};
+      });
+      assert.match(result.messages[0], /请先读取课程录像列表/); assert.match(result.messages[1], /本课程还没有截图/); assert.match(result.messages[2], /synthetic unavailable image/);
+      assert.equal(result.busy, false); assert.equal(result.enabled, true);
+    });
+    assert.deepEqual(errors, []); await exportContext.close();
     assert.deepEqual(blocked, []); console.log(`${passed} focused improvement groups passed; no external requests.`);
   } finally { await browser?.close(); if (server) await new Promise(resolve => server.close(resolve)); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

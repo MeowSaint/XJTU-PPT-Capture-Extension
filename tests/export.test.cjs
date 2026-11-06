@@ -65,6 +65,78 @@ test('handout PDF fits landscape/portrait slides, notes, and visible page number
   assert.equal(slide, pages.length);
 });
 
+function outlines(pdf) {
+  const root = pdf.catalog.lookup(PDFName.of('Outlines'));
+  if (!root) return [];
+  const result = [], refs = new Set(); let ref = root.get(PDFName.of('First')), previous;
+  while (ref) {
+    assert(!refs.has(ref.toString()), 'outline links must terminate'); refs.add(ref.toString());
+    const item = pdf.context.lookup(ref);
+    assert.equal(item.get(PDFName.of('Parent')).toString(), pdf.catalog.get(PDFName.of('Outlines')).toString());
+    assert.equal(item.get(PDFName.of('Prev'))?.toString(), previous?.toString());
+    result.push({title: item.get(PDFName.of('Title')).decodeText(), dest: item.lookup(PDFName.of('Dest'))});
+    previous = ref; ref = item.get(PDFName.of('Next'));
+  }
+  assert.equal(root.get(PDFName.of('Last')).toString(), previous.toString());
+  assert.equal(root.get(PDFName.of('Count')).asNumber(), result.length);
+  return result;
+}
+
+for (const layout of ['single', 'handout']) for (const timestamps of [false, true]) for (const bookmarks of [false, true]) {
+  test(`${layout} timestamps=${timestamps} bookmarks=${bookmarks}: independent options, JPEG order, outlines and stream parity`, async () => {
+    const api = exportsWith(), options = {layout, timestamps, bookmarks};
+    const originals = [page(3661.9, 1920, 1080), page(0, 900, 1600), page(NaN)];
+    originals.forEach((p, i) => { p.data = 'data:image/jpeg;base64,' + Buffer.concat([jpeg, Buffer.from([i])]).toString('base64'); });
+    for (const count of [0, 1, 2, 3]) {
+      const slides = originals.slice(0, count), chunks = [], reads = [];
+      const bytes = Buffer.from(await api.makePDF(slides, options).arrayBuffer());
+      await api.writePDF(metadata(slides), {...options, readImage: async p => {
+        reads.push(p.id); return Uint8Array.from(Buffer.from(slides[p.id].data.split(',')[1], 'base64'));
+      }, write: async bytes => { chunks.push(Buffer.from(bytes)); }});
+      assert.deepEqual(Buffer.concat(chunks), bytes); assert.deepEqual(reads, slides.map((_, i) => i));
+      if (!timestamps && !bookmarks) assert.deepEqual(bytes, Buffer.from(await api.makePDF(slides, {layout}).arrayBuffer()));
+      const pdf = await PDFDocument.load(bytes), entries = outlines(pdf);
+      assert.equal(entries.length, bookmarks ? count : 0);
+      assert.equal(pdf.getPageCount(), Math.ceil(count / (layout === 'handout' ? 2 : 1)));
+      for (let i = 0; i < count; i++) {
+        const handout = layout === 'handout', sheet = pdf.getPage(handout ? Math.floor(i / 2) : i), commands = content(pdf, sheet);
+        const image = sheet.node.Resources().lookup(PDFName.of('XObject')).lookup(PDFName.of('Im' + (handout ? i % 2 : 0)));
+        assert.deepEqual(Buffer.from(image.contents), Buffer.from(slides[i].data.split(',')[1], 'base64'));
+        const time = ['01:01:01', '00:00:00', ''][i];
+        if (time) assert.equal(commands.includes(time), timestamps);
+        if (handout) assert(commands.includes(`(${i + 1}${timestamps && time ? ' - ' + time : ''}) Tj`));
+        else {
+          const height = 842 * slides[i].h / slides[i].w, footer = timestamps && time ? 28 : 0;
+          assert.equal(sheet.getHeight(), height + footer);
+          assert(commands.includes(`0 ${footer} cm /Im0 Do Q`));
+          if (footer) assert.match(commands, /24 10 Td \(\d+:\d{2}:\d{2}\) Tj/);
+        }
+        if (bookmarks) {
+          assert.equal(entries[i].title, `Page ${i + 1}${time ? ' - ' + time : ''}`);
+          assert.equal(entries[i].dest.get(0).toString(), sheet.ref.toString());
+          assert.equal(entries[i].dest.get(1).toString(), '/XYZ');
+          const top = entries[i].dest.get(3).asNumber();
+          assert.equal(top, handout ? (i % 2 ? 364 : 758) : sheet.getHeight());
+          assert(top >= 0 && top <= sheet.getHeight());
+        }
+      }
+    }
+  });
+}
+
+test('PDF annotations omit invalid time values and accept only boolean true options', async () => {
+  const {makePDF} = exportsWith(), slides = [-1, NaN, Infinity, -Infinity, undefined, null, '60', 0, 360000.9].map(time => ({...page(), sourceTime: time}));
+  for (const layout of ['single', 'handout']) {
+    const pdf = await PDFDocument.load(await makePDF(slides, {layout, timestamps: true, bookmarks: true}).arrayBuffer());
+    const titles = outlines(pdf).map(entry => entry.title);
+    assert.deepEqual(titles, ['Page 1', 'Page 2', 'Page 3', 'Page 4', 'Page 5', 'Page 6', 'Page 7', 'Page 8 - 00:00:00', 'Page 9 - 100:00:00']);
+    const text = pdf.getPages().map(p => content(pdf, p)).join('\n');
+    assert.equal((text.match(/\d+:\d{2}:\d{2}/g) || []).length, 2);
+    const original = Buffer.from(await makePDF(slides, {layout}).arrayBuffer());
+    assert.deepEqual(Buffer.from(await makePDF(slides, {layout, timestamps: 'true', bookmarks: 1}).arrayBuffer()), original);
+  }
+});
+
 test('empty exports contain zero PDF pages and a valid empty ZIP directory', async () => {
   const {makePDF, makeZIP} = exportsWith();
   for (const options of [{}, {layout: 'handout'}]) {
@@ -160,7 +232,9 @@ test('ZIP rejects ZIP32 count and byte overflows before allocating or truncating
 const formats = [
   {name: 'single PDF', make: 'makePDF', write: 'writePDF', options: {}, hash: '2ff871ef819f0177e796cb8796b97f9dfd23dfb6737f5e8c73cb1a12effb7095'},
   {name: 'handout PDF', make: 'makeHandoutPDF', write: 'writePDF', options: {layout: 'handout'}, hash: '5e13dffc79ce0921cd166927fdceff21a7433606b9c140cdee9335ea4214999d'},
-  {name: 'ZIP', make: 'makeZIP', write: 'writeZIP', options: {}, hash: '50853a6f79a7cfd498034215bb3bc94ba6b9165acd48dcbc8833667b5987a46d'}
+  {name: 'ZIP', make: 'makeZIP', write: 'writeZIP', options: {}, hash: '50853a6f79a7cfd498034215bb3bc94ba6b9165acd48dcbc8833667b5987a46d'},
+  {name: 'annotated single PDF', make: 'makePDF', write: 'writePDF', options: {timestamps: true, bookmarks: true}},
+  {name: 'annotated handout PDF', make: 'makePDF', write: 'writePDF', options: {layout: 'handout', timestamps: true, bookmarks: true}}
 ];
 function metadata(pages) {
   return pages.map(({data, ...p}, id) => Object.defineProperty({...p, id}, 'data', {
@@ -170,7 +244,7 @@ function metadata(pages) {
 const nextTurn = () => new Promise(resolve => setImmediate(resolve));
 
 for (const format of formats) {
-  test(`${format.name} preserves legacy multi-page byte fingerprints`, async () => {
+  if (format.hash) test(`${format.name} preserves legacy multi-page byte fingerprints`, async () => {
     const api = exportsWith();
     const images = [Buffer.from([0xff, 0xd8, 0, 0x80, 0xff, 0xd9]), Buffer.from('second image'), Buffer.from([0, 1, 255])];
     const pages = images.map((bytes, i) => ({data: 'data:image/jpeg;base64,' + bytes.toString('base64'), w: [7, 3, 1920][i], h: [3, 7, 1080][i], sourceTime: [3661.9, -20, Number.MAX_VALUE][i]}));
@@ -200,7 +274,7 @@ for (const format of formats) {
       });
       assert.equal(result, undefined);
       assert.deepEqual(reads, pages);
-      assert.deepEqual(Buffer.concat(chunks), Buffer.from(await api[format.make](originals).arrayBuffer()), `${count} pages`);
+      assert.deepEqual(Buffer.concat(chunks), Buffer.from(await api[format.make](originals, format.options).arrayBuffer()), `${count} pages`);
     }
   });
 
@@ -474,6 +548,23 @@ for (const layout of ['single', 'handout']) {
   });
 }
 
+test('course ZIP forwards every annotation combination to every PDF member', async () => {
+  const api = exportsWith(), originals = [[page(3661), page(NaN), page(60)], [page(0)]];
+  for (const layout of ['single', 'handout']) for (const timestamps of [false, true]) for (const bookmarks of [false, true]) {
+    const options = {layout, timestamps, bookmarks}, chunks = [];
+    await api.writeCourseZIP(originals.map((slides, i) => ({name: `lesson-${i}.pdf`, pages: metadata(slides)})), {
+      ...options, readImage: async () => Uint8Array.from(jpeg), write: async bytes => { chunks.push(Buffer.from(bytes)); }
+    });
+    const members = readCourseZIP(Buffer.concat(chunks)); assert.equal(members.length, 2);
+    for (const [i, member] of members.entries()) {
+      assert.deepEqual(member.data, Buffer.from(await api.makePDF(originals[i], options).arrayBuffer()));
+      const pdf = await PDFDocument.load(member.data);
+      assert.equal(outlines(pdf).length, bookmarks ? originals[i].length : 0);
+      assert.equal(content(pdf, pdf.getPage(0)).includes(i ? '00:00:00' : '01:01:01'), timestamps);
+    }
+  }
+});
+
 test('course ZIP preserves safe names and resolves sanitized and duplicate names without taking unique names', async () => {
   const {writeCourseZIP} = exportsWith();
   assert.equal(typeof writeCourseZIP, 'function');
@@ -507,8 +598,8 @@ test('course ZIP writes a valid empty archive and counts only nonempty lessons',
   assert.deepEqual(readCourseZIP(Buffer.concat(chunks)), []);
 });
 
-for (const layout of ['single', 'handout']) {
-  test(`course ZIP ${layout} waits for each asynchronous operation and writes JPEGs directly`, {timeout: 5000}, async () => {
+for (const layout of ['single', 'handout']) for (const annotations of [false, true]) {
+  test(`course ZIP ${layout} annotations=${annotations} waits for each asynchronous operation and writes JPEGs directly`, {timeout: 5000}, async () => {
     const {writeCourseZIP} = exportsWith({
       Blob: class { constructor() { assert.fail('course ZIP must not collect a PDF Blob'); } },
       atob() { assert.fail('course ZIP must use readImage'); }
@@ -519,7 +610,7 @@ for (const layout of ['single', 'handout']) {
       {name: '第二节', pages: pages.slice(3)}];
     let image = null, reads = 0, payloads = 0, finished = false;
     const exporting = writeCourseZIP(lessons, {
-      layout,
+      layout, timestamps: annotations, bookmarks: annotations,
       readImage(p) {
         assert.equal(image, null, 'the previous JPEG must reach the outer writer before the next read');
         assert.equal(p, pages[reads++]);

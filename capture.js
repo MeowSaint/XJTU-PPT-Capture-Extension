@@ -14,8 +14,14 @@ let referrerOrigins = new Set(), referrerPage = '', referrerWrites = Promise.res
 let sourceCourse = {}, sourceCoursePage = '', namingPage = '', namingManual = false, namingSave = Promise.resolve(), discoverySerial = 0;
 let videoCache = null, previewURL = null, previewLoadingId = null, previewRevision = 0;
 let allPages = [], lessons = [], activeLesson = null, savedBatches = [], lessonSave = Promise.resolve(), scanId = '';
+let savedPDFOptions = {layout: 'single', timestamps: false, bookmarks: false};
 const dbReady = PPTPageStore.open({blocked: () => status('请先关掉其他已打开的截取工具页，再刷新本页。')}).then(async database => {
   db = database;
+  const pdf = await new Promise((resolve, reject) => {
+    const tx = db.transaction('settings'), request = tx.objectStore('settings').get('exportPDF');
+    tx.oncomplete = () => resolve(request.result); tx.onerror = tx.onabort = () => reject(tx.error || Error('PDF 设置读取失败'));
+  });
+  applyPDFOptions(pdf); savedPDFOptions = pdfOptions();
   await PPTPageStore.prune(db);
   const saved = await PPTLibrary.restore(db);
   allPages = saved.pages; lessons = saved.lessons; savedBatches = saved.batches;
@@ -102,8 +108,9 @@ function canResume() {
   const scan = activeLesson?.task;
   return !!scan?.id && ['paused', 'failed', 'running'].includes(scan.state) && Number.isFinite(scan.checkpoint) && scan.checkpoint >= 0 && sourceReady && JSON.stringify(scan.settings) === JSON.stringify(scanSettings()) && JSON.stringify(scan.crop) === JSON.stringify(crop) && JSON.stringify(normalizedIgnore(scan.ignoreRect)) === JSON.stringify(ignoreRect);
 }
-function currentCourseLessons() {
-  const key = PPTLibrary.courseKey(activeLesson?.page || '', activeLesson?.course || namingInfo());
+function currentCourseKey() { return PPTLibrary.courseKey(activeLesson?.page || '', activeLesson?.course || namingInfo()); }
+function batchCourseKey() { return batchPage ? PPTLibrary.courseKey(batchPage, batchJobs[0]?.course) : null; }
+function currentCourseLessons(key = currentCourseKey()) {
   return lessons.filter(lesson => PPTLibrary.courseKey(lesson.page || '', lesson.course) === key);
 }
 function renderLibrary() {
@@ -322,6 +329,23 @@ function acceptCourse(info, page) {
 for (const id of ['course-name', 'course-date', 'course-start']) $(id).oninput = () => {
   namingManual = true; namingPage = activeLesson?.page || pages[0]?.coursePage || coursePage;
   previewName(); persistNaming();
+};
+function pdfOptions() { return {layout: $('pdf-layout').value, timestamps: $('pdf-timestamps').checked, bookmarks: $('pdf-bookmarks').checked}; }
+function applyPDFOptions(options) {
+  $('pdf-layout').value = options?.layout === 'handout' ? 'handout' : 'single';
+  $('pdf-timestamps').checked = options?.timestamps === true; $('pdf-bookmarks').checked = options?.bookmarks === true;
+}
+for (const id of ['pdf-layout', 'pdf-timestamps', 'pdf-bookmarks']) $(id).onchange = async () => {
+  if (busy() || !ready) { applyPDFOptions(savedPDFOptions); return; }
+  const options = pdfOptions(); reviewBusy = true; controls();
+  try {
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction('settings', 'readwrite'); tx.objectStore('settings').put(options, 'exportPDF');
+      tx.oncomplete = resolve; tx.onerror = tx.onabort = () => reject(tx.error || Error('PDF 设置未能保存'));
+    });
+    savedPDFOptions = options;
+  } catch (e) { applyPDFOptions(savedPDFOptions); status('PDF 设置保存失败：' + e.message); }
+  finally { reviewBusy = false; controls(); }
 };
 async function writePage(metadata, asset) {
   pageWrites++; controls();
@@ -614,7 +638,7 @@ document.addEventListener('keydown', event => {
 });
 function controls() {
   const active = busy();
-  for (const id of ['load-url', 'url', 'file', 'share', 'sources', 'course', 'discover', 'mode', 'diff', 'dedupe', 'stable', 'full', 'course-name', 'course-date', 'course-start', 'pdf-layout']) $(id).disabled = active;
+  for (const id of ['load-url', 'url', 'file', 'share', 'sources', 'course', 'discover', 'mode', 'diff', 'dedupe', 'stable', 'full', 'course-name', 'course-date', 'course-start', 'pdf-layout', 'pdf-timestamps', 'pdf-bookmarks']) $(id).disabled = active;
   $('load').disabled = active || !$('sources').value;
   $('full').disabled = active || !sourceReady;
   $('crop-select').disabled = active || !sourceReady;
@@ -633,6 +657,7 @@ function controls() {
   $('resume-load').disabled = active || !ready;
   $('restart-scan').hidden = !activeLesson?.task || !!stream; $('restart-scan').disabled = active || !sourceReady;
   $('course-zip').disabled = active || !currentCourseLessons().some(lesson => allPages.some(page => page.lessonId === lesson.id));
+  $('batch-course-zip').disabled = active || !batchCourseKey();
   document.querySelectorAll('#suspect-ranges button').forEach(button => { button.disabled = active || (!button.classList.contains('suspect-dismiss') && !sourceReady); });
   $('stop').disabled = !task && !realtimeTimer && !batchRunning;
   $('shot').disabled = active || !sourceReady || !ready;
@@ -642,6 +667,7 @@ function controls() {
   $('clean-similar').disabled = active || pages.length < 2;
   $('select-all').disabled = active || !pages.length;
   $('clear-selection').disabled = active || !selectedPages.size; $('delete-selected').disabled = active || !selectedPages.size;
+  $('selected-pdf').disabled = active || !selectedPages.size; $('selected-zip').disabled = active || !selectedPages.size;
   document.querySelectorAll('#pages article').forEach(card => {
     card.draggable = !active;
     card.querySelector('button').disabled = active; card.querySelector('.page-select').disabled = active;
@@ -1116,12 +1142,12 @@ window.addEventListener('pagehide', () => {
   if (previewURL) URL.revokeObjectURL(previewURL);
   for (const [image, state] of thumbnailStates) releaseThumbnail(image, state);
 });
-async function downloadPages(list, name, {kind = 'pdf', layout = 'single'} = {}) {
+async function downloadPages(list, name, {kind = 'pdf', layout = 'single', timestamps = false, bookmarks = false} = {}) {
   if (!list.length) throw Error('还没有截图');
   const cache = await PPTDiskCache.create('export');
   let count = 0;
   try {
-    const options = {layout, write: cache.write, readImage: async page => {
+    const options = {layout, timestamps, bookmarks, write: cache.write, readImage: async page => {
       status(`正在导出第 ${++count} / ${list.length} 页…`);
       $('progress').value = (count - 1) / list.length;
       return PPTPageStore.imageBytes(db, page.id);
@@ -1134,14 +1160,16 @@ async function downloadPages(list, name, {kind = 'pdf', layout = 'single'} = {})
     throw error;
   }
 }
-async function downloadPDF(list, course, layout = 'single') {
+async function downloadPDF(list, course, options = pdfOptions()) {
   const name = PPTCourse.filename(course);
   if (!name) throw Error('请先补填课程名称、上课日期和开始时间');
-  await downloadPages(list, name, {layout});
+  await downloadPages(list.map(page => ({...page})), name, options);
 }
-function exportPDF() { return downloadPDF(pages, namingInfo(), $('pdf-layout').value); }
-async function exportRetained(kind) {
-  if (busy() || !pages.length) return;
+async function exportRetained(kind, selected = false) {
+  if (busy()) return;
+  const list = pages.filter(page => !selected || selectedPages.has(page.id)).map(page => ({...page}));
+  if (!list.length) return;
+  const options = pdfOptions();
   exportBusy = true; controls();
   try {
     await namingSave.catch(() => {});
@@ -1153,38 +1181,44 @@ async function exportRetained(kind) {
       exportBusy = false; controls(); $(missing).focus();
       throw Error('请先补填课程名称、上课日期和开始时间');
     }
-    if (kind === 'zip') await downloadPages(pages, name.replace(/\.pdf$/i, '-slides.zip'), {kind});
-    else await exportPDF();
-    status(`已生成全部 ${pages.length} 页的${kind === 'zip' ? '图片包' : $('pdf-layout').value === 'handout' ? '笔记讲义 PDF' : 'PDF'}。`);
+    const filename = name.replace(/\.pdf$/i, `${selected ? '-selected' : ''}${kind === 'zip' ? '-slides.zip' : '.pdf'}`);
+    await downloadPages(list, filename, {...options, kind});
+    status(`已生成${selected ? '所选' : '全部'} ${list.length} 页的${kind === 'zip' ? '图片包' : options.layout === 'handout' ? '笔记讲义 PDF' : 'PDF'}。`);
   } catch (e) { status('导出失败：' + e.message); }
   finally { exportBusy = false; controls(); }
 }
 $('pdf').onclick = () => exportRetained('pdf'); $('export-zip').onclick = () => exportRetained('zip');
-$('course-zip').onclick = async () => {
+$('selected-pdf').onclick = () => exportRetained('pdf', true); $('selected-zip').onclick = () => exportRetained('zip', true);
+$('course-zip').onclick = () => exportCourseZIP(currentCourseKey());
+$('batch-course-zip').onclick = () => exportCourseZIP(batchCourseKey(), 'batch-status');
+async function exportCourseZIP(courseKey, statusId = 'status') {
   if (busy()) return;
+  const report = message => { status(message); if (statusId !== 'status') $(statusId).textContent = message; };
+  const options = pdfOptions();
   exportBusy = true; controls(); let cache;
   try {
+    if (!courseKey) throw Error('请先读取课程录像列表');
     await namingSave; await lessonSave; syncAllPages();
-    const course = currentCourseLessons().sort((a, b) => (a.course?.date || '').localeCompare(b.course?.date || '') || (a.course?.start || '').localeCompare(b.course?.start || '') || a.created - b.created);
-    const entries = course.map((lesson, index) => ({name: `${String(index + 1).padStart(3, '0')}-${PPTCourse.filename(lesson.course) || lessonLabel(lesson) + '.pdf'}`, pages: allPages.filter(page => page.lessonId === lesson.id).sort((a, b) => a.order - b.order)}));
+    const course = currentCourseLessons(courseKey).sort((a, b) => (a.course?.date || '').localeCompare(b.course?.date || '') || (a.course?.start || '').localeCompare(b.course?.start || '') || a.created - b.created);
+    const entries = course.map((lesson, index) => ({name: `${String(index + 1).padStart(3, '0')}-${PPTCourse.filename(lesson.course) || lessonLabel(lesson) + '.pdf'}`, pages: allPages.filter(page => page.lessonId === lesson.id).sort((a, b) => a.order - b.order).map(page => ({...page}))}));
     const nonempty = entries.filter(entry => entry.pages.length), total = nonempty.reduce((sum, entry) => sum + entry.pages.length, 0);
     if (!nonempty.length) throw Error('本课程还没有截图');
     cache = await PPTDiskCache.create('export'); let count = 0;
-    await writeCourseZIP(entries, {layout: $('pdf-layout').value, write: cache.write, readImage: async page => {
-      status(`正在打包课程 PDF：第 ${++count} / ${total} 页…`); $('progress').value = (count - 1) / total;
+    await writeCourseZIP(entries, {...options, write: cache.write, readImage: async page => {
+      report(`正在打包课程 PDF：第 ${++count} / ${total} 页…`); $('progress').value = (count - 1) / total;
       return PPTPageStore.imageBytes(db, page.id);
     }});
-    const file = await cache.finish('application/zip'), name = (activeLesson.course?.name || '课程').replace(/[<>:"/\\|?*\x00-\x1f]/g, '_');
+    const file = await cache.finish('application/zip'), name = (course[0]?.course?.name || '课程').replace(/[<>:"/\\|?*\x00-\x1f]/g, '_');
     downloadBlob(file, `${name}-课次PDF.zip`, cache); cache = null; $('progress').value = 1;
     const unfinished = course.filter((lesson, index) => entries[index].pages.length && lesson.task?.state !== 'done').length;
-    const courseKey = PPTLibrary.courseKey(activeLesson.page || '', activeLesson.course), knownJobs = new Set(savedBatches.filter(batch => PPTLibrary.courseKey(batch.page) === courseKey).flatMap(batch => batch.jobs.map(job => job.id)));
+    const knownJobs = new Set(savedBatches.filter(batch => PPTLibrary.courseKey(batch.page, batch.jobs[0]?.course) === courseKey).flatMap(batch => batch.jobs.map(job => job.id)));
     const empty = course.length - nonempty.length + [...knownJobs].filter(id => !course.some(lesson => lesson.source?.batchJobId === id)).length;
-    status(`已生成 ${nonempty.length} 节 PDF 的课程包，共 ${total} 页。${empty ? `跳过 ${empty} 个空课次（尚无截图）。` : ''}${unfinished ? `其中 ${unfinished} 节尚未完成整节扫描，包内为当前已保留截图。` : ''}`);
+    report(`已生成 ${nonempty.length} 节 PDF 的课程包，共 ${total} 页。${empty ? `跳过 ${empty} 个空课次（尚无截图）。` : ''}${unfinished ? `其中 ${unfinished} 节尚未完成整节扫描，包内为当前已保留截图。` : ''}`);
   } catch (e) {
     let message = e.message; if (cache) try { await cache.remove(); } catch (cleanup) { message += '；临时文件清理失败：' + cleanup.message; }
-    status('整课导出失败：' + message);
+    report('整课导出失败：' + message);
   } finally { exportBusy = false; controls(); }
-};
+}
 async function fastScan({restart = false, range = null} = {}) {
   if (task || realtimeTimer || realtimeBusy || reviewBusy || exportBusy || pageWrites || !sourceReady || !ready || !activeLesson) return null;
   if (activeBatchJob?.requiresCrop && (!activeBatchJob.cropConfirmed || activeBatchJob.cropRejected)) {
