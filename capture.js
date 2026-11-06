@@ -2,18 +2,26 @@
 const $ = id => document.getElementById(id), video = $('video'), overlay = $('overlay');
 const status = message => { $('status').textContent = message; syncWorkspace(); };
 let db, pages = [], ready = false, sourceReady = false, studyAccepted = false, stream = null, hls = null, objectURL = null;
-let crop = {x: 0, y: 0, w: 1, h: 1}, drag = null, cropEditing = false, task = null, sourceName = '', sources = [], pendingOrigins = [], pendingURL = '';
+let crop = {x: 0, y: 0, w: 1, h: 1}, drag = null, task = null, sourceName = '', sources = [], pendingOrigins = [], pendingURL = '';
 let realtimeTimer = null, realtimeBusy = false, candidate = null, candidateSince = 0, last = null, coursePage = '';
+let ignoreRect = null, selectionMode = null, selectionRect = null, dedupeContext = null;
 let draggedPageId = null, reviewBusy = false, exportBusy = false, pageWrites = 0, undoState = null;
-let selectedPages = new Set(), previewPageId = null, previewReturn = null, loadedIdentity = null;
+let selectedPages = new Set(), selectionAnchor = null, previewPageId = null, previewReturn = null, loadedIdentity = null;
+let similarReview = null;
 let batchJobs = [], batchPage = '', batchRunning = false, batchStopRequested = false, activeBatchJob = null, batchDiscoverySerial = 0;
 const referrerRule = 16220;
 let referrerOrigins = new Set(), referrerPage = '', referrerWrites = Promise.resolve();
 let sourceCourse = {}, sourceCoursePage = '', namingPage = '', namingManual = false, namingSave = Promise.resolve(), discoverySerial = 0;
 let videoCache = null, previewURL = null, previewLoadingId = null, previewRevision = 0;
 let allPages = [], lessons = [], activeLesson = null, savedBatches = [], lessonSave = Promise.resolve(), scanId = '';
+let savedPDFOptions = {layout: 'single', timestamps: false, bookmarks: false};
 const dbReady = PPTPageStore.open({blocked: () => status('请先关掉其他已打开的截取工具页，再刷新本页。')}).then(async database => {
   db = database;
+  const pdf = await new Promise((resolve, reject) => {
+    const tx = db.transaction('settings'), request = tx.objectStore('settings').get('exportPDF');
+    tx.oncomplete = () => resolve(request.result); tx.onerror = tx.onabort = () => reject(tx.error || Error('PDF 设置读取失败'));
+  });
+  applyPDFOptions(pdf); savedPDFOptions = pdfOptions();
   await PPTPageStore.prune(db);
   const saved = await PPTLibrary.restore(db);
   allPages = saved.pages; lessons = saved.lessons; savedBatches = saved.batches;
@@ -21,7 +29,7 @@ const dbReady = PPTPageStore.open({blocked: () => status('请先关掉其他已�
   if (activeLesson) applyLesson();
   else { namingManual = !!saved.naming?.manual; setNaming(saved.naming?.course || sourceCourse, saved.naming?.page || sourceCoursePage); }
   const batch = savedBatches.find(item => item.page === activeLesson?.page) || savedBatches[0];
-  if (batch) { batchPage = batch.page; batchJobs = batch.jobs; renderBatchJobs(); }
+  if (batch) { batchPage = batch.page; batchJobs = structuredClone(batch.jobs); renderBatchJobs(); }
   ready = true; render(); renderLibrary(); controls();
 });
 dbReady.then(() => status('已恢复保存的课次和任务。选择课次后重新加载原视频，即可继续提取或复核。')).catch(e => status('本地存储不可用：' + e.message));
@@ -31,42 +39,54 @@ function syncAllPages() {
   if (activeLesson) allPages = [...allPages.filter(page => page.lessonId !== activeLesson.id), ...pages];
 }
 function lessonLabel(lesson) { return [lesson.course?.name || lesson.source?.sourceName || '未命名课次', lesson.course?.date, lesson.course?.start?.slice(0, 5)].filter(Boolean).join(' · '); }
+function normalizedIgnore(rect) {
+  try { return PPTCore.ignoreMask(rect) ? {x: rect.x, y: rect.y, w: rect.w, h: rect.h} : null; }
+  catch { return null; }
+}
+function sameCrop(a, b) { return !!a && !!b && ['x', 'y', 'w', 'h'].every(key => Number.isFinite(a[key]) && a[key] === b[key]); }
 function applyLesson() {
+  releaseDedupeContext();
   pages = allPages.filter(page => page.lessonId === activeLesson.id).sort((a, b) => a.order - b.order);
   namingManual = !!activeLesson.namingManual; setNaming(activeLesson.course || {}, activeLesson.page || '');
   sourceName = activeLesson.source?.sourceName || ''; sourceCourse = {...activeLesson.course}; sourceCoursePage = activeLesson.page || '';
   crop = {...(activeLesson.crop || {x: 0, y: 0, w: 1, h: 1})};
-  const settings = activeLesson.settings || {step: 2, threshold: 1.2, dedupe: true, stable: 1.5};
+  ignoreRect = normalizedIgnore(activeLesson.ignoreRect);
+  const saved = activeLesson.settings || activeLesson.task?.settings || {};
+  const settings = {step: [0.5, 2, 8].includes(saved.step) ? saved.step : 0.5,
+    threshold: Number.isFinite(saved.threshold) && saved.threshold >= 0.2 && saved.threshold <= 10 ? saved.threshold : 1.2,
+    dedupe: typeof saved.dedupe === 'boolean' ? saved.dedupe : true,
+    stable: Number.isFinite(saved.stable) && saved.stable >= 0.5 && saved.stable <= 10 ? saved.stable : 1.5};
   $('mode').value = String(settings.step); $('diff').value = settings.threshold; $('dedupe').checked = settings.dedupe; $('stable').value = settings.stable;
-  selectedPages.clear(); previewPageId = null; last = null;
+  selectedPages.clear(); selectionAnchor = null; previewPageId = null; last = candidate = null; candidateSince = 0; cancelSelection();
 }
-function persistLesson(lesson = activeLesson) {
+function persistLesson(lesson = activeLesson, relatedBatch = null) {
   if (!lesson) return Promise.resolve();
-  if (lesson === activeLesson) Object.assign(lesson, {course: namingInfo(), page: namingPage || lesson.page || '', namingManual, settings: scanSettings(), crop: {...crop}});
-  const snapshot = structuredClone(lesson);
-  lessonSave = lessonSave.catch(() => {}).then(() => PPTLibrary.put(db, snapshot));
+  if (lesson === activeLesson) Object.assign(lesson, {course: namingInfo(), page: namingPage || lesson.page || '', namingManual, settings: scanSettings(), crop: {...crop}, ignoreRect: ignoreRect && {...ignoreRect}});
+  const snapshot = structuredClone(lesson), batchSnapshot = relatedBatch && structuredClone(relatedBatch);
+  lessonSave = lessonSave.catch(() => {}).then(() => PPTLibrary.put(db, snapshot, batchSnapshot)).then(() => {
+    if (batchSnapshot) retainBatch(batchSnapshot);
+  });
   return lessonSave;
 }
 function saveLessonSettings() {
   if (!ready) return;
-  Promise.all([persistLesson(), activeBatchJob?.requiresCrop ? persistBatch() : null]).then(renderLibrary).catch(e => status('课次设置保存失败：' + e.message));
+  persistLesson(activeLesson, activeBatchJob?.requiresCrop ? jobBatch() : null).then(renderLibrary).catch(e => status('课次设置保存失败：' + e.message));
 }
 function sameMediaSource(a, b) {
   if (!a || !b) return false;
-  const key = source => PPTLibrary.key({sourceKey: source.sourceKey || (source.url ? 'url:' + source.url : ''), sourceName: source.sourceName});
-  return !!a.sourceName && a.sourceName === b.sourceName || key(a) === key(b);
+  return PPTBatch.trackKey(a) === PPTBatch.trackKey(b);
 }
 async function bindLesson(source) {
   await dbReady; await lessonSave;
   const key = PPTLibrary.key(source);
   let lesson = lessons.find(item => item.source && PPTLibrary.key(item.source) === key);
   if (!lesson) {
-    lesson = {id: crypto.randomUUID(), course: {...sourceCourse}, page: source.page || '', source, crop: {x: 0,y: 0,w: 1,h: 1}, settings: scanSettings(), suspects: [], created: Date.now(), namingManual: false};
+    lesson = {id: crypto.randomUUID(), course: {...sourceCourse}, page: source.page || '', source, crop: {x: 0,y: 0,w: 1,h: 1}, settings: {...scanSettings(), step: 0.5}, suspects: [], created: Date.now(), namingManual: false};
     if (!activeLesson) { lesson.course = namingInfo(); lesson.namingManual = namingManual; }
     await PPTLibrary.put(db, lesson); lessons.push(lesson);
   } else {
     const changedChannel = source.batchJobId && !sameMediaSource(lesson.source, source);
-    const next = {...lesson, source: {...lesson.source, ...source}, ...(changedChannel ? {crop: {x: 0,y: 0,w: 1,h: 1}, task: null, suspects: []} : {})};
+    const next = {...lesson, source: {...lesson.source, ...source}, ...(changedChannel ? {crop: {x: 0,y: 0,w: 1,h: 1}, ignoreRect: null, task: null, suspects: []} : {})};
     await PPTLibrary.put(db, next); Object.assign(lesson, next);
     if (changedChannel && activeBatchJob) activeBatchJob.cropConfirmed = false;
   }
@@ -86,10 +106,11 @@ async function switchLesson(id) {
 }
 function canResume() {
   const scan = activeLesson?.task;
-  return !!scan?.id && ['paused', 'failed', 'running'].includes(scan.state) && Number.isFinite(scan.checkpoint) && scan.checkpoint >= 0 && sourceReady && JSON.stringify(scan.settings) === JSON.stringify(scanSettings()) && JSON.stringify(scan.crop) === JSON.stringify(crop);
+  return !!scan?.id && ['paused', 'failed', 'running'].includes(scan.state) && Number.isFinite(scan.checkpoint) && scan.checkpoint >= 0 && sourceReady && JSON.stringify(scan.settings) === JSON.stringify(scanSettings()) && JSON.stringify(scan.crop) === JSON.stringify(crop) && JSON.stringify(normalizedIgnore(scan.ignoreRect)) === JSON.stringify(ignoreRect);
 }
-function currentCourseLessons() {
-  const key = PPTLibrary.courseKey(activeLesson?.page || '', activeLesson?.course || namingInfo());
+function currentCourseKey() { return PPTLibrary.courseKey(activeLesson?.page || '', activeLesson?.course || namingInfo()); }
+function batchCourseKey() { return batchPage ? PPTLibrary.courseKey(batchPage, batchJobs[0]?.course) : null; }
+function currentCourseLessons(key = currentCourseKey()) {
   return lessons.filter(lesson => PPTLibrary.courseKey(lesson.page || '', lesson.course) === key);
 }
 function renderLibrary() {
@@ -110,15 +131,132 @@ function renderLibrary() {
     row.className = 'suspect-range'; seek.textContent = `${timecode(range.start)} – ${timecode(range.end)}`; seek.title = '跳转到视频中回看';
     seek.disabled = busy() || !sourceReady; seek.onclick = async () => { if (busy() || !sourceReady) return; try { await new PPTScanner(video, frame).seek(range.time ?? range.start); } catch (e) { status('回看失败：' + e.message); } };
     scan.textContent = '细查此段'; scan.disabled = busy() || !sourceReady; scan.onclick = () => { if (!busy()) fastScan({range}); };
-    row.append(seek, scan); list.append(row);
+    const dismiss = document.createElement('button'); dismiss.className = 'suspect-dismiss'; dismiss.textContent = '已确认';
+    dismiss.disabled = busy(); dismiss.onclick = () => dismissSuspect(range);
+    row.append(seek, scan, dismiss); list.append(row);
   }
   $('suspects-count').textContent = `待复核时间段 · ${activeLesson?.suspects?.length || 0}`;
 }
-function persistBatch() {
-  if (!batchPage) return Promise.resolve();
-  const snapshot = structuredClone({page: batchPage, jobs: batchJobs}), existing = savedBatches.findIndex(item => item.page === batchPage);
+async function dismissSuspect(range) {
+  if (busy() || !activeLesson?.suspects?.includes(range)) return;
+  reviewBusy = true; controls();
+  const lesson = activeLesson;
+  try {
+    await namingSave.catch(() => {}); await lessonSave.catch(() => {});
+    const index = lesson.suspects.indexOf(range);
+    if (index < 0) return;
+    const suspects = lesson.suspects.filter((_, i) => i !== index);
+    await persistLesson({...lesson, suspects});
+    lesson.suspects = suspects; renderLibrary(); status('此时间段已确认。');
+  } catch (e) { status('确认保存失败，请重试：' + e.message); }
+  finally { reviewBusy = false; controls(); }
+}
+let libraryRemoval = null, libraryWriting = false, libraryRenderRevision = 0;
+function confirmLibraryRemoval(group, course = null) {
+  if (libraryWriting) return;
+  const ids = group.map(lesson => lesson.id), count = allPages.filter(page => ids.includes(page.lessonId)).length;
+  libraryRemoval = {lessonIds: ids, course};
+  $('library-confirm-text').textContent = `永久删除${course === null ? '课次' : '整门课程'}“${course === null ? lessonLabel(group[0]) : group[0].course?.name || '未命名课程'}”：${group.length} 节、${count} 页。截图、课次设置及关联批量任务会一起删除，无法撤销。`;
+  $('library-confirm').hidden = false; $('library-cancel-delete').focus();
+}
+async function renderLibraryManager() {
+  const revision = ++libraryRenderRevision, list = $('library-list'); list.replaceChildren(); $('library-confirm').hidden = true; libraryRemoval = null;
+  $('library-status').textContent = lessons.length ? '正在估算截图资源大小…' : '本机尚未保存课次。';
+  const groups = new Map();
+  for (const lesson of lessons) {
+    const key = PPTLibrary.courseKey(lesson.page, lesson.course);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(lesson);
+  }
+  const estimates = [];
+  for (const [key, group] of groups) {
+    const section = document.createElement('section'), heading = document.createElement('h3'), remove = document.createElement('button');
+    section.className = 'library-course'; heading.textContent = group[0].course?.name || '未命名课程';
+    remove.textContent = '删除整课'; remove.setAttribute('aria-label', `删除整课 ${heading.textContent}`);
+    remove.onclick = () => confirmLibraryRemoval(group, key); section.append(heading, remove);
+    if (group[0].page) { const context = document.createElement('p'); context.className = 'note library-context'; context.textContent = '课程页面：' + group[0].page; section.append(context); }
+    for (const lesson of group) {
+      const row = document.createElement('div'), text = document.createElement('span'), button = document.createElement('button');
+      row.className = 'library-lesson'; row.dataset.lessonId = lesson.id;
+      const retained = allPages.filter(page => page.lessonId === lesson.id), label = `${lessonLabel(lesson)} · ${retained.length} 页`;
+      text.textContent = label + ' · 估算中'; button.textContent = '删除课次'; button.setAttribute('aria-label', `删除课次 ${lessonLabel(lesson)}`);
+      button.onclick = () => confirmLibraryRemoval([lesson]); row.append(text, button); section.append(row);
+      estimates.push({text, retained, label});
+    }
+    list.append(section);
+  }
+  let missing = 0;
+  try {
+    for (const item of estimates) {
+      if (!$('library-dialog').open || !item.text.isConnected) return;
+      const estimate = await PPTPageStore.estimate(db, item.retained);
+      if (revision !== libraryRenderRevision || !$('library-dialog').open) return;
+      missing += estimate.missing;
+      item.text.textContent = `${item.label} · 约 ${(estimate.bytes / 1024 ** 2).toFixed(2)} MB`;
+    }
+    if ($('library-dialog').open) $('library-status').textContent = missing ? `${missing} 页的资源缺失，估算未包含这些资源。` : lessons.length ? '大小估算完成。' : '本机尚未保存课次。';
+  } catch (error) { if (revision === libraryRenderRevision && $('library-dialog').open) $('library-status').textContent = '大小估算失败：' + error.message; }
+}
+$('library-manage').onclick = async () => {
+  if (busy() || !ready) return;
+  reviewBusy = true; controls(); $('library-dialog').showModal();
+  await namingSave.catch(() => {}); await lessonSave.catch(() => {}); renderLibraryManager();
+};
+function closeLibrary() {
+  if (libraryWriting) return;
+  libraryRenderRevision++; $('library-dialog').close(); libraryRemoval = null; reviewBusy = false; controls(); $('library-manage').focus();
+}
+$('library-close').onclick = closeLibrary;
+$('library-dialog').oncancel = event => { event.preventDefault(); closeLibrary(); };
+$('library-cancel-delete').onclick = () => { libraryRemoval = null; $('library-confirm').hidden = true; };
+$('library-delete').onclick = async () => {
+  if (!libraryRemoval || libraryWriting) return;
+  libraryWriting = true; libraryRenderRevision++;
+  $('library-dialog').querySelectorAll('button').forEach(button => { button.disabled = true; });
+  let committed = false;
+  const request = libraryRemoval, activeRemoved = request.lessonIds.includes(activeLesson?.id);
+  const undoIds = undoState?.removed.filter(item => request.lessonIds.includes(item.page.lessonId)).map(item => item.page.id) || [];
+  try {
+    await namingSave.catch(() => {}); await lessonSave.catch(() => {});
+    const saved = await PPTLibrary.remove(db, {...request, undoIds}); committed = true;
+    // The disk commit is final. Detach the removed lesson before source cleanup can save it again.
+    let cleanupError;
+    if (activeRemoved) {
+      activeLesson = null; undoState = null; activeBatchJob = null; selectedPages.clear(); selectionAnchor = null;
+      previewPageId = null; $('lightbox').close(); previewRevision++; previewLoadingId = null;
+      if (previewURL) URL.revokeObjectURL(previewURL); previewURL = null; $('lightbox-img').removeAttribute('src'); releaseDedupeContext();
+      try { await releaseSource(); } catch (error) { cleanupError = error; }
+    }
+    lessons = saved.lessons; allPages = saved.pages; savedBatches = saved.batches;
+    activeLesson = lessons.find(lesson => lesson.id === (activeRemoved ? saved.activeId : activeLesson?.id)) || null;
+    const batch = savedBatches.find(item => item.page === batchPage);
+    batchJobs = batch ? structuredClone(batch.jobs) : []; if (!batch) batchPage = '';
+    if (activeBatchJob && loadedIdentity?.coursePage === batchPage) activeBatchJob = batchJobs.find(job => job.id === activeBatchJob.id && sameMediaSource(job, loadedIdentity)) || activeBatchJob;
+    if (activeRemoved) {
+      if (activeLesson) applyLesson();
+      else { pages = []; sourceName = ''; sourceCourse = {}; sourceCoursePage = ''; crop = {x: 0, y: 0, w: 1, h: 1}; ignoreRect = null; cancelSelection(); restoreNaming(saved.naming || {course: {}, page: '', manual: false}); }
+    }
+    batchDiscoverySerial++; render(); renderLibrary(); renderBatchJobs(); draw(); await renderLibraryManager();
+    $('library-status').textContent = cleanupError ? '课次已永久删除；视频缓存释放失败：' + cleanupError.message : '已永久删除所选课次及关联批量任务。';
+  } catch (error) { $('library-status').textContent = (committed ? '课次已永久删除；界面更新失败，请刷新：' : '删除失败，课次和截图仍保留：') + error.message; }
+  finally { libraryWriting = false; $('library-dialog').querySelectorAll('button').forEach(button => { button.disabled = false; }); controls(); }
+};
+function retainBatch(snapshot) {
+  const existing = savedBatches.findIndex(item => item.page === snapshot.page);
   if (existing < 0) savedBatches.push(snapshot); else savedBatches[existing] = snapshot;
-  return PPTLibrary.batch(db, snapshot.page, snapshot.jobs);
+}
+function jobBatch(job = activeBatchJob) {
+  if (!job) return null;
+  const page = batchJobs.includes(job) ? batchPage : loadedIdentity?.coursePage || activeLesson?.page || batchPage;
+  if (!page) return null;
+  const jobs = page === batchPage ? batchJobs : savedBatches.find(item => item.page === page)?.jobs || [];
+  return {page, jobs: jobs.some(item => item.id === job.id) ? jobs.map(item => item.id === job.id ? job : item) : [...jobs, job]};
+}
+function persistBatch(job = null) {
+  const related = job ? jobBatch(job) : batchPage ? {page: batchPage, jobs: batchJobs} : null;
+  if (!related) return Promise.resolve();
+  const snapshot = structuredClone(related);
+  return PPTLibrary.batch(db, snapshot.page, snapshot.jobs).then(() => retainBatch(snapshot));
 }
 function syncWorkspace() {
   const selected = sources.find(source => source.url === $('sources').value);
@@ -192,6 +330,23 @@ for (const id of ['course-name', 'course-date', 'course-start']) $(id).oninput =
   namingManual = true; namingPage = activeLesson?.page || pages[0]?.coursePage || coursePage;
   previewName(); persistNaming();
 };
+function pdfOptions() { return {layout: $('pdf-layout').value, timestamps: $('pdf-timestamps').checked, bookmarks: $('pdf-bookmarks').checked}; }
+function applyPDFOptions(options) {
+  $('pdf-layout').value = options?.layout === 'handout' ? 'handout' : 'single';
+  $('pdf-timestamps').checked = options?.timestamps === true; $('pdf-bookmarks').checked = options?.bookmarks === true;
+}
+for (const id of ['pdf-layout', 'pdf-timestamps', 'pdf-bookmarks']) $(id).onchange = async () => {
+  if (busy() || !ready) { applyPDFOptions(savedPDFOptions); return; }
+  const options = pdfOptions(); reviewBusy = true; controls();
+  try {
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction('settings', 'readwrite'); tx.objectStore('settings').put(options, 'exportPDF');
+      tx.oncomplete = resolve; tx.onerror = tx.onabort = () => reject(tx.error || Error('PDF 设置未能保存'));
+    });
+    savedPDFOptions = options;
+  } catch (e) { applyPDFOptions(savedPDFOptions); status('PDF 设置保存失败：' + e.message); }
+  finally { reviewBusy = false; controls(); }
+};
 async function writePage(metadata, asset) {
   pageWrites++; controls();
   try { return await PPTPageStore.add(db, metadata, asset); }
@@ -224,7 +379,7 @@ function forgetUndo() {
   const removed = undoState?.removed.map(item => item.page.id) || []; undoState = null;
   if (removed.length) PPTPageStore.discard(db, removed).catch(() => {}); // Startup also reclaims orphaned assets.
 }
-function invalidateUndo() { forgetUndo(); selectedPages.clear(); updateSelection(); }
+function invalidateUndo() { forgetUndo(); selectedPages.clear(); selectionAnchor = null; updateSelection(); }
 async function reviewTransaction({remove = [], restore = [], naming, clear = false}) {
   await dbReady; await namingSave.catch(() => {}); await lessonSave;
   const lesson = activeLesson && {...activeLesson, course: naming.course, namingManual: naming.manual, page: naming.page, ...(clear ? {task: null, suspects: []} : {})};
@@ -275,32 +430,123 @@ function sameTimeline(a, b) {
 function validSignature(page) {
   return (page.sig instanceof Uint8ClampedArray || page.sig instanceof Uint8Array) && page.sig.length === 192 * 108 * 4 && Number.isFinite(page.w) && Number.isFinite(page.h) && page.w > 0 && page.h > 0;
 }
-async function hasSimilar(signature, threshold) {
-  const scope = pages;
+function createDedupeContext(signal) {
+  releaseDedupeContext();
+  const context = {lessonId: activeLesson?.id, crop: {...crop}, mask: PPTCore.ignoreMask(ignoreRect), signal, signatures: new Map(), valid: true};
+  dedupeContext = context;
+  return context;
+}
+function releaseDedupeContext(context = dedupeContext) {
+  if (!context) return;
+  context.valid = false; context.signatures.clear(); context.mask = null;
+  if (dedupeContext === context) dedupeContext = null;
+}
+function checkDedupeContext(context) {
+  context?.signal?.throwIfAborted();
+  if (context && (!context.valid || context.lessonId !== activeLesson?.id)) throw new DOMException('比较任务已停止', 'AbortError');
+}
+function cacheSignature(context, id, sig) {
+  if (!context?.valid || context.signatures.size >= 1000 && !context.signatures.has(id)) return;
+  const valid = (sig instanceof Uint8ClampedArray || sig instanceof Uint8Array) && sig.length === 192 * 108 * 4;
+  context.signatures.set(id, valid ? (sig.buffer.byteLength === sig.byteLength ? sig : sig.slice()) : null);
+}
+function comparisonMask(a, b, geometry = crop, mask = PPTCore.ignoreMask(ignoreRect)) {
+  return sameCrop(a, geometry) && sameCrop(b, geometry) ? mask : null;
+}
+async function hasSimilar(signature, threshold, context = null, signatureCrop = crop) {
+  const scope = pages, geometry = context?.crop || crop, mask = context ? context.mask : PPTCore.ignoreMask(ignoreRect);
   for (let offset = 0; offset < scope.length; offset += 32) {
-    task?.signal.throwIfAborted();
-    const records = await PPTPageStore.assets(db, scope.slice(offset, offset + 32).map(page => page.id));
-    if (records.some(record => record?.sig && PPTCore.similar(signature, record.sig, threshold))) return true;
+    checkDedupeContext(context);
+    const batch = scope.slice(offset, offset + 32), missing = batch.filter(page => !context?.signatures.has(page.id));
+    const records = missing.length ? await PPTPageStore.assets(db, missing.map(page => page.id)) : [];
+    checkDedupeContext(context);
+    for (let i = 0; i < missing.length; i++) cacheSignature(context, missing[i].id, records[i]?.sig);
+    for (const page of batch) {
+      const sig = context?.signatures.has(page.id) ? context.signatures.get(page.id) : records[missing.indexOf(page)]?.sig;
+      if (validSignature({...page, sig}) && PPTCore.similar(signature, sig, threshold, comparisonMask(signatureCrop, page.signatureCrop, geometry, mask))) return true;
+    }
   }
   return false;
 }
+function releaseSimilarImages(review) {
+  review.urls.forEach(url => URL.revokeObjectURL(url)); review.urls = [];
+  for (const side of ['earlier', 'later']) $('similar-' + side + '-img').removeAttribute('src');
+}
+function closeSimilar() {
+  if (!similarReview) return;
+  releaseSimilarImages(similarReview); similarReview = null;
+  $('similar-dialog').close(); reviewBusy = false; controls();
+}
+async function nextSimilar(review) {
+  releaseSimilarImages(review); review.pair = null;
+  $('similar-pair').hidden = true; $('similar-choices').hidden = true; $('similar-confirm').hidden = true;
+  $('similar-status').textContent = '正在检查相邻页面…';
+  try {
+    while (review.next < review.pages.length) {
+      const a = review.pages[review.survivor], b = review.pages[review.next++];
+      if (sameTimeline(a, b) && Number.isFinite(a.sourceTime) && Number.isFinite(b.sourceTime) && a.sourceTime < b.sourceTime && a.w === b.w && a.h === b.h) {
+        const [first, second] = await PPTPageStore.assets(db, [a.id, b.id]);
+        if (similarReview !== review) return;
+        if (validSignature({...a, sig: first?.sig}) && validSignature({...b, sig: second?.sig}) && PPTCore.similar(first.sig, second.sig, review.threshold, comparisonMask(a.signatureCrop, b.signatureCrop))) {
+          if (!first.image || !second.image) throw Error('候选截图不可用，请重新提取');
+          review.pair = [a, b]; review.found = true;
+          for (const [index, side] of ['earlier', 'later'].entries()) {
+            const page = review.pair[index], image = $('similar-' + side + '-img');
+            const label = `第 ${review.pages.indexOf(page) + 1} 页 · ${timecode(page.sourceTime)}`;
+            $('similar-' + side + '-meta').textContent = label; image.alt = label;
+            const url = URL.createObjectURL([first, second][index].image); review.urls.push(url); image.src = url;
+          }
+          await Promise.all(['earlier', 'later'].map(side => $('similar-' + side + '-img').decode()));
+          if (similarReview !== review) return;
+          $('similar-status').textContent = `请选择保留方式；已暂定删除 ${review.remove.length} 页，最终确认前不会删除。`;
+          $('similar-pair').hidden = false; $('similar-choices').hidden = false; $('similar-both').focus();
+          return;
+        }
+      }
+      review.survivor = review.next - 1;
+    }
+    if (!review.found) { closeSimilar(); status('没有发现相邻的相似页面。'); return; }
+    review.complete = true;
+    $('similar-status').textContent = review.remove.length ? `对比完成。确认删除 ${review.remove.length} 页？可一次撤销；取消将放弃全部选择。` : '对比完成，所有页面都会保留。';
+    $('similar-confirm').textContent = review.remove.length ? `确认删除 ${review.remove.length} 页` : '完成并保留全部';
+    $('similar-confirm').hidden = false; $('similar-cancel').focus();
+  } catch (e) {
+    if (similarReview !== review) return;
+    closeSimilar(); status('相似页检查失败：' + e.message);
+  }
+}
 async function cleanSimilar() {
   if (busy()) return;
-  const remove = [], threshold = Math.max((Number($('diff').value) || 1.2) * 2.5, 3);
-  reviewBusy = true; controls();
-  try {
-    for (let i = 1; i < pages.length; i++) {
-      const a = pages[i - 1], b = pages[i];
-      if (!sameTimeline(a, b) || !Number.isFinite(a.sourceTime) || !Number.isFinite(b.sourceTime) || a.sourceTime >= b.sourceTime || a.w !== b.w || a.h !== b.h) continue;
-      const [first, second] = await PPTPageStore.assets(db, [a.id, b.id]);
-      if (validSignature({...a, sig: first?.sig}) && validSignature({...b, sig: second?.sig}) && PPTCore.similar(first.sig, second.sig, threshold)) remove.push(a.id);
-    }
-  } catch (e) { status('相似页检查失败：' + e.message); return; }
-  finally { reviewBusy = false; controls(); }
-  if (remove.length) await deletePages(remove); else status('没有发现相邻的相似页面。');
+  const review = {pages: pages.slice(), survivor: 0, next: 1, remove: [], urls: [], found: false, complete: false,
+    threshold: Math.max((Number($('diff').value) || 1.2) * 2.5, 3)};
+  similarReview = review; reviewBusy = true; controls();
+  $('similar-dialog').showModal(); await nextSimilar(review);
 }
+function chooseSimilar(choice) {
+  const review = similarReview;
+  if (!review?.pair) return;
+  const [a, b] = review.pair;
+  if (choice === 'earlier') review.remove.push(b.id);
+  else {
+    if (choice === 'later') review.remove.push(a.id);
+    review.survivor = review.next - 1;
+  }
+  return nextSimilar(review);
+}
+for (const choice of ['earlier', 'later', 'both']) $('similar-' + choice).onclick = () => chooseSimilar(choice);
+$('similar-cancel').onclick = closeSimilar;
+$('similar-dialog').addEventListener('cancel', event => { event.preventDefault(); closeSimilar(); });
+$('similar-dialog').addEventListener('close', () => { if (!$('similar-dialog').open) closeSimilar(); });
+$('similar-confirm').onclick = async () => {
+  if (!similarReview?.complete) return;
+  const remove = similarReview.remove; closeSimilar();
+  if (remove.length) await deletePages(remove); else status('已保留全部页面。');
+};
 function updateSelection() {
   selectedPages = new Set([...selectedPages].filter(id => pages.some(page => page.id === id)));
+  if (!pages.some(page => page.id === selectionAnchor)) selectionAnchor = null;
+  $('lightbox-select').textContent = selectedPages.has(previewPageId) ? '取消选中 (S)' : '选中此页 (S)';
+  $('lightbox-select').setAttribute('aria-pressed', String(selectedPages.has(previewPageId)));
   $('selected-count').textContent = `已选 ${selectedPages.size} 页`;
   $('select-all').checked = pages.length > 0 && selectedPages.size === pages.length;
   $('select-all').indeterminate = selectedPages.size > 0 && selectedPages.size < pages.length;
@@ -340,7 +586,8 @@ function updatePreview() {
     }).catch(e => { if (revision === previewRevision) $('lightbox-status').textContent = '图片读取失败：' + e.message; });
   }
   $('lightbox-prev').disabled = busy() || index === 0; $('lightbox-next').disabled = busy() || index === pages.length - 1;
-  $('lightbox-delete').disabled = busy(); $('lightbox-seek').disabled = busy();
+  $('lightbox-delete').disabled = busy(); $('lightbox-seek').disabled = busy(); $('lightbox-select').disabled = busy();
+  updateSelection();
   if (!$('lightbox').contains(document.activeElement)) $('lightbox-close').focus();
 }
 function openPreview(page) {
@@ -354,12 +601,17 @@ function movePreview(delta) {
   if (page) { previewPageId = page.id; $('lightbox-status').textContent = ''; updatePreview(); }
 }
 $('select-all').onchange = () => { if (busy()) return; selectedPages = new Set($('select-all').checked ? pages.map(page => page.id) : []); updateSelection(); controls(); };
-$('clear-selection').onclick = () => { selectedPages.clear(); updateSelection(); controls(); };
+$('clear-selection').onclick = () => { if (busy()) return; selectedPages.clear(); selectionAnchor = null; updateSelection(); controls(); };
 $('delete-selected').onclick = () => deletePages([...selectedPages]);
 $('undo').onclick = undoDelete; $('clean-similar').onclick = cleanSimilar;
 $('lightbox-prev').onclick = () => movePreview(-1); $('lightbox-next').onclick = () => movePreview(1);
 $('lightbox-delete').onclick = () => deletePages([previewPageId]);
 $('lightbox-seek').onclick = () => { const page = pages.find(item => item.id === previewPageId); if (page) seekPage(page); };
+$('lightbox-select').onclick = () => {
+  if (busy() || previewPageId === null) return;
+  if (selectedPages.has(previewPageId)) selectedPages.delete(previewPageId); else selectedPages.add(previewPageId);
+  updateSelection(); controls();
+};
 $('lightbox-close').onclick = () => $('lightbox').close();
 $('lightbox').addEventListener('close', () => {
   previewRevision++; previewLoadingId = null;
@@ -381,22 +633,32 @@ document.addEventListener('keydown', event => {
   }
   if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); movePreview(event.key === 'ArrowLeft' ? -1 : 1); }
   if (event.key === 'Delete' || event.key === 'Backspace') { event.preventDefault(); deletePages([previewPageId]); }
+  if (event.key.toLowerCase() === 's') { event.preventDefault(); $('lightbox-select').click(); }
+  if (event.key.toLowerCase() === 'v') { event.preventDefault(); $('lightbox-seek').click(); }
 });
 function controls() {
   const active = busy();
-  for (const id of ['load-url', 'url', 'file', 'share', 'sources', 'course', 'discover', 'mode', 'diff', 'dedupe', 'stable', 'full', 'course-name', 'course-date', 'course-start', 'pdf-layout']) $(id).disabled = active;
+  for (const id of ['load-url', 'url', 'file', 'share', 'sources', 'course', 'discover', 'mode', 'diff', 'dedupe', 'stable', 'full', 'course-name', 'course-date', 'course-start', 'pdf-layout', 'pdf-timestamps', 'pdf-bookmarks']) $(id).disabled = active;
   $('load').disabled = active || !$('sources').value;
   $('full').disabled = active || !sourceReady;
   $('crop-select').disabled = active || !sourceReady;
-  $('crop-select').textContent = cropEditing ? '取消框选' : '框选 PPT 区域';
-  $('crop-select').setAttribute('aria-pressed', String(cropEditing));
+  $('crop-select').textContent = selectionMode === 'crop' ? '取消框选' : '框选 PPT 区域';
+  $('crop-select').setAttribute('aria-pressed', String(selectionMode === 'crop'));
+  $('ignore-select').disabled = active || !sourceReady;
+  $('ignore-clear').disabled = active || !sourceReady || !ignoreRect;
+  $('ignore-select').textContent = selectionMode === 'ignore' ? '取消忽略区框选' : '框选忽略区';
+  $('ignore-select').setAttribute('aria-pressed', String(selectionMode === 'ignore'));
+  $('ignore-status').textContent = `${ignoreRect ? '已设置忽略区，虚线内不参与比较。' : '未设置忽略区。'}截图和导出保留完整内容。框选时方向键移动，Shift+方向键调整大小，Enter 确认，Esc 取消。`;
   $('run').disabled = active || !sourceReady || !ready;
   $('run').textContent = stream ? '开始实时截取' : canResume() ? `继续提取 · ${timecode(activeLesson.task.checkpoint)}` : '开始快速提取';
   $('lesson-select').disabled = active || !ready || !lessons.length;
+  $('library-manage').disabled = active || !ready;
+  $('crop-reuse').disabled = active || !canReuseCrop();
   $('resume-load').disabled = active || !ready;
   $('restart-scan').hidden = !activeLesson?.task || !!stream; $('restart-scan').disabled = active || !sourceReady;
   $('course-zip').disabled = active || !currentCourseLessons().some(lesson => allPages.some(page => page.lessonId === lesson.id));
-  document.querySelectorAll('#suspect-ranges button').forEach(button => { button.disabled = active || !sourceReady; });
+  $('batch-course-zip').disabled = active || !batchCourseKey();
+  document.querySelectorAll('#suspect-ranges button').forEach(button => { button.disabled = active || (!button.classList.contains('suspect-dismiss') && !sourceReady); });
   $('stop').disabled = !task && !realtimeTimer && !batchRunning;
   $('shot').disabled = active || !sourceReady || !ready;
   $('clear').disabled = active || !ready || !pages.length;
@@ -405,6 +667,7 @@ function controls() {
   $('clean-similar').disabled = active || pages.length < 2;
   $('select-all').disabled = active || !pages.length;
   $('clear-selection').disabled = active || !selectedPages.size; $('delete-selected').disabled = active || !selectedPages.size;
+  $('selected-pdf').disabled = active || !selectedPages.size; $('selected-zip').disabled = active || !selectedPages.size;
   document.querySelectorAll('#pages article').forEach(card => {
     card.draggable = !active;
     card.querySelector('button').disabled = active; card.querySelector('.page-select').disabled = active;
@@ -414,19 +677,19 @@ function controls() {
   $('release-cache').disabled = active || !(sourceReady || objectURL || hls || stream || videoCache);
   $('batch-discover').disabled = active;
   $('batch-select').disabled = active || !batchJobs.length;
-  $('batch-start').disabled = active || !batchJobs.some(job => !job.requiresCrop && job.selected && job.state !== 'done');
+  $('batch-start').disabled = active || !batchJobs.some(job => PPTBatch.automatic(job) && job.selected && job.state !== 'done');
   document.querySelectorAll('#batch-jobs input').forEach(input => {
     const job = batchJobs.find(item => item.id === input.closest('.batch-job')?.dataset.jobId);
-    input.disabled = active || !job || job.state === 'done' || job.requiresCrop;
+    input.disabled = active || !job || job.state === 'done' || !PPTBatch.automatic(job);
   });
   document.querySelectorAll('#batch-jobs .batch-manual select, #batch-jobs .batch-manual button').forEach(control => { control.disabled = active; });
   document.querySelectorAll('#batch-jobs .batch-job > button').forEach(button => {
     const job = batchJobs.find(item => item.id === button.parentElement.dataset.jobId);
-    button.disabled = active || !job || !batchPageCount(job);
+    button.disabled = active || !job || (button.classList.contains('batch-view') ? !batchLesson(job) : !batchPageCount(job));
   });
   updatePreview();
   video.controls = sourceReady && !active && !stream;
-  overlay.style.pointerEvents = active || !sourceReady || !cropEditing ? 'none' : 'auto';
+  overlay.style.pointerEvents = active || !sourceReady || !selectionMode ? 'none' : 'auto';
   syncWorkspace();
   window.PPTWorkspace?.syncControls();
 }
@@ -481,7 +744,14 @@ function addCard(page, index) {
   label.onclick = () => seekPage(page);
   label.onkeydown = event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); seekPage(page); } };
   choose.type = 'checkbox'; choose.className = 'page-select'; choose.setAttribute('aria-label', `选择第 ${index + 1} 页`);
-  choose.onchange = () => { if (busy()) return; if (choose.checked) selectedPages.add(page.id); else selectedPages.delete(page.id); updateSelection(); controls(); };
+  choose.onclick = event => {
+    if (busy()) { event.preventDefault(); return; }
+    const anchor = pages.findIndex(item => item.id === selectionAnchor), end = pages.findIndex(item => item.id === page.id);
+    const range = event.shiftKey && anchor >= 0 ? pages.slice(Math.min(anchor, end), Math.max(anchor, end) + 1) : [page];
+    for (const item of range) { if (choose.checked) selectedPages.add(item.id); else selectedPages.delete(item.id); }
+    if (!event.shiftKey) selectionAnchor = page.id;
+    updateSelection(); controls();
+  };
   article.title = `${page.sourceName || '历史截图'}（拖动可调整导出页序）`; button.textContent = '删除'; button.draggable = false;
   article.ondragstart = event => {
     if (busy() || event.target.closest('button, input')) { event.preventDefault(); return; }
@@ -546,10 +816,15 @@ function draw() {
   const ctx = overlay.getContext('2d'), b = bounds();
   ctx.clearRect(0, 0, overlay.width, overlay.height);
   if (sourceReady && crop) {
-    ctx.strokeStyle = '#fff'; ctx.lineWidth = 4;
-    ctx.strokeRect(b.x + crop.x * b.w, b.y + crop.y * b.h, crop.w * b.w, crop.h * b.h);
-    ctx.strokeStyle = '#9e2437'; ctx.lineWidth = 2;
-    ctx.strokeRect(b.x + crop.x * b.w, b.y + crop.y * b.h, crop.w * b.w, crop.h * b.h);
+    const shownCrop = selectionMode === 'crop' && selectionRect || crop;
+    const stroke = r => ctx.strokeRect(b.x + r.x * b.w, b.y + r.y * b.h, r.w * b.w, r.h * b.h);
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 4; stroke(shownCrop);
+    ctx.strokeStyle = '#9e2437'; ctx.lineWidth = 2; stroke(shownCrop);
+    const ignored = selectionMode === 'ignore' ? selectionRect : ignoreRect && {x: crop.x + ignoreRect.x * crop.w, y: crop.y + ignoreRect.y * crop.h, w: ignoreRect.w * crop.w, h: ignoreRect.h * crop.h};
+    if (ignored) {
+      ctx.setLineDash([7, 5]); ctx.strokeStyle = '#fff'; ctx.lineWidth = 4; stroke(ignored);
+      ctx.strokeStyle = '#9e2437'; ctx.lineWidth = 2; stroke(ignored);
+    }
   }
 }
 new ResizeObserver(draw).observe(video);
@@ -557,19 +832,83 @@ function pos(event) {
   const rect = overlay.getBoundingClientRect(), b = bounds();
   return {x: Math.max(0, Math.min(1, (event.clientX - rect.left - b.x) / b.w)), y: Math.max(0, Math.min(1, (event.clientY - rect.top - b.y) / b.h))};
 }
-overlay.onpointerdown = event => { if (!sourceReady || !cropEditing || busy()) return; drag = pos(event); overlay.setPointerCapture(event.pointerId); };
+function cancelSelection() { drag = null; selectionMode = null; selectionRect = null; }
+function startSelection(mode) {
+  if (busy() || !sourceReady) return;
+  if (selectionMode === mode) cancelSelection();
+  else {
+    selectionMode = mode;
+    const rect = mode === 'ignore' ? ignoreRect || {x: .6, y: .6, w: .3, h: .3} : {x: 0, y: 0, w: 1, h: 1};
+    selectionRect = {x: crop.x + rect.x * crop.w, y: crop.y + rect.y * crop.h, w: rect.w * crop.w, h: rect.h * crop.h};
+    overlay.focus();
+  }
+  controls(); draw(); status(selectionMode ? `请框选${mode === 'ignore' ? '忽略区' : 'PPT 区域'}；可拖动或用方向键，Enter 确认，Esc 取消。` : '已取消框选。');
+}
+async function setComparisonRegion(nextCrop, nextIgnore, message, confirmCrop = false) {
+  const previous = {crop, ignoreRect, lesson: activeLesson && structuredClone(activeLesson),
+    job: activeBatchJob && structuredClone(activeBatchJob)};
+  const cleared = !sameCrop(crop, nextCrop) && !!ignoreRect;
+  crop = {...nextCrop}; ignoreRect = nextIgnore && {...nextIgnore};
+  last = candidate = null; candidateSince = 0; cancelSelection(); releaseDedupeContext();
+  if (confirmCrop && activeBatchJob?.requiresCrop) {
+    activeBatchJob.cropConfirmed = true; activeBatchJob.cropRejected = false; activeBatchJob.manualPrepared = true;
+    activeBatchJob.cropOverride = {crop: {...crop}, aspect: video.videoWidth / video.videoHeight, track: PPTBatch.trackKey(activeBatchJob), manual: true};
+  }
+  reviewBusy = true; controls(); draw();
+  try {
+    const relatedBatch = confirmCrop && activeBatchJob?.requiresCrop ? jobBatch() : null;
+    await persistLesson(activeLesson, relatedBatch);
+    status(message + (cleared ? ' 裁剪已变化，旧忽略区已清除，请重新设置。' : ''));
+  } catch (error) {
+    crop = previous.crop; ignoreRect = previous.ignoreRect;
+    if (activeLesson && previous.lesson) {
+      for (const key of Object.keys(activeLesson)) if (!Object.hasOwn(previous.lesson, key)) delete activeLesson[key];
+      Object.assign(activeLesson, previous.lesson);
+    }
+    if (activeBatchJob && previous.job) {
+      for (const key of Object.keys(activeBatchJob)) if (!Object.hasOwn(previous.job, key)) delete activeBatchJob[key];
+      Object.assign(activeBatchJob, previous.job);
+    }
+    status('范围保存失败，已恢复原设置：' + error.message);
+  } finally { reviewBusy = false; controls(); draw(); renderLibrary(); }
+}
+function commitSelection() {
+  if (!selectionMode || !selectionRect || busy()) return;
+  if (selectionMode === 'crop') {
+    const next = selectionRect.w < .03 || selectionRect.h < .03 ? {x: 0, y: 0, w: 1, h: 1} : selectionRect;
+    return setComparisonRegion(next, sameCrop(crop, next) ? ignoreRect : null, '截取范围已设置，可以开始提取。', true);
+  }
+  const left = Math.max(crop.x, selectionRect.x), top = Math.max(crop.y, selectionRect.y);
+  const right = Math.min(crop.x + crop.w, selectionRect.x + selectionRect.w), bottom = Math.min(crop.y + crop.h, selectionRect.y + selectionRect.h);
+  const rect = {x: (left - crop.x) / crop.w, y: (top - crop.y) / crop.h, w: (right - left) / crop.w, h: (bottom - top) / crop.h};
+  // Clamp roundoff at the normalized right/bottom edges before validation.
+  rect.w = Math.min(rect.w, 1 - rect.x); rect.h = Math.min(rect.h, 1 - rect.y);
+  try { PPTCore.ignoreMask(rect); }
+  catch (error) { cancelSelection(); controls(); draw(); status(error.message + '，原忽略区已保留。'); return; }
+  return setComparisonRegion(crop, rect, '忽略区已设置，仅影响比较；截图和导出保留原图。');
+}
+overlay.onpointerdown = event => { if (!sourceReady || !selectionMode || busy()) return; drag = pos(event); overlay.setPointerCapture(event.pointerId); };
 overlay.onpointermove = event => {
   if (!drag) return;
-  const p = pos(event); crop = {x: Math.min(p.x, drag.x), y: Math.min(p.y, drag.y), w: Math.abs(p.x - drag.x), h: Math.abs(p.y - drag.y)}; draw();
+  const p = pos(event); selectionRect = {x: Math.min(p.x, drag.x), y: Math.min(p.y, drag.y), w: Math.abs(p.x - drag.x), h: Math.abs(p.y - drag.y)}; draw();
 };
-overlay.onpointerup = () => {
-  if (!drag) return; drag = null;
-  if (crop.w < 0.03 || crop.h < 0.03) crop = {x: 0, y: 0, w: 1, h: 1};
-  last = null; cropEditing = false; if (activeBatchJob?.requiresCrop) activeBatchJob.cropConfirmed = true; saveLessonSettings(); controls(); draw(); status('截取范围已设置，可以开始提取。');
+overlay.onpointerup = () => { if (!drag) return; drag = null; commitSelection(); };
+overlay.onpointercancel = () => { cancelSelection(); controls(); draw(); };
+overlay.onkeydown = event => {
+  if (!selectionMode || busy()) return;
+  if (!['Escape', 'Enter', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return;
+  event.preventDefault(); event.stopPropagation();
+  if (event.key === 'Escape') { cancelSelection(); controls(); draw(); status('已取消框选，原设置已保留。'); return; }
+  if (event.key === 'Enter') { commitSelection(); return; }
+  const r = selectionRect, horizontal = ['ArrowLeft', 'ArrowRight'].includes(event.key), delta = ['ArrowLeft', 'ArrowUp'].includes(event.key) ? -.01 : .01;
+  const key = event.shiftKey ? horizontal ? 'w' : 'h' : horizontal ? 'x' : 'y';
+  const maximum = event.shiftKey ? 1 - r[horizontal ? 'x' : 'y'] : 1 - r[horizontal ? 'w' : 'h'];
+  r[key] = Math.max(event.shiftKey ? .01 : 0, Math.min(maximum, r[key] + delta)); draw();
 };
-overlay.onpointercancel = () => { drag = null; };
-$('crop-select').onclick = () => { if (busy()) return; cropEditing = !cropEditing; controls(); status(cropEditing ? '请在视频中拖动框选 PPT 区域。' : '已退出框选，可以操作视频播放控件。'); };
-$('full').onclick = () => { if (busy()) return; crop = {x: 0, y: 0, w: 1, h: 1}; last = null; cropEditing = false; if (activeBatchJob?.requiresCrop) activeBatchJob.cropConfirmed = true; saveLessonSettings(); controls(); draw(); status('将截取整个视频画面。'); };
+$('crop-select').onclick = () => startSelection('crop');
+$('ignore-select').onclick = () => startSelection('ignore');
+$('ignore-clear').onclick = () => { if (!busy() && sourceReady) setComparisonRegion(crop, null, '已清除忽略区。'); };
+$('full').onclick = () => { if (busy() || !sourceReady) return; const full = {x: 0, y: 0, w: 1, h: 1}; setComparisonRegion(full, sameCrop(crop, full) ? ignoreRect : null, '将截取整个视频画面。', true); };
 function frame(sourceTime = video.currentTime) {
   if (video.readyState < 2 || !video.videoWidth) throw Error('视频画面尚未就绪');
   const canvas = document.createElement('canvas');
@@ -577,15 +916,19 @@ function frame(sourceTime = video.currentTime) {
   canvas.getContext('2d').drawImage(video, video.videoWidth * crop.x, video.videoHeight * crop.y, video.videoWidth * crop.w, video.videoHeight * crop.h, 0, 0, canvas.width, canvas.height);
   const small = document.createElement('canvas'); small.width = 192; small.height = 108;
   const ctx = small.getContext('2d', {willReadFrequently: true}); ctx.drawImage(canvas, 0, 0, 192, 108);
-  return {canvas, sig: ctx.getImageData(0, 0, 192, 108).data, sourceTime};
+  return {canvas, sig: ctx.getImageData(0, 0, 192, 108).data, sourceTime, signatureCrop: {...crop}};
 }
-async function save(f) {
-  await dbReady;
+async function save(f, context = null) {
+  const signal = context?.signal || task?.signal, lessonId = activeLesson?.id;
+  const check = () => { signal?.throwIfAborted(); checkDedupeContext(context); if (activeLesson?.id !== lessonId) throw new DOMException('课次已切换', 'AbortError'); };
+  await dbReady; check();
   if (scanId && pages.some(page => page.scanId === scanId && Math.abs(page.sourceTime - f.sourceTime) < 0.001)) return false;
   if (pages.length >= 1000) throw Error('本节已达 1000 页，请先导出 PDF，再清空本节继续');
   if (!pages.length) await persistNaming();
+  check();
   const asset = {...await PPTPageStore.encode(f.canvas), sig: f.sig};
-  const page = {lessonId: activeLesson?.id, scanId, w: f.canvas.width, h: f.canvas.height, time: Date.now(), sourceTime: f.sourceTime, sourceName, sourceKey: loadedIdentity?.sourceKey || '', course: {...sourceCourse}, coursePage, batchJobId: activeBatchJob?.id || ''};
+  check();
+  const page = {lessonId, signatureCrop: f.signatureCrop && {...f.signatureCrop}, scanId, w: f.canvas.width, h: f.canvas.height, time: Date.now(), sourceTime: f.sourceTime, sourceName, sourceKey: loadedIdentity?.sourceKey || '', course: {...sourceCourse}, coursePage, batchJobId: activeBatchJob?.id || ''};
   let insertAt = pages.length, lastMatch = -1;
   if (Number.isFinite(page.sourceTime)) {
     for (let i = 0; i < pages.length; i++) {
@@ -601,17 +944,19 @@ async function save(f) {
   else if (Number.isFinite(before)) page.order = before + 1024;
   else if (Number.isFinite(after)) page.order = after - 1024;
   else page.order = 1024;
-  page.id = await writePage(page, asset); pages.splice(insertAt, 0, page); syncAllPages(); forgetUndo(); last = f.sig;
+  page.id = await writePage(page, asset); cacheSignature(context, page.id, f.sig);
+  pages.splice(insertAt, 0, page); syncAllPages(); forgetUndo(); last = f.sig;
   render(); return true;
 }
 async function releaseSource() {
+  releaseDedupeContext(); cancelSelection();
   let persistenceError;
   if (activeLesson && ready && sourceReady) try { await persistLesson(); } catch (error) { persistenceError = error; }
   window.PPTWorkspace?.cancelPreflight();
   if (stream) { stream.getTracks().forEach(track => { track.onended = null; track.stop(); }); stream = null; }
   hls?.destroy(); hls = null; video.pause(); video.srcObject = null; video.removeAttribute('src'); video.load();
   if (objectURL) URL.revokeObjectURL(objectURL); objectURL = null; sourceReady = false; loadedIdentity = null;
-  crop = {...(activeLesson?.crop || {x: 0, y: 0, w: 1, h: 1})}; cropEditing = false; drag = null; candidate = null; candidateSince = 0; last = null; controls(); draw();
+  crop = {...(activeLesson?.crop || {x: 0, y: 0, w: 1, h: 1})}; ignoreRect = normalizedIgnore(activeLesson?.ignoreRect); candidate = null; candidateSince = 0; last = null; controls(); draw();
   referrerOrigins.clear(); referrerPage = '';
   referrerWrites = referrerWrites.catch(() => {}).then(() => window.chrome?.declarativeNetRequest?.updateSessionRules({removeRuleIds: [referrerRule]})).catch(() => {});
   const cached = videoCache; videoCache = null;
@@ -754,6 +1099,7 @@ async function loadRemote(raw, options = {}) {
     if (!(video.duration > 0) || !Number.isFinite(video.duration)) throw Error('视频没有可用的完整时长，无法快速扫描');
     sourceReady = true; loadedIdentity = {sourceName, coursePage, batchJobId: batchJob?.id || '', sourceKey: 'url:' + info.url};
     await bindLesson({kind: 'remote', url: info.url, ...loadedIdentity, page: coursePage, duration: video.duration});
+    await applyBatchCrop(batchJob);
     video.pause(); frame(0); draw(); $('progress').value = 0;
     status(`已加载 ${sourceName} · ${timecode(video.duration)} · ${video.videoWidth} × ${video.videoHeight}。可框选 PPT 或直接开始快速提取。`);
     pendingOrigins = []; loaded = true;
@@ -796,12 +1142,12 @@ window.addEventListener('pagehide', () => {
   if (previewURL) URL.revokeObjectURL(previewURL);
   for (const [image, state] of thumbnailStates) releaseThumbnail(image, state);
 });
-async function downloadPages(list, name, {kind = 'pdf', layout = 'single'} = {}) {
+async function downloadPages(list, name, {kind = 'pdf', layout = 'single', timestamps = false, bookmarks = false} = {}) {
   if (!list.length) throw Error('还没有截图');
   const cache = await PPTDiskCache.create('export');
   let count = 0;
   try {
-    const options = {layout, write: cache.write, readImage: async page => {
+    const options = {layout, timestamps, bookmarks, write: cache.write, readImage: async page => {
       status(`正在导出第 ${++count} / ${list.length} 页…`);
       $('progress').value = (count - 1) / list.length;
       return PPTPageStore.imageBytes(db, page.id);
@@ -814,14 +1160,16 @@ async function downloadPages(list, name, {kind = 'pdf', layout = 'single'} = {})
     throw error;
   }
 }
-async function downloadPDF(list, course, layout = 'single') {
+async function downloadPDF(list, course, options = pdfOptions()) {
   const name = PPTCourse.filename(course);
   if (!name) throw Error('请先补填课程名称、上课日期和开始时间');
-  await downloadPages(list, name, {layout});
+  await downloadPages(list.map(page => ({...page})), name, options);
 }
-function exportPDF() { return downloadPDF(pages, namingInfo(), $('pdf-layout').value); }
-async function exportRetained(kind) {
-  if (busy() || !pages.length) return;
+async function exportRetained(kind, selected = false) {
+  if (busy()) return;
+  const list = pages.filter(page => !selected || selectedPages.has(page.id)).map(page => ({...page}));
+  if (!list.length) return;
+  const options = pdfOptions();
   exportBusy = true; controls();
   try {
     await namingSave.catch(() => {});
@@ -833,55 +1181,68 @@ async function exportRetained(kind) {
       exportBusy = false; controls(); $(missing).focus();
       throw Error('请先补填课程名称、上课日期和开始时间');
     }
-    if (kind === 'zip') await downloadPages(pages, name.replace(/\.pdf$/i, '-slides.zip'), {kind});
-    else await exportPDF();
-    status(`已生成全部 ${pages.length} 页的${kind === 'zip' ? '图片包' : $('pdf-layout').value === 'handout' ? '笔记讲义 PDF' : 'PDF'}。`);
+    const filename = name.replace(/\.pdf$/i, `${selected ? '-selected' : ''}${kind === 'zip' ? '-slides.zip' : '.pdf'}`);
+    await downloadPages(list, filename, {...options, kind});
+    status(`已生成${selected ? '所选' : '全部'} ${list.length} 页的${kind === 'zip' ? '图片包' : options.layout === 'handout' ? '笔记讲义 PDF' : 'PDF'}。`);
   } catch (e) { status('导出失败：' + e.message); }
   finally { exportBusy = false; controls(); }
 }
 $('pdf').onclick = () => exportRetained('pdf'); $('export-zip').onclick = () => exportRetained('zip');
-$('course-zip').onclick = async () => {
+$('selected-pdf').onclick = () => exportRetained('pdf', true); $('selected-zip').onclick = () => exportRetained('zip', true);
+$('course-zip').onclick = () => exportCourseZIP();
+$('batch-course-zip').onclick = () => exportCourseZIP(batchCourseKey(), 'batch-status');
+async function exportCourseZIP(courseKey, statusId = 'status') {
   if (busy()) return;
+  const report = message => { status(message); if (statusId !== 'status') $(statusId).textContent = message; };
+  const options = pdfOptions();
   exportBusy = true; controls(); let cache;
   try {
     await namingSave; await lessonSave; syncAllPages();
-    const course = currentCourseLessons().sort((a, b) => (a.course?.date || '').localeCompare(b.course?.date || '') || (a.course?.start || '').localeCompare(b.course?.start || '') || a.created - b.created);
-    const entries = course.map((lesson, index) => ({name: `${String(index + 1).padStart(3, '0')}-${PPTCourse.filename(lesson.course) || lessonLabel(lesson) + '.pdf'}`, pages: allPages.filter(page => page.lessonId === lesson.id).sort((a, b) => a.order - b.order)}));
+    // Local lessons are grouped by name, which pending saves may change.
+    if (courseKey === undefined) courseKey = currentCourseKey();
+    if (!courseKey) throw Error('请先读取课程录像列表');
+    const course = currentCourseLessons(courseKey).sort((a, b) => (a.course?.date || '').localeCompare(b.course?.date || '') || (a.course?.start || '').localeCompare(b.course?.start || '') || a.created - b.created);
+    const entries = course.map((lesson, index) => ({name: `${String(index + 1).padStart(3, '0')}-${PPTCourse.filename(lesson.course) || lessonLabel(lesson) + '.pdf'}`, pages: allPages.filter(page => page.lessonId === lesson.id).sort((a, b) => a.order - b.order).map(page => ({...page}))}));
     const nonempty = entries.filter(entry => entry.pages.length), total = nonempty.reduce((sum, entry) => sum + entry.pages.length, 0);
     if (!nonempty.length) throw Error('本课程还没有截图');
     cache = await PPTDiskCache.create('export'); let count = 0;
-    await writeCourseZIP(entries, {layout: $('pdf-layout').value, write: cache.write, readImage: async page => {
-      status(`正在打包课程 PDF：第 ${++count} / ${total} 页…`); $('progress').value = (count - 1) / total;
+    await writeCourseZIP(entries, {...options, write: cache.write, readImage: async page => {
+      report(`正在打包课程 PDF：第 ${++count} / ${total} 页…`); $('progress').value = (count - 1) / total;
       return PPTPageStore.imageBytes(db, page.id);
     }});
-    const file = await cache.finish('application/zip'), name = (activeLesson.course?.name || '课程').replace(/[<>:"/\\|?*\x00-\x1f]/g, '_');
+    const file = await cache.finish('application/zip'), name = (course[0]?.course?.name || '课程').replace(/[<>:"/\\|?*\x00-\x1f]/g, '_');
     downloadBlob(file, `${name}-课次PDF.zip`, cache); cache = null; $('progress').value = 1;
     const unfinished = course.filter((lesson, index) => entries[index].pages.length && lesson.task?.state !== 'done').length;
-    const courseKey = PPTLibrary.courseKey(activeLesson.page || '', activeLesson.course), knownJobs = new Set(savedBatches.filter(batch => PPTLibrary.courseKey(batch.page) === courseKey).flatMap(batch => batch.jobs.map(job => job.id)));
+    const knownJobs = new Set(savedBatches.filter(batch => PPTLibrary.courseKey(batch.page, batch.jobs[0]?.course) === courseKey).flatMap(batch => batch.jobs.map(job => job.id)));
     const empty = course.length - nonempty.length + [...knownJobs].filter(id => !course.some(lesson => lesson.source?.batchJobId === id)).length;
-    status(`已生成 ${nonempty.length} 节 PDF 的课程包，共 ${total} 页。${empty ? `跳过 ${empty} 个空课次（尚无截图）。` : ''}${unfinished ? `其中 ${unfinished} 节尚未完成整节扫描，包内为当前已保留截图。` : ''}`);
+    report(`已生成 ${nonempty.length} 节 PDF 的课程包，共 ${total} 页。${empty ? `跳过 ${empty} 个空课次（尚无截图）。` : ''}${unfinished ? `其中 ${unfinished} 节尚未完成整节扫描，包内为当前已保留截图。` : ''}`);
   } catch (e) {
     let message = e.message; if (cache) try { await cache.remove(); } catch (cleanup) { message += '；临时文件清理失败：' + cleanup.message; }
-    status('整课导出失败：' + message);
+    report('整课导出失败：' + message);
   } finally { exportBusy = false; controls(); }
-};
+}
 async function fastScan({restart = false, range = null} = {}) {
   if (task || realtimeTimer || realtimeBusy || reviewBusy || exportBusy || pageWrites || !sourceReady || !ready || !activeLesson) return null;
+  if (activeBatchJob?.requiresCrop && (!activeBatchJob.cropConfirmed || activeBatchJob.cropRejected)) {
+    selectionMode = 'crop'; selectionRect = {...crop}; draw(); status('本节 0 路视频需要手动确认 PPT 裁剪区域。'); return null;
+  }
   const resume = !range && !restart && canResume(), settings = scanSettings(), originalRanges = structuredClone(activeLesson.suspects || []);
   const hasBaseline = resume && Object.hasOwn(activeLesson.task, 'baselineTime'), baselineTime = hasBaseline ? activeLesson.task.baselineTime : null;
   const start = range ? range.start : hasBaseline ? activeLesson.task.checkpoint : 0, end = range ? Math.min(range.end, video.duration) : video.duration;
   task = new AbortController(); const controller = task, before = pages.length, manualJob = activeBatchJob?.requiresCrop && !batchRunning && !range ? activeBatchJob : null;
   scanId = resume ? activeLesson.task.id : crypto.randomUUID();
-  if (!range) activeLesson.task = {id: scanId, state: 'running', checkpoint: start, baselineTime, duration: video.duration, settings, crop: {...crop}};
+  if (!range) activeLesson.task = {id: scanId, state: 'running', checkpoint: start, baselineTime, duration: video.duration, settings, crop: {...crop}, ignoreRect: ignoreRect && {...ignoreRect}};
+  const context = createDedupeContext(controller.signal);
   let outcome = null, discovered = [];
-  cropEditing = false; controls(); video.pause(); $('progress').value = 0;
+  cancelSelection(); controls(); video.pause(); $('progress').value = 0;
   status(range ? '正在细查所选时间段…' : resume ? `正在从 ${timecode(start)} 继续扫描…` : '正在快速扫描，请保持工具页打开…');
   const started = performance.now();
   try {
     await persistLesson();
     const scanner = new PPTScanner(video, frame);
-    const result = await scanner.scan({step: range ? 0.5 : settings.step, threshold: settings.threshold, dedupe: range ? true : settings.dedupe, start, end, baselineTime, signal: controller.signal, save,
-      isDuplicate: hasSimilar,
+    const result = await scanner.scan({step: range ? 0.5 : settings.step, threshold: settings.threshold, dedupe: range ? true : settings.dedupe, start, end, baselineTime, signal: controller.signal, save: f => save(f, context),
+      compare: (a, b, threshold) => PPTCore.similar(a, b, threshold, context.mask),
+      isDuplicate: (sig, threshold) => hasSimilar(sig, threshold, context, context.crop),
       suspect: async item => {
         discovered = PPTLibrary.mergeRanges(discovered, item);
         const previous = activeLesson.suspects; activeLesson.suspects = PPTLibrary.mergeRanges(previous, item);
@@ -910,11 +1271,11 @@ async function fastScan({restart = false, range = null} = {}) {
     try { await persistLesson(); } catch (storage) { message += '；任务状态未能保存：' + storage.message; }
     status(message);
   } finally {
-    scanId = ''; task = null; video.pause();
+    releaseDedupeContext(context); scanId = ''; task = null; video.pause();
     if (manualJob) {
       const count = batchPageCount(manualJob); manualJob.pages = count;
       manualJob.state = outcome ? 'done' : count ? 'partial' : 'failed'; manualJob.error = outcome ? '' : $('status').textContent;
-      try { await persistBatch(); } catch (e) { status('批量状态保存失败：' + e.message); }
+      try { await persistBatch(manualJob); } catch (e) { status('批量状态保存失败：' + e.message); }
       renderBatchJobs();
       $('batch-status').textContent = outcome ? `本节 0 路视频已完成，共 ${count} 页；可继续回看和细查。` : `本节 0 路视频未完成，已保留 ${count} 页。`;
     }
@@ -922,13 +1283,70 @@ async function fastScan({restart = false, range = null} = {}) {
   }
   return outcome;
 }
-function batchLesson(job) { return lessons.find(lesson => lesson.source && PPTLibrary.key(lesson.source) === PPTLibrary.key({batchJobId: job.id, page: batchPage})); }
+function canReuseCrop() {
+  return sourceReady && activeBatchJob?.requiresCrop && activeBatchJob.cropConfirmed && !activeBatchJob.cropRejected && PPTBatch.zeroTrack(activeBatchJob)
+    && PPTBatch.validCrop(crop) && video.videoWidth > 0 && video.videoHeight > 0 && activeLesson?.page === batchPage;
+}
+function cropReuseTargets() {
+  const course = PPTLibrary.courseKey(activeLesson?.page, activeLesson?.course);
+  return batchJobs.filter(job => job !== activeBatchJob && job.requiresCrop && PPTBatch.zeroTrack(job) && job.state !== 'done'
+    && batchLesson(job)?.task?.state !== 'done' && !job.manualPrepared && job.state !== 'manual' && !(job.cropConfirmed && !job.cropOverride)
+    && !job.cropOverride?.manual && PPTLibrary.courseKey(batchPage, job.course) === course);
+}
+let cropReusePlan = null, cropReuseWriting = false;
+$('crop-reuse').onclick = () => {
+  if (busy() || !canReuseCrop()) return;
+  const jobs = cropReuseTargets();
+  cropReusePlan = {ids: jobs.map(job => job.id), crop: {...crop}, aspect: video.videoWidth / video.videoHeight};
+  $('crop-reuse-summary').textContent = `将“${lessonLabel(activeLesson)}”的裁剪用于本课程 ${jobs.length} 个课次：${jobs.map(job => [job.course.date, job.course.start?.slice(0, 5), job.sourceName].filter(Boolean).join(' ')).join('、') || '暂无符合条件的课次'}。`;
+  $('crop-reuse-agree').checked = false; $('crop-reuse-apply').disabled = true; $('crop-reuse-status').textContent = '';
+  reviewBusy = true; controls(); $('crop-reuse-dialog').showModal();
+};
+$('crop-reuse-agree').onchange = () => { $('crop-reuse-apply').disabled = !cropReusePlan?.ids.length || !$('crop-reuse-agree').checked || cropReuseWriting; };
+function closeCropReuse() {
+  if (cropReuseWriting) return;
+  $('crop-reuse-dialog').close(); cropReusePlan = null; reviewBusy = false; controls(); $('crop-reuse').focus();
+}
+$('crop-reuse-cancel').onclick = closeCropReuse;
+$('crop-reuse-dialog').oncancel = event => { event.preventDefault(); closeCropReuse(); };
+$('crop-reuse-apply').onclick = async () => {
+  if (cropReuseWriting || !cropReusePlan?.ids.length || !$('crop-reuse-agree').checked) return;
+  cropReuseWriting = true; $('crop-reuse-apply').disabled = true; $('crop-reuse-cancel').disabled = true;
+  let committed = false;
+  try {
+    await namingSave; await lessonSave;
+    const eligible = new Set(cropReuseTargets().map(job => job.id));
+    const jobs = batchJobs.map(job => !eligible.has(job.id) || !cropReusePlan.ids.includes(job.id) ? structuredClone(job) : {...structuredClone(job),
+      cropOverride: {crop: {...cropReusePlan.crop}, aspect: cropReusePlan.aspect, track: PPTBatch.trackKey(job), manual: false},
+      cropConfirmed: true, cropRejected: false, selected: true, state: 'pending', error: ''});
+    await PPTLibrary.put(db, activeLesson, {page: batchPage, jobs}); committed = true;
+    retainBatch(structuredClone({page: batchPage, jobs}));
+    const sourceId = activeBatchJob.id; batchJobs = jobs; activeBatchJob = batchJobs.find(job => job.id === sourceId);
+    cropReuseWriting = false; closeCropReuse(); renderBatchJobs(); status('已保存裁剪复用设置。可开始批量提取；每节载入后会核对视频轨道和宽高比。');
+  } catch (error) {
+    const message = (committed ? '复用设置已保存；界面更新失败，请刷新：' : '复用设置保存失败，原设置仍保留：') + error.message;
+    $('crop-reuse-status').textContent = message; if (committed) status(message);
+  }
+  finally { cropReuseWriting = false; $('crop-reuse-cancel').disabled = false; $('crop-reuse-agree').onchange(); }
+};
+async function applyBatchCrop(job) {
+  if (!job?.requiresCrop || !job.cropOverride) return;
+  const valid = PPTBatch.cropMatches(job.cropOverride, loadedIdentity, video.videoWidth / video.videoHeight);
+  const nextJob = {...job, cropConfirmed: valid, cropRejected: !valid, ...(valid ? {} : {selected: false, state: 'needs-crop', error: '视频轨道或宽高比与裁剪设置不匹配，请手动框选。'})};
+  const nextLesson = {...activeLesson, ...(valid ? {crop: {...job.cropOverride.crop}, ignoreRect: sameCrop(crop, job.cropOverride.crop) ? ignoreRect : null} : {})};
+  const related = jobBatch(job), snapshot = {page: related.page, jobs: related.jobs.map(item => item.id === job.id ? nextJob : item)};
+  await PPTLibrary.put(db, nextLesson, snapshot);
+  Object.assign(job, nextJob); Object.assign(activeLesson, nextLesson); retainBatch(structuredClone(snapshot));
+  crop = {...(nextLesson.crop || crop)}; ignoreRect = normalizedIgnore(nextLesson.ignoreRect); releaseDedupeContext();
+  if (!valid) { selectionMode = 'crop'; selectionRect = {...crop}; }
+}
+function batchLesson(job, page = job === activeBatchJob ? jobBatch(job)?.page || batchPage : batchPage) { return lessons.find(lesson => lesson.source && PPTLibrary.key(lesson.source) === PPTLibrary.key({batchJobId: job.id, page})); }
 function batchPages(job) { const lesson = batchLesson(job); return lesson ? allPages.filter(page => page.lessonId === lesson.id).sort((a, b) => a.order - b.order) : []; }
 function batchPageCount(job) { return batchPages(job).length; }
 function syncBatchJob(job) {
   const count = batchPageCount(job);
-  if (!count && ['done', 'partial'].includes(job.state)) {
-    job.state = job.requiresCrop ? 'needs-crop' : 'pending'; job.selected = !job.requiresCrop; job.error = '';
+  if (!count && ['done', 'partial'].includes(job.state) && batchLesson(job) && batchLesson(job).task?.state !== 'done') {
+    job.state = PPTBatch.automatic(job) ? 'pending' : 'needs-crop'; job.selected = PPTBatch.automatic(job); job.error = '';
   }
   return count;
 }
@@ -936,13 +1354,13 @@ function renderBatchJobs() {
   const container = $('batch-jobs'); container.replaceChildren();
   const labels = {'needs-crop': '需要手动框选', manual: '等待框选/提取', pending: '等待', loading: '下载中', scanning: '提取中', done: '已完成', partial: '部分完成', failed: '失败', stopped: '已停止'};
   for (const job of batchJobs) {
+    const count = syncBatchJob(job);
     const row = document.createElement('div'), choose = document.createElement('input'), title = document.createElement('span'), state = document.createElement('span'), download = document.createElement('button');
     row.className = 'batch-job'; row.dataset.jobId = job.id;
-    choose.type = 'checkbox'; choose.checked = !!job.selected; choose.disabled = batchRunning || job.state === 'done' || job.requiresCrop;
+    choose.type = 'checkbox'; choose.checked = !!job.selected; choose.disabled = batchRunning || job.state === 'done' || !PPTBatch.automatic(job);
     choose.onchange = () => { job.selected = choose.checked; persistBatch().catch(e => status('批量选择保存失败：' + e.message)); controls(); };
     const size = job.size ? ` · ${(job.size / 1024 ** 2).toFixed(0)} MB` : '';
     title.textContent = `${job.course.date || '未知日期'} ${String(job.course.start || '').slice(0, 5)} · ${job.sourceName}${size}${job.requiresCrop ? ' · 仅有 0 路视频' : ''}`;
-    const count = syncBatchJob(job);
     state.className = `batch-state ${job.state}`; state.textContent = `${labels[job.state] || job.state} · ${count} 页`;
     if (job.error) state.title = job.error;
     download.textContent = '下载本节 PDF'; download.disabled = batchRunning || !count;
@@ -959,21 +1377,36 @@ function renderBatchJobs() {
       manual.className = 'batch-manual';
       for (const item of job.options) { const option = document.createElement('option'); option.value = item.url; option.textContent = item.sourceName; select.append(option); }
       select.value = job.url; select.disabled = batchRunning || !!task;
-      select.onchange = () => {
+      select.onchange = async () => {
+        if (busy()) return;
         const item = job.options.find(candidate => candidate.url === select.value);
-        if (item && !sameMediaSource(job, item)) {
-          if (activeBatchJob === job) activeBatchJob = null;
-          Object.assign(job, item, {cropConfirmed: false, state: batchPageCount(job) ? 'partial' : 'needs-crop'});
-        }
-        persistBatch().catch(e => status('视频选择保存失败：' + e.message)); renderBatchJobs();
+        if (!item) return;
+        const changed = !sameMediaSource(job, item), next = {...job, ...item, ...(changed ? {cropConfirmed: false, cropRejected: true, manualPrepared: false, selected: false, state: 'needs-crop'} : {})};
+        reviewBusy = true; controls();
+        try {
+          const jobs = batchJobs.map(value => value === job ? next : value);
+          await PPTLibrary.batch(db, batchPage, jobs); retainBatch(structuredClone({page: batchPage, jobs}));
+          Object.assign(job, next);
+          if (changed && activeBatchJob === job) { await releaseSource(); activeBatchJob = null; }
+        } catch (error) { status('视频选择保存失败：' + error.message); }
+        finally { reviewBusy = false; renderBatchJobs(); }
       };
       prepare.textContent = count ? '继续用 0 路处理' : '加载 0 路并框选'; prepare.disabled = batchRunning || !!task;
       prepare.onclick = () => { if (!busy()) prepareManualBatchJob(job, chrome.permissions.request({origins: [originPattern(job.url)]})); };
       manual.append(select, prepare); row.append(manual);
     }
-    row.append(download); container.append(row);
+    const view = document.createElement('button'); view.className = 'batch-view'; view.textContent = '查看截图';
+    view.onclick = async () => {
+      if (busy()) return;
+      const lesson = batchLesson(job); if (!lesson) return;
+      await switchLesson(lesson.id);
+      if (activeLesson !== lesson || busy()) return;
+      $('suspects-panel').open = true; $('suspects-panel').scrollIntoView({block: 'nearest'});
+      $('pages').scrollTop = 0; $('pages').focus({preventScroll: true});
+    };
+    row.append(view, download); container.append(row);
   }
-  const selected = batchJobs.filter(job => !job.requiresCrop && job.selected && job.state !== 'done').length, manual = batchJobs.filter(job => job.requiresCrop).length;
+  const selected = batchJobs.filter(job => PPTBatch.automatic(job) && job.selected && job.state !== 'done').length, manual = batchJobs.filter(job => job.requiresCrop && !PPTBatch.automatic(job) && job.state !== 'done').length;
   $('batch-count').textContent = batchJobs.length ? `共 ${batchJobs.length} 节，自动 ${selected} 节${manual ? `，需框选 ${manual} 节` : ''}` : '未读取';
   controls();
 }
@@ -990,20 +1423,25 @@ async function discoverBatch(tabId = Number($('course').value), automatic = fals
     if (!current()) return;
     if (!result?.ok) throw Error(result?.error || '课程页没有返回批量数据');
     const previous = savedBatches.find(item => item.page === result.page)?.jobs || (batchPage === result.page ? batchJobs : []);
-    batchPage = result.page;
-    batchJobs = result.jobs.map(job => {
+    const jobs = result.jobs.map(job => {
       const existing = previous.find(old => old.id === job.id);
       if (job.requiresCrop && existing) {
         const options = job.options || [], option = options.find(item => sameMediaSource(existing, item));
         if (option) job = {...job, ...option};
       }
-      const unchanged = sameMediaSource(existing, job), lesson = batchLesson(job), count = batchPageCount(job);
-      const done = (lesson?.task?.state === 'done' && sameMediaSource(lesson.source, job)) || (count && unchanged && existing?.state === 'done');
-      return {...job, cropConfirmed: unchanged && !!existing?.cropConfirmed, selected: job.requiresCrop || done ? false : existing?.selected ?? true, state: done ? 'done' : count ? 'partial' : unchanged && (existing?.state === 'failed' || existing?.state === 'stopped') ? existing.state : job.requiresCrop ? 'needs-crop' : 'pending', error: unchanged ? existing?.error || '' : ''};
+      const unchanged = sameMediaSource(existing, job), lesson = batchLesson(job, result.page), count = lesson ? allPages.filter(page => page.lessonId === lesson.id).length : 0;
+      const done = (lesson?.task?.state === 'done' && sameMediaSource(lesson.source, job)) || (unchanged && existing?.state === 'done');
+      const next = {...job, ...(existing?.cropOverride ? {cropOverride: structuredClone(existing.cropOverride)} : {}),
+        manualPrepared: !!existing?.manualPrepared, cropRejected: !!existing?.cropRejected || (!!existing?.cropOverride && !unchanged), cropConfirmed: unchanged && !!existing?.cropConfirmed};
+      return {...next, selected: done || !PPTBatch.automatic(next) ? false : existing?.selected ?? true,
+        state: done ? 'done' : count ? 'partial' : unchanged && ['failed', 'stopped', 'manual'].includes(existing?.state) ? existing.state : PPTBatch.automatic(next) ? 'pending' : 'needs-crop', error: unchanged ? existing?.error || '' : ''};
     });
-    if (activeBatchJob) activeBatchJob = loadedIdentity?.coursePage === batchPage ? batchJobs.find(job => job.id === activeBatchJob.id && sameMediaSource(job, loadedIdentity)) || null : null;
-    await persistBatch(); if (!current()) return; renderBatchJobs();
-    const skipped = result.total - result.eligible, missing = result.failures?.length || 0, manual = batchJobs.filter(job => job.requiresCrop).length;
+    await PPTLibrary.batch(db, result.page, jobs); retainBatch(structuredClone({page: result.page, jobs}));
+    if (!current()) return;
+    batchPage = result.page; batchJobs = jobs;
+    if (activeBatchJob && loadedIdentity?.coursePage === batchPage) activeBatchJob = batchJobs.find(job => job.id === activeBatchJob.id && sameMediaSource(job, loadedIdentity)) || activeBatchJob;
+    renderBatchJobs();
+    const skipped = result.total - result.eligible, missing = result.failures?.length || 0, manual = batchJobs.filter(job => job.requiresCrop && !PPTBatch.automatic(job) && job.state !== 'done').length;
     $('batch-status').textContent = `读取完成：${result.total} 个课次，找到 ${batchJobs.length} 个视频${skipped ? `，跳过 ${skipped} 个未完成/转码中课次` : ''}${missing ? `，${missing} 个录像缺少可用视频` : ''}${manual ? `。其中 ${manual} 节只有 0 路视频，请逐节选择并框选 PPT 区域` : ''}。`;
   } catch (error) {
     if (!current()) return;
@@ -1019,17 +1457,28 @@ async function prepareManualBatchJob(job, permission) {
     coursePage = batchPage; sourceCourse = {...job.course}; sourceCoursePage = coursePage;
     const loaded = await loadRemote(job.url, {permissionGranted: true, sourceName: job.sourceName, batchJob: job});
     if (!loaded) throw Error($('status').textContent || '视频加载失败');
-    job.state = 'manual'; cropEditing = !job.cropConfirmed; await persistBatch(); renderBatchJobs(); controls(); draw();
+    reviewBusy = true; controls();
+    const related = jobBatch(job), nextJob = {...job, state: 'manual', manualPrepared: true};
+    const snapshot = {page: related.page, jobs: related.jobs.map(item => item.id === job.id ? nextJob : item)};
+    await PPTLibrary.batch(db, snapshot.page, snapshot.jobs);
+    Object.assign(job, nextJob); retainBatch(structuredClone(snapshot));
+    if (!job.cropConfirmed) { selectionMode = 'crop'; selectionRect = {...crop}; } renderBatchJobs(); draw();
     const prompt = job.cropConfirmed ? '已恢复本节裁剪区域，可继续提取或调整框选。' : '本节只有 0 路视频。请在预览中框选 PPT 区域，再点击“开始快速提取”。';
     status(prompt); $('batch-status').textContent = prompt;
   } catch (error) {
-    job.state = batchPageCount(job) ? 'partial' : 'failed'; job.error = error.message;
-    if (activeBatchJob === job) activeBatchJob = null;
-    renderBatchJobs(); $('batch-status').textContent = '0 路视频未就绪：' + error.message;
-  }
+    const loaded = sourceReady && activeBatchJob === job;
+    if (loaded) {
+      const retained = savedBatches.find(item => item.page === jobBatch(job)?.page)?.jobs.find(item => item.id === job.id);
+      job.state = retained?.state || (job.cropConfirmed ? 'pending' : 'needs-crop');
+    } else {
+      job.state = batchPageCount(job) ? 'partial' : 'failed'; job.error = error.message;
+      if (activeBatchJob === job) activeBatchJob = null;
+    }
+    renderBatchJobs(); $('batch-status').textContent = (loaded ? '0 路视频已加载，但准备状态保存失败；仍需确认裁剪：' : '0 路视频未就绪：') + error.message;
+  } finally { reviewBusy = false; controls(); }
 }
 async function runBatch(permission) {
-  const selected = batchJobs.filter(job => !job.requiresCrop && job.selected && job.state !== 'done');
+  const selected = batchJobs.filter(job => PPTBatch.automatic(job) && job.selected && job.state !== 'done');
   if (!selected.length || busy()) return;
   batchRunning = true; batchStopRequested = false; coursePage = batchPage; controls();
   let startupError = '';
@@ -1043,6 +1492,9 @@ async function runBatch(permission) {
       const loaded = await loadRemote(job.url, {permissionGranted: true, sourceName: job.sourceName, batchJob: job});
       if (!loaded) { job.state = batchStopRequested ? 'stopped' : 'failed'; job.error = $('status').textContent; await persistBatch(); renderBatchJobs(); continue; }
       if (batchStopRequested) { job.state = 'stopped'; await releaseSource(); renderBatchJobs(); break; }
+      if (job.requiresCrop && (!job.cropConfirmed || job.cropRejected)) {
+        job.state = 'needs-crop'; job.selected = false; await persistBatch(); await releaseSource(); renderBatchJobs(); continue;
+      }
       job.state = 'scanning'; await persistBatch(); renderBatchJobs();
       $('batch-status').textContent = `第 ${index + 1} / ${selected.length} 节：正在提取 PPT…`;
       const result = await fastScan(); job.pages = batchPageCount(job);
@@ -1063,27 +1515,29 @@ async function runBatch(permission) {
 }
 $('batch-discover').onclick = () => discoverBatch();
 $('batch-select').onclick = () => {
-  const selectable = batchJobs.filter(job => !job.requiresCrop && job.state !== 'done'), choose = selectable.some(job => !job.selected);
+  const selectable = batchJobs.filter(job => PPTBatch.automatic(job) && job.state !== 'done'), choose = selectable.some(job => !job.selected);
   selectable.forEach(job => { job.selected = choose; }); persistBatch().catch(e => status('批量选择保存失败：' + e.message)); renderBatchJobs();
 };
 $('batch-start').onclick = () => {
   if (busy()) return;
-  const origins = [...new Set(batchJobs.filter(job => !job.requiresCrop && job.selected && job.state !== 'done').map(job => originPattern(job.url)))];
+  const origins = [...new Set(batchJobs.filter(job => PPTBatch.automatic(job) && job.selected && job.state !== 'done').map(job => originPattern(job.url)))];
   const permission = origins.length ? chrome.permissions.request({origins}) : Promise.resolve(false);
   runBatch(permission);
 };
-function stopRealtime() { clearInterval(realtimeTimer); realtimeTimer = null; candidate = null; controls(); }
+function stopRealtime() { clearInterval(realtimeTimer); realtimeTimer = null; candidate = last = null; candidateSince = 0; releaseDedupeContext(); controls(); }
 async function realTick() {
   if (realtimeBusy || !realtimeTimer) return;
   realtimeBusy = true;
+  const context = dedupeContext;
   try {
+    checkDedupeContext(context);
     const f = frame(), threshold = Math.max(0.2, Math.min(10, Number($('diff').value) || 1.2));
-    if (last && PPTCore.similar(f.sig, last, threshold)) { candidate = null; return; }
-    if (!candidate || !PPTCore.similar(f.sig, candidate, 0.8)) { candidate = f.sig; candidateSince = Date.now(); return; }
+    if (last && PPTCore.similar(f.sig, last, threshold, context?.mask)) { candidate = null; return; }
+    if (!candidate || !PPTCore.similar(f.sig, candidate, 0.8, context?.mask)) { candidate = f.sig; candidateSince = Date.now(); return; }
     if (Date.now() - candidateSince >= (Number($('stable').value) || 1.5) * 1000) {
-      const duplicate = $('dedupe').checked && await hasSimilar(f.sig, threshold);
+      const duplicate = $('dedupe').checked && await hasSimilar(f.sig, threshold, context, f.signatureCrop);
       if (!realtimeTimer) return;
-      if (!duplicate) { await save(f); status(`实时截取：已保存 ${pages.length} 页。`); }
+      if (!duplicate) { await save(f, context); status(`实时截取：已保存 ${pages.length} 页。`); }
       last = f.sig; candidate = null;
     }
   } catch (e) { stopRealtime(); status('实时截取已停止：' + e.message); }
@@ -1092,11 +1546,11 @@ async function realTick() {
 $('run').onclick = () => {
   if (busy()) return;
   if (activeBatchJob?.requiresCrop && !activeBatchJob.cropConfirmed) {
-    cropEditing = true; controls(); draw();
+    if (selectionMode !== 'crop') startSelection('crop');
     const prompt = '请先在 0 路视频画面中框选 PPT 区域；PPT 已占满画面时，点击“使用完整画面”即可。';
     status(prompt); $('batch-status').textContent = prompt; return;
   }
-  if (stream) { realtimeTimer = setInterval(realTick, 350); controls(); status('正在实时截取，请保持课程视频播放。'); }
+  if (stream) { cancelSelection(); last = candidate = null; candidateSince = 0; createDedupeContext(); realtimeTimer = setInterval(realTick, 350); controls(); status('正在实时截取，请保持课程视频播放。'); }
   else fastScan();
 };
 $('stop').onclick = () => {
@@ -1216,8 +1670,9 @@ $('resume-load').onclick = () => {
   coursePage = activeLesson.page || ''; sourceCourse = {...activeLesson.course}; sourceCoursePage = coursePage;
   if (source.kind === 'file') { activateTab('tab-source'); $('file').click(); return; }
   if (source.kind === 'share' || !source.url) { activateTab('tab-source'); status('请重新选择视频地址或共享画面；历史截图会保留。'); return; }
-  const candidate = source.batchJobId && batchPage === coursePage && batchJobs.find(job => job.id === source.batchJobId && sameMediaSource(job, source));
-  const batchJob = source.batchJobId ? candidate || {id: source.batchJobId, url: source.url, sourceName: source.sourceName, requiresCrop: /(?:^|\/)0-[^/]+\.mp4(?:$|\?)/i.test(source.sourceName), cropConfirmed: false} : null;
+  const ownerJobs = batchPage === coursePage ? batchJobs : structuredClone(savedBatches.find(item => item.page === coursePage)?.jobs || []);
+  const candidate = source.batchJobId && ownerJobs.find(job => job.id === source.batchJobId && sameMediaSource(job, source));
+  const batchJob = source.batchJobId ? candidate || {id: source.batchJobId, course: {...activeLesson.course}, url: source.url, sourceName: source.sourceName, requiresCrop: /(?:^|\/)0-[^/]+\.mp4(?:$|\?)/i.test(source.sourceName), cropConfirmed: false} : null;
   loadRemote(candidate ? candidate.url : source.url, {sourceName: source.sourceName, batchJob});
 };
 $('restart-scan').onclick = () => { if (!busy()) fastScan({restart: true}); };

@@ -1,6 +1,23 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const library = require('../library.js');
+const batch = require('../batch.js');
+
+test('crop reuse validates bounds, zero-track identity and actual aspect within one percent', () => {
+  const source = {sourceName: '0-camera.mp4', url: 'https://cdn.invalid/0-camera.mp4?id=1&token=old'};
+  const override = {crop: {x: .1, y: .2, w: .7, h: .6}, aspect: 16 / 9, track: batch.trackKey(source)};
+  assert.equal(batch.cropMatches(override, {...source, url: source.url.replace('old', 'new')}, override.aspect * 1.01), true);
+  assert.equal(batch.cropMatches(override, source, override.aspect * 1.01001), false);
+  assert.equal(batch.cropMatches(override, {...source, url: source.url.replace('id=1', 'id=2')}, override.aspect), false);
+  assert.equal(batch.cropMatches(override, {...source, sourceName: '2-camera.mp4'}, override.aspect), false);
+  for (const crop of [{x: -.1, y: 0, w: 1, h: 1}, {x: .5, y: 0, w: .6, h: 1}, {x: 0, y: 0, w: 0, h: 1}, {x: 0, y: 0, w: NaN, h: 1}]) {
+    assert.equal(batch.cropMatches({...override, crop}, source, override.aspect), false);
+  }
+  assert.equal(batch.cropMatches({...override, aspect: Infinity}, source, override.aspect), false);
+  assert.equal(batch.automatic({requiresCrop: true, cropConfirmed: true}), false, 'legacy confirmation alone cannot enable automatic zero-track scanning');
+  assert.equal(batch.automatic({requiresCrop: true, cropConfirmed: true, cropOverride: override}), true);
+  assert.equal(batch.automatic({requiresCrop: true, cropConfirmed: true, cropOverride: override, cropRejected: true}), false);
+});
 
 test('source identity separates courses, local files and independent batch recordings', () => {
   const a = {page: 'https://rms-v5.xjtu.edu.cn/study-capture-courses/42/preview-detail/1', sourceKey: 'file:["a.mp4",10,1]', sourceName: 'a.mp4'};
@@ -31,6 +48,36 @@ test('interrupted task states and crop settings are restored without mutating st
   assert.equal(restored.task.state, 'paused'); assert.equal(input.task.state, 'running');
   assert.deepEqual(restored.crop, input.crop); assert.equal(restored.task.checkpoint, 12);
   assert.equal(library.recover({...input,task: {...input.task,state: 'done'}}).task.state, 'done');
+});
+
+test('lesson writes remain compatible and optional batch snapshots share one settings transaction', async () => {
+  for (const withBatch of [false, true]) {
+    const writes = [], transactions = []; let tx;
+    const db = {transaction(stores, mode) {
+      transactions.push({stores, mode});
+      return tx = {objectStore(name) { assert.equal(name, 'settings'); return {put(value, key) { writes.push({value, key}); }}; }};
+    }};
+    const lesson = {id: 'one', crop: {x: .1}}, batch = {page: 'local-course', jobs: [{id: 'job', cropConfirmed: true}]};
+    const pending = withBatch ? library.put(db, lesson, batch) : library.put(db, lesson);
+    let complete = false; pending.then(() => { complete = true; });
+    lesson.crop.x = .9; batch.jobs[0].cropConfirmed = false;
+    await Promise.resolve(); assert.equal(complete, false);
+    assert.deepEqual(transactions, [{stores: ['settings'], mode: 'readwrite'}]);
+    assert.deepEqual(writes, [{key: 'lesson:one', value: {id: 'one', crop: {x: .1}}},
+      ...(withBatch ? [{key: 'batch:local-course', value: {page: 'local-course', jobs: [{id: 'job', cropConfirmed: true}]}}] : [])]);
+    tx.oncomplete(); await pending; assert.equal(complete, true);
+  }
+});
+
+test('a related batch write exception aborts the lesson transaction and rejects', async () => {
+  let aborted = false, transactions = 0;
+  const failure = Error('batch write failed');
+  const db = {transaction() {
+    transactions++;
+    return {abort() { aborted = true; }, objectStore() { return {put(_value, key) { if (key.startsWith('batch:')) throw failure; }}; }};
+  }};
+  await assert.rejects(library.put(db, {id: 'one'}, {page: 'local-course', jobs: []}), error => error === failure);
+  assert.equal(aborted, true); assert.equal(transactions, 1);
 });
 
 test('suspect ranges merge overlapping intervals, ignore invalid bounds and keep chronological order', () => {

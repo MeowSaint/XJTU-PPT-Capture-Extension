@@ -6,10 +6,11 @@ const {spawnSync} = require('node:child_process');
 const {dependency, browserOptions} = require('./runtime.cjs');
 const {chromium} = dependency('playwright'), sharp = dependency('sharp');
 const {PDFDocument, PDFName} = dependency('pdf-lib');
-const root = path.resolve(__dirname, '..'), scratch = path.join(root, '.test-output', 'v3.1.0');
+const root = path.resolve(__dirname, '..'), scratch = path.join(root, '.test-output', 'v3.1.1');
 fs.mkdirSync(scratch, {recursive: true});
 const output = fs.mkdtempSync(path.join(scratch, 'library-'));
 const fixture = path.join(output, 'library-video.mp4'), moving = path.join(output, 'library-moving.mp4'), continuity = path.join(output, 'library-continuity.mp4');
+const resized = path.join(output, 'library-small.mp4');
 const course = {name: '模式识别', date: '2026-11-04', start: '08:00:00'};
 const settings = {step: 2, threshold: 1.2, dedupe: true, stable: 1.5}, full = {x: 0, y: 0, w: 1, h: 1};
 const passed = [], errors = [], blocked = [];
@@ -99,7 +100,10 @@ async function seed({version = 3, pages = [], lessons = [], activeId = lessons[0
   }, {version, specs: pages, lessons, activeId, batches, naming, images});
   await open();
 }
-async function test(name, body) { await body(); passed.push(name); console.log('PASS ' + name); }
+async function test(name, body) {
+  if (process.env.PPT_TEST_FILTER && !new RegExp(process.env.PPT_TEST_FILTER).test(name)) return;
+  await body(); passed.push(name); console.log('PASS ' + name);
+}
 function zipEntries(bytes) {
   const end = bytes.length - 22;
   assert.equal(bytes.readUInt32LE(end), 0x06054b50, 'ZIP end directory');
@@ -127,6 +131,8 @@ function zipEntries(bytes) {
     const generated = spawnSync(ffmpeg, ['-y', '-v', 'error', ...inputs.flatMap(color => ['-f', 'lavfi', '-i', `color=c=${color}:s=640x360:r=20`]),
       '-filter_complex', '[0:v][1:v][2:v][3:v]concat=n=4:v=1:a=0[v]', '-map', '[v]', '-an', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', fixture], {encoding: 'utf8'});
     assert.equal(generated.status, 0, generated.stderr || generated.error?.message);
+    const scaled = spawnSync(ffmpeg, ['-y', '-v', 'error', '-i', fixture, '-vf', 'scale=320:180', '-an', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', resized], {encoding: 'utf8'});
+    assert.equal(scaled.status, 0, scaled.stderr || scaled.error?.message);
     const animated = spawnSync(ffmpeg, ['-y', '-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=duration=2:size=640x360:rate=20', '-an', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', moving], {encoding: 'utf8'});
     assert.equal(animated.status, 0, animated.stderr || animated.error?.message);
     const stationary = spawnSync(ffmpeg, ['-y', '-v', 'error', ...['0x24354a:d=10', '0x9e2437:d=2'].flatMap(color => ['-f', 'lavfi', '-i', `color=c=${color}:s=640x360:r=20`]),
@@ -227,9 +233,70 @@ function zipEntries(bytes) {
       assert(cleared.assets.some(asset => asset.id === 99) && cleared.assets.some(asset => asset.id === 13));
       await choose(secondId); await count(2); assert.deepEqual(await ids(), [99, 13]);
       assert.equal(await page.locator('#course-name').inputValue(), course.name);
-      assert.equal(await page.locator('#mode').inputValue(), '2'); assert.equal(await page.locator('#dedupe').isChecked(), true);
+      assert.equal(await page.locator('#mode').inputValue(), '0.5'); assert.equal(await page.locator('#dedupe').isChecked(), true);
       assert.deepEqual(await page.evaluate(() => crop), full);
       await page.reload(); await count(2); assert.deepEqual(await ids(), [99, 13]);
+    });
+
+    await test('saved batch rows jump to retained pages and suspects without loading media and reset range anchors', async () => {
+      const batchPage = 'https://example.invalid/course?courseId=synthetic', other = lesson('jump-other');
+      const saved = lesson('jump-saved', {page: batchPage, source: {kind: 'remote', batchJobId: 'job-saved', page: batchPage, url: 'https://example.invalid/unloaded.mp4'}, suspects: [{start: 1, end: 2}]});
+      const empty = lesson('jump-empty', {page: batchPage, source: {kind: 'remote', batchJobId: 'job-empty', page: batchPage}, suspects: [{start: 3, end: 4}]});
+      const jobs = ['saved', 'empty', 'missing'].map(name => ({id: 'job-' + name, course, sourceName: name, url: 'https://example.invalid/unloaded.mp4', state: 'done', selected: false}));
+      await seed({lessons: [other, saved, empty], activeId: other.id, batches: [{page: batchPage, jobs}], pages: [
+        {id: 10, lessonId: other.id}, {id: 20, lessonId: saved.id}, {id: 30, lessonId: saved.id}, {id: 40, lessonId: saved.id},
+      ]});
+      await page.locator('#pages .page-select').click();
+      await page.locator('#batch-panel').evaluate(panel => { panel.open = true; });
+      const view = name => page.locator(`[data-job-id="job-${name}"] .batch-view`);
+      assert.equal(await view('missing').isDisabled(), true); assert.equal(await view('empty').isDisabled(), false);
+      const before = await stored();
+      await page.evaluate(() => { exportBusy = true; controls(); }); assert.equal(await view('saved').isDisabled(), true);
+      await page.evaluate(() => { exportBusy = false; controls(); });
+      await view('saved').click(); await count(3); assert.deepEqual(await ids(), [20, 30, 40]);
+      assert.equal(await page.evaluate(() => activeLesson.id), saved.id);
+      assert.equal(await page.locator('#suspects-panel').evaluate(panel => panel.open), true);
+      assert.equal(await page.locator('#suspect-ranges .suspect-range').count(), 1);
+      assert.deepEqual(await page.evaluate(() => ({sourceReady, src: video.getAttribute('src'), selected: [...selectedPages], selectionAnchor})), {sourceReady: false, src: null, selected: [], selectionAnchor: null});
+      await page.locator('#pages .page-select').last().click({modifiers: ['Shift']});
+      assert.deepEqual(await page.evaluate(() => [...selectedPages]), [40]);
+      await view('empty').click(); await count(0); assert.equal(await page.locator('#suspect-ranges .suspect-range').count(), 1);
+      assert.deepEqual((await stored()).pages, before.pages); assert.deepEqual((await stored()).assets, before.assets);
+      assert.equal(await page.evaluate(() => sourceReady), false);
+    });
+
+    await test('suspect confirmation removes exactly one record write-first, retries failures and survives reload without video', async () => {
+      const suspects = [{start: 1, end: 3, time: 1}, {start: 1, end: 3, time: 1}, {start: 2, end: 4}, {start: 4, end: 5}];
+      await seed({lessons: [lesson('dismiss', {suspects}), lesson('untouched', {suspects: [{start: 1, end: 8}]})]});
+      const before = await stored();
+      await page.locator('#suspects-panel').evaluate(panel => { panel.open = true; });
+      assert.equal(await page.locator('.suspect-dismiss').first().isDisabled(), false);
+      assert.equal(await page.locator('.suspect-range button').first().isDisabled(), true);
+      await page.evaluate(() => {
+        const put = PPTLibrary.put, transaction = IDBDatabase.prototype.transaction;
+        PPTLibrary.put = async (...args) => { await new Promise(resolve => { window.releaseDismiss = resolve; }); return put(...args); };
+        window.restoreDismiss = () => { PPTLibrary.put = put; };
+        IDBDatabase.prototype.transaction = function (names, mode, ...args) {
+          const tx = transaction.call(this, names, mode, ...args);
+          if (mode === 'readwrite' && names.includes('settings')) { IDBDatabase.prototype.transaction = transaction; queueMicrotask(() => tx.abort()); }
+          return tx;
+        };
+      });
+      await page.locator('.suspect-dismiss').nth(1).click(); await page.waitForFunction(() => !!window.releaseDismiss);
+      assert.equal(await page.locator('.suspect-range').count(), 4);
+      assert.deepEqual(await page.evaluate(() => activeLesson.suspects), suspects);
+      assert.deepEqual(await stored(), before); assert.equal(await page.locator('.suspect-dismiss').first().isDisabled(), true);
+      await page.evaluate(() => { window.restoreDismiss(); window.releaseDismiss(); }); await idle();
+      assert.match(await page.locator('#status').textContent(), /确认保存失败/);
+      assert.deepEqual(await stored(), before); assert.deepEqual(await page.evaluate(() => activeLesson.suspects), suspects);
+      assert.equal(await page.locator('.suspect-range').count(), 4); assert.equal(await page.locator('.suspect-dismiss').nth(1).isDisabled(), false);
+      await page.locator('.suspect-dismiss').nth(1).click(); await idle();
+      const after = await stored(), remaining = [suspects[0], suspects[2], suspects[3]];
+      assert.deepEqual(after.lessons.find(item => item.id === 'dismiss'), {...before.lessons.find(item => item.id === 'dismiss'), suspects: remaining});
+      assert.deepEqual(after.lessons.find(item => item.id === 'untouched'), before.lessons.find(item => item.id === 'untouched'));
+      assert.deepEqual(await page.evaluate(() => activeLesson.suspects), remaining); assert.equal(await page.locator('.suspect-range').count(), 3);
+      await page.reload(); await idle(); assert.deepEqual((await stored()).lessons.find(item => item.id === 'dismiss').suspects, remaining);
+      assert.equal(await page.evaluate(() => sourceReady), false);
     });
 
     await test('unloading preserves crop through later edits and frees video/cache when lesson persistence fails', async () => {
@@ -287,10 +354,10 @@ function zipEntries(bytes) {
     });
 
     await test('a stable-slide checkpoint resumes without extra pages when dedupe is off', async () => {
-      await seed(); await load(continuity); await page.locator('#tab-extraction').click(); await page.locator('#dedupe').uncheck(); await settled();
+      await seed(); await load(continuity); await page.locator('#tab-extraction').click(); await page.locator('#mode').selectOption('2'); await page.locator('#dedupe').uncheck(); await settled();
       await page.locator('#run').click(); await page.waitForFunction(() => !busy() && activeLesson.task?.state === 'done');
       const uninterrupted = (await stored()).pages.map(page => page.sourceTime); assert.deepEqual(uninterrupted, [.25, 10.25]);
-      await seed(); await load(continuity); await page.locator('#tab-extraction').click(); await page.locator('#dedupe').uncheck(); await settled();
+      await seed(); await load(continuity); await page.locator('#tab-extraction').click(); await page.locator('#mode').selectOption('2'); await page.locator('#dedupe').uncheck(); await settled();
       await page.evaluate(() => {
         const put = PPTLibrary.put; window.continuityProbe = {held: false};
         PPTLibrary.put = async (...args) => {
@@ -341,7 +408,7 @@ function zipEntries(bytes) {
 
     await test('committed partial intervals resume the same task without duplicates and reject same-name different files', async () => {
       await seed(); await load();
-      await page.locator('#tab-extraction').click(); await page.locator('#dedupe').uncheck(); await settled();
+      await page.locator('#tab-extraction').click(); await page.locator('#mode').selectOption('2'); await page.locator('#dedupe').uncheck(); await settled();
       await page.evaluate(() => {
         const add = PPTPageStore.add, put = PPTLibrary.put;
         window.libraryProbe = {committed: [], checkpoints: [], inflight: 0, held: false};
@@ -494,6 +561,407 @@ function zipEntries(bytes) {
       assert.match(await page.locator('#status').textContent(), /2 节 PDF.*共 3 页/);
       assert.match(await page.locator('#status').textContent(), /跳过 3 个空课次/, 'one empty lesson and two persisted batch jobs have no screenshots');
       assert.match(await page.locator('#status').textContent(), /1 节尚未完成整节扫描/);
+    });
+    await test('library estimates stream legacy assets and use committed size metadata for new pages', async () => {
+      await seed({lessons: [lesson('sizes'), lesson('empty-size')], activeId: 'empty-size', pages: [
+        {id: 201, lessonId: 'sizes'}, {id: 202, lessonId: 'sizes'}, {id: 203, lessonId: 'sizes'},
+      ]});
+      const result = await page.evaluate(async () => {
+        const get = IDBObjectStore.prototype.get, getAll = IDBObjectStore.prototype.getAll;
+        let concurrent = 0, maximum = 0, reads = 0;
+        IDBObjectStore.prototype.get = function(key) {
+          const request = get.call(this, key);
+          if (this.name === 'assets') { reads++; maximum = Math.max(maximum, ++concurrent); request.addEventListener('success', () => { concurrent--; }); }
+          return request;
+        };
+        IDBObjectStore.prototype.getAll = function(...args) { if (this.name === 'assets') throw Error('unbounded asset read'); return getAll.apply(this, args); };
+        try {
+          const estimate = await PPTPageStore.estimate(db, allPages), metadata = {lessonId: 'empty-size', order: 1024};
+          await PPTPageStore.add(db, metadata, {image: new Blob(['image']), thumbnail: new Blob(['thumb']), sig: new Uint8Array(12)});
+          const before = reads, known = await PPTPageStore.estimate(db, [metadata]), missing = await PPTPageStore.estimate(db, [{id: 999999}]);
+          return {estimate, maximum, legacyReads: before, metadata: metadata.assetBytes, known, cachedReads: reads - before - 1, missing};
+        } finally { IDBObjectStore.prototype.get = get; IDBObjectStore.prototype.getAll = getAll; }
+      });
+      assert(result.estimate.bytes > 3 * 192 * 108 * 4); assert.equal(result.maximum, 1); assert.equal(result.legacyReads, 3);
+      assert.equal(result.metadata, 22); assert.deepEqual(result.known, {bytes: 22, missing: 0}); assert.equal(result.cachedReads, 0);
+      assert.deepEqual(result.missing, {bytes: 0, missing: 1});
+      await page.locator('#library-manage').click(); await page.waitForFunction(() => $('library-status').textContent === '大小估算完成。');
+      assert.match(await page.locator('[data-lesson-id="sizes"]').textContent(), /3 页.*约 .* MB/);
+      assert.match(await page.locator('#library-dialog').textContent(), /截图.*缩略图.*签名/);
+      await page.locator('#library-close').click();
+    });
+    await test('management cancellation and transaction abort preserve disk, active source, selection and undo', async () => {
+      const base = origin + '/study-capture-courses/42/preview-detail/a', other = origin + '/study-capture-courses/99/preview-detail/a';
+      const a = lesson('manage-active', {page: base}), b = lesson('manage-inactive', {page: base, source: {batchJobId: 'shared', page: base, sourceName: '2-b.mp4'}});
+      const otherLesson = lesson('manage-other', {page: other, source: {batchJobId: 'shared', page: other, sourceName: '2-other.mp4'}});
+      const jobs = [{id: 'shared', course, sourceName: '2-b.mp4', requiresCrop: false, selected: true, state: 'pending'}, {id: 'queued', course, requiresCrop: false, state: 'pending'}];
+      await seed({lessons: [a, b, lesson('manage-empty', {page: base}), otherLesson], batches: [{page: base, jobs}, {page: other, jobs: [jobs[0]]}], pages: [
+        {id: 301, lessonId: a.id}, {id: 302, lessonId: a.id}, {id: 303, lessonId: b.id}, {id: 304, lessonId: otherLesson.id},
+      ]});
+      await load(); await page.evaluate(async () => { await deletePages([302]); selectedPages.add(301); selectionAnchor = 301; controls(); });
+      await page.waitForFunction(() => !thumbnailReads && !thumbnailQueue.size);
+      await page.evaluate(async () => {
+        const tx = db.transaction('assets', 'readwrite'), store = tx.objectStore('assets'), request = store.get(301);
+        request.onsuccess = () => store.put({...request.result, id: 900});
+        await new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onabort = () => reject(tx.error); });
+      });
+      const before = await stored(), live = await page.evaluate(() => ({active: activeLesson.id, undo: undoState, selected: [...selectedPages], anchor: selectionAnchor, source: objectURL}));
+      await page.locator('#library-manage').click(); await page.locator('[data-lesson-id="manage-inactive"] button').click();
+      assert.match(await page.locator('#library-confirm-text').textContent(), /模式识别.*1 节、1 页.*无法撤销/);
+      await page.locator('#library-cancel-delete').click(); assert.deepEqual(await stored(), before);
+      await page.locator('[data-lesson-id="manage-inactive"] button').click();
+      await page.evaluate(() => {
+        window.originalSettingsPut = IDBObjectStore.prototype.put; window.failedDeletionWrites = 0;
+        IDBObjectStore.prototype.put = function(value, key) {
+          if (this.name === 'settings' && key === 'activeLesson') return this.add(value, key);
+          return window.originalSettingsPut.call(this, value, key);
+        };
+      });
+      await page.locator('#library-delete').click(); await page.waitForFunction(() => !libraryWriting && $('library-status').textContent.includes('删除失败'));
+      await page.evaluate(() => { IDBObjectStore.prototype.put = window.originalSettingsPut; });
+      assert.deepEqual(await stored(), before);
+      assert.deepEqual(await page.evaluate(() => ({active: activeLesson.id, undo: undoState, selected: [...selectedPages], anchor: selectionAnchor, source: objectURL})), live);
+      await page.locator('#library-delete').click(); await page.waitForFunction(() => !libraryWriting && !lessons.some(lesson => lesson.id === 'manage-inactive'));
+      const after = await stored(); assert(!after.assets.some(asset => asset.id === 303)); assert(after.assets.some(asset => asset.id === 900));
+      assert(after.assets.some(asset => asset.id === 302), 'unrelated active undo asset retained');
+      assert.deepEqual(after.batches.find(batch => batch.page === base).jobs.map(job => job.id), ['queued']);
+      assert.deepEqual(after.batches.find(batch => batch.page === other).jobs.map(job => job.id), ['shared']);
+      assert.deepEqual(after.assets.filter(asset => asset.id !== 303), before.assets.filter(asset => asset.id !== 303));
+      assert.deepEqual(await page.evaluate(() => ({active: activeLesson.id, undo: undoState, selected: [...selectedPages], anchor: selectionAnchor, source: objectURL})), live);
+      await page.locator('#library-close').click(); await page.locator('#undo').click(); await count(2);
+      await page.reload(); await count(2); assert(!(await stored()).lessons.some(lesson => lesson.id === 'manage-inactive'));
+      await page.evaluate(async ({base, jobs}) => {
+        chrome.tabs = {sendMessage: async () => ({ok: true, page: base, jobs, total: jobs.length, eligible: jobs.length})};
+        await discoverBatch(1);
+      }, {base, jobs});
+      const rediscovered = await stored();
+      assert(!rediscovered.lessons.some(lesson => lesson.id === 'manage-inactive')); assert(!rediscovered.pages.some(page => page.id === 303));
+      assert(!rediscovered.assets.some(asset => asset.id === 303));
+      assert.equal(rediscovered.batches.find(batch => batch.page === base).jobs.find(job => job.id === 'shared').state, 'pending');
+    });
+    await test('active, empty and whole-course deletion release transient state without resurrecting history', async () => {
+      await load(); await page.evaluate(async () => { await deletePages([302]); selectedPages.add(301); selectionAnchor = 301; controls(); });
+      await page.locator('#library-manage').click(); await page.locator('[data-lesson-id="manage-active"] button').click();
+      await page.locator('#library-delete').click(); await page.waitForFunction(() => !libraryWriting && !lessons.some(lesson => lesson.id === 'manage-active'));
+      assert.deepEqual(await page.evaluate(() => ({ready: sourceReady, url: objectURL, cache: videoCache, undo: undoState, selected: [...selectedPages], anchor: selectionAnchor, preview: previewURL, thumbnails: thumbnailStates.size})),
+        {ready: false, url: null, cache: null, undo: null, selected: [], anchor: null, preview: null, thumbnails: 0});
+      const after = await stored(); assert(!after.assets.some(asset => [301, 302].includes(asset.id))); assert(!after.pages.some(page => [301, 302].includes(page.id)));
+      await page.locator('[data-lesson-id="manage-empty"] button').click(); assert.match(await page.locator('#library-confirm-text').textContent(), /1 节、0 页/);
+      await page.locator('#library-delete').click(); await page.waitForFunction(() => !libraryWriting && !lessons.some(lesson => lesson.id === 'manage-empty'));
+      await page.locator('#library-close').click(); await page.reload(); await count(1);
+      assert.deepEqual((await stored()).lessons.map(lesson => lesson.id), ['manage-other']);
+      await page.locator('#library-manage').click(); await page.locator('.library-course > button').click();
+      assert.match(await page.locator('#library-confirm-text').textContent(), /整门课程.*模式识别.*1 节、1 页/);
+      await page.locator('#library-delete').click(); await page.waitForFunction(() => !libraryWriting && lessons.length === 0);
+      const empty = await stored(); assert.deepEqual(empty.pages, []); assert.deepEqual(empty.lessons, []); assert.equal(empty.activeId, '');
+      assert(!empty.batches.some(batch => batch.page.includes('/99/')));
+      await page.locator('#library-close').click(); await page.reload(); await count(0); assert.equal(await page.locator('#library-manage').isDisabled(), false);
+    });
+    await test('whole-course deletion removes all lessons and course batch snapshots including queued references', async () => {
+      const base = origin + '/study-capture-courses/42/preview-detail/a', sibling = base.replace('/a', '/b'), other = base.replace('/42/', '/99/');
+      const jobs = [{id: 'queued', course, requiresCrop: false, state: 'pending', selected: true}];
+      await seed({lessons: [lesson('course-a', {page: base}), lesson('course-b', {page: sibling}), lesson('course-empty', {page: base}), lesson('course-other', {page: other})],
+        batches: [{page: base, jobs}, {page: sibling, jobs}, {page: other, jobs}], pages: [{id: 341, lessonId: 'course-a'}, {id: 342, lessonId: 'course-b'}, {id: 343, lessonId: 'course-other'}]});
+      await page.locator('#library-manage').click(); await page.locator('.library-course:has([data-lesson-id="course-a"]) > button').click();
+      assert.match(await page.locator('#library-confirm-text').textContent(), /整门课程.*3 节、2 页/);
+      await page.locator('#library-delete').click(); await page.waitForFunction(() => !libraryWriting && lessons.length === 1);
+      const saved = await stored(); assert.deepEqual(saved.lessons.map(lesson => lesson.id), ['course-other']);
+      assert.deepEqual(saved.pages.map(page => page.id), [343]); assert.deepEqual(saved.assets.map(asset => asset.id), [343]);
+      assert.deepEqual(saved.batches.map(batch => batch.page), [other]);
+      await page.locator('#library-close').click(); await page.reload(); await count(1);
+    });
+    await test('committed library deletion reports cleanup failure honestly and retains unrelated assets', async () => {
+      await seed({lessons: [lesson('cleanup-active'), lesson('cleanup-retained')], pages: [{id: 351, lessonId: 'cleanup-active'}, {id: 352, lessonId: 'cleanup-retained'}]});
+      await load();
+      await page.evaluate(() => {
+        const release = releaseSource;
+        releaseSource = async () => { await release(); throw Error('synthetic cache release failure'); };
+      });
+      await page.locator('#library-manage').click(); await page.locator('[data-lesson-id="cleanup-active"] button').click();
+      await page.locator('#library-delete').click(); await page.waitForFunction(() => !libraryWriting && $('library-status').textContent.includes('synthetic cache release failure'));
+      assert.match(await page.locator('#library-status').textContent(), /已永久删除.*缓存释放失败/);
+      const saved = await stored(); assert.deepEqual(saved.lessons.map(lesson => lesson.id), ['cleanup-retained']); assert.equal(saved.activeId, 'cleanup-retained');
+      assert.deepEqual(saved.pages.map(page => page.id), [352]); assert.deepEqual(saved.assets.map(asset => asset.id), [352]);
+      await page.locator('#library-close').click(); await page.reload(); await count(1);
+    });
+    await test('crop reuse waits for pending naming before saving the source lesson and related batch', async () => {
+      const base = origin + '/study-capture-courses/42/preview-detail/naming', other = base.replace('/42/', '/99/');
+      const url = origin + '/' + path.relative(root, fixture).split(path.sep).join('/');
+      const jobs = ['naming-source', 'naming-target'].map((id, index) => ({id, course: {...course, date: `2026-11-${10 + index}`},
+        url: url + '?id=' + id, sourceName: '0-' + id + '.mp4', requiresCrop: true, selected: false, cropConfirmed: false,
+        state: 'needs-crop', options: [{url: url + '?id=' + id, sourceName: '0-' + id + '.mp4'}]}));
+      const retained = jobs.map(job => lesson(job.id, {course: job.course, page: base, namingManual: false,
+        source: {kind: 'remote', batchJobId: job.id, page: base, sourceKey: 'url:' + job.url, sourceName: job.sourceName}}));
+      const unrelated = lesson('naming-unrelated', {page: other, source: {kind: 'file', sourceKey: 'unrelated', page: other}});
+      await seed({lessons: [...retained, unrelated], pages: [{id: 601, lessonId: unrelated.id}],
+        batches: [{page: base, jobs}, {page: other, jobs: [{...jobs[1], id: 'unrelated-job'}]}]});
+      const expectedCrop = {x: .1, y: .2, w: .6, h: .6};
+      await page.evaluate(async ({base, expectedCrop}) => {
+        batchPage = base; batchJobs = structuredClone(savedBatches.find(batch => batch.page === base).jobs);
+        chrome.permissions = {request: async () => true}; renderBatchJobs();
+        await prepareManualBatchJob(batchJobs[0], Promise.resolve(true));
+        await setComparisonRegion(expectedCrop, null, 'crop', true);
+      }, {base, expectedCrop});
+      await settled();
+      const before = await stored(), sourceId = await page.evaluate(() => activeLesson.id);
+      const sourceBefore = before.lessons.find(item => item.id === sourceId);
+      assert.equal(sourceBefore.namingManual, false);
+      await page.evaluate(() => {
+        const original = IDBObjectStore.prototype.put;
+        IDBObjectStore.prototype.put = function(value, key) {
+          const request = original.call(this, value, key);
+          if (this.name === 'settings' && key === 'exportNaming') {
+            IDBObjectStore.prototype.put = original;
+            let held = true; window.releaseNaming = () => { held = false; };
+            const keepAlive = () => { if (held) this.get('exportNaming').onsuccess = keepAlive; };
+            keepAlive();
+          }
+          return request;
+        };
+      });
+      const renamed = {name: '手工修改后的模式识别', date: '2026-12-03', start: '14:25:00'};
+      try {
+        await page.locator('#tab-export').click();
+        // One real input event snapshots all fields; later queued renames must not mask a stale reuse write.
+        await page.locator('#course-date').evaluate((input, value) => { input.value = value; }, renamed.date);
+        await page.locator('#course-start').evaluate((input, value) => { input.value = value; }, renamed.start);
+        await page.locator('#course-name').fill(renamed.name);
+        await page.waitForFunction(() => !!window.releaseNaming);
+        assert.deepEqual(await page.evaluate(() => namingInfo()), renamed);
+        assert.deepEqual(await page.evaluate(() => ({course: activeLesson.course, namingManual: activeLesson.namingManual})),
+          {course: sourceBefore.course, namingManual: false}, 'queued naming writes have not published to the live lesson');
+        await page.locator('#tab-extraction').click(); await page.locator('#crop-reuse').click();
+        assert.match(await page.locator('#crop-reuse-summary').textContent(), /本课程 1 个课次/);
+        await page.locator('#crop-reuse-agree').check(); await page.locator('#crop-reuse-apply').click();
+        assert.equal(await page.evaluate(() => cropReuseWriting), true);
+        assert.equal(await page.locator('#crop-reuse-apply').isDisabled(), true);
+        assert.equal(await page.evaluate(() => batchJobs.find(job => job.id === 'naming-target').cropOverride), undefined,
+          'pending naming cannot publish a target crop override');
+      } finally { await page.evaluate(() => window.releaseNaming?.()); }
+      await settled();
+      const after = await stored(), sourceAfter = after.lessons.find(item => item.id === sourceId);
+      assert.deepEqual(sourceAfter, {...sourceBefore, course: renamed, namingManual: true});
+      assert.deepEqual(after.lessons.filter(item => item.id !== sourceId), before.lessons.filter(item => item.id !== sourceId));
+      assert.deepEqual(after.pages, before.pages); assert.deepEqual(after.assets, before.assets);
+      const expectedBatch = structuredClone(before.batches.find(item => item.page === base));
+      const target = expectedBatch.jobs.find(job => job.id === 'naming-target');
+      Object.assign(target, {cropOverride: {crop: expectedCrop, aspect: 640 / 360, track: await page.evaluate(() => PPTBatch.trackKey(batchJobs.find(job => job.id === 'naming-target'))), manual: false},
+        cropConfirmed: true, cropRejected: false, selected: true, state: 'pending', error: ''});
+      assert.deepEqual(after.batches.find(item => item.page === base), expectedBatch);
+      assert.deepEqual(after.batches.find(item => item.page === other), before.batches.find(item => item.page === other));
+      await page.reload(); await idle();
+      assert.deepEqual(await page.evaluate(() => ({course: activeLesson.course, namingManual: activeLesson.namingManual, input: namingInfo()})),
+        {course: renamed, namingManual: true, input: renamed});
+      assert.deepEqual(await stored(), after);
+    });
+    await test('same-camera confirmation atomically reuses crop only for unfinished unprepared zero-track lessons', async () => {
+      const base = origin + '/study-capture-courses/42/preview-detail/a', other = base.replace('/42/', '/99/');
+      const url = origin + '/' + path.relative(root, fixture).split(path.sep).join('/');
+      const jobs = ['source', 'target', 'stopped', 'failed', 'done', 'manual'].map((id, index) => ({id, course: {...course, date: `2026-11-${10 + index}`},
+        url: url + '?id=' + id + '&token=old', sourceName: '0-' + id + '.mp4', requiresCrop: true, selected: false, cropConfirmed: false,
+        state: ['stopped', 'failed', 'done', 'manual'].includes(id) ? id : 'needs-crop', ...(id === 'manual' ? {manualPrepared: true} : {}),
+        options: [{url: url + '?id=' + id + '&token=old', sourceName: '0-' + id + '.mp4'}]}));
+      const smaller = origin + '/' + path.relative(root, resized).split(path.sep).join('/') + '?id=target&token=old';
+      jobs[1].url = smaller; jobs[1].options[0].url = smaller;
+      await seed({batches: [{page: base, jobs}, {page: other, jobs: [{...jobs[1], id: 'other-course'}]}]});
+      await page.evaluate(async base => {
+        batchPage = base; batchJobs = structuredClone(savedBatches.find(batch => batch.page === base).jobs);
+        chrome.permissions = {request: async () => true}; renderBatchJobs();
+        await prepareManualBatchJob(batchJobs[0], Promise.resolve(true));
+        await setComparisonRegion({x: .1, y: .2, w: .6, h: .6}, null, 'crop', true);
+      }, base);
+      await idle(); await page.locator('#tab-extraction').click();
+      assert.equal(await page.locator('#crop-reuse').isEnabled(), true);
+      const before = await stored(); await page.locator('#crop-reuse').click();
+      assert.match(await page.locator('#crop-reuse-summary').textContent(), /本课程 3 个课次/);
+      assert.equal(await page.locator('#crop-reuse-apply').isDisabled(), true);
+      assert.equal(await page.locator('#library-manage').isDisabled(), true);
+      await page.locator('#crop-reuse-cancel').click(); assert.deepEqual(await stored(), before);
+      await page.locator('#crop-reuse').click(); await page.locator('#crop-reuse-agree').check();
+      await page.evaluate(() => {
+        window.cropOriginalPut = IDBObjectStore.prototype.put;
+        IDBObjectStore.prototype.put = function(value, key) {
+          if (this.name === 'settings' && key === 'batch:' + batchPage) return this.add(value, 'lesson:' + activeLesson.id);
+          return window.cropOriginalPut.call(this, value, key);
+        };
+      });
+      await page.locator('#crop-reuse-apply').click(); await page.waitForFunction(() => !cropReuseWriting && $('crop-reuse-status').textContent.includes('保存失败'));
+      await page.evaluate(() => { IDBObjectStore.prototype.put = window.cropOriginalPut; });
+      assert.deepEqual(await stored(), before); assert.equal(await page.evaluate(() => batchJobs.some(job => job.cropOverride?.manual === false)), false);
+      await page.locator('#crop-reuse-apply').click(); await idle();
+      const after = await stored(), saved = after.batches.find(batch => batch.page === base).jobs;
+      for (const id of ['target', 'stopped', 'failed']) {
+        const job = saved.find(job => job.id === id); assert.deepEqual(job.cropOverride.crop, {x: .1, y: .2, w: .6, h: .6});
+        assert.equal(job.cropOverride.aspect, 640 / 360); assert.equal(job.cropOverride.manual, false); assert.equal(job.selected, true);
+        assert.equal(job.cropConfirmed, true); assert.equal(job.state, 'pending');
+      }
+      for (const id of ['done', 'manual']) assert.deepEqual(saved.find(job => job.id === id), before.batches.find(batch => batch.page === base).jobs.find(job => job.id === id));
+      assert.deepEqual(after.batches.find(batch => batch.page === other), before.batches.find(batch => batch.page === other));
+      await page.locator('#crop-reuse').click(); await page.locator('#crop-reuse-agree').check();
+      await page.evaluate(() => { window.cropRenderBatch = renderBatchJobs; renderBatchJobs = () => { throw Error('synthetic crop render failure'); }; });
+      await page.locator('#crop-reuse-apply').click(); await page.waitForFunction(() => !cropReuseWriting && $('status').textContent.includes('synthetic crop render failure'));
+      assert.match(await page.locator('#status').textContent(), /复用设置已保存.*界面更新失败/);
+      await page.evaluate(() => { renderBatchJobs = window.cropRenderBatch; });
+      assert.deepEqual((await stored()).batches, after.batches);
+      await page.reload(); await idle();
+      assert.deepEqual((await stored()).batches.find(batch => batch.page === base), after.batches.find(batch => batch.page === base));
+    });
+    await test('rediscovery retains overrides through signed URL refresh and stop or failure', async () => {
+      const first = await page.evaluate(async () => {
+        const original = structuredClone(batchJobs.filter(job => ['target', 'stopped', 'failed'].includes(job.id)).map(job => job.cropOverride));
+        const discovered = batchJobs.map(job => ({...job, url: job.url.replace('token=old', 'token=new'),
+          options: job.options.map(item => ({...item, url: item.url.replace('token=old', 'token=new')})), cropConfirmed: false, cropOverride: undefined, state: 'needs-crop'}));
+        chrome.tabs = {sendMessage: async () => ({ok: true, page: batchPage, jobs: discovered})};
+        chrome.permissions = {request: async () => true};
+        await discoverBatch(1);
+        const after = batchJobs.filter(job => ['target', 'stopped', 'failed'].includes(job.id));
+        window.cropScan = PPTScanner.prototype.scan; window.observedCrops = []; window.observedDimensions = [];
+        PPTScanner.prototype.scan = async function() { window.observedCrops.push({...crop}); window.observedDimensions.push([video.videoWidth, video.videoHeight]); $('stop').click(); throw new DOMException('synthetic stop', 'AbortError'); };
+        await runBatch(Promise.resolve(true));
+        PPTScanner.prototype.scan = window.cropScan;
+        return {original, overrides: after.map(job => job.cropOverride), confirmed: after.map(job => job.cropConfirmed), observed: window.observedCrops, dimensions: window.observedDimensions, target: batchJobs.find(job => job.id === 'target').state};
+      });
+      assert.deepEqual(first.overrides, first.original); assert.deepEqual(first.confirmed, [true, true, true]);
+      assert.deepEqual(first.observed, [{x: .1, y: .2, w: .6, h: .6}]); assert.equal(first.target, 'stopped');
+      assert.deepEqual(first.dimensions, [[320, 180]], 'normalized 640×360 source crop is reused on a real 320×180 target');
+      await page.reload(); await idle();
+      const second = await page.evaluate(async () => {
+        chrome.permissions = {request: async () => true};
+        const original = structuredClone(batchJobs.filter(job => ['target', 'stopped', 'failed'].includes(job.id)).map(job => job.cropOverride));
+        const scan = PPTScanner.prototype.scan; let calls = 0;
+        PPTScanner.prototype.scan = async function() { calls++; throw Error('synthetic extraction failure'); };
+        try { await runBatch(Promise.resolve(true)); } finally { PPTScanner.prototype.scan = scan; }
+        const jobs = batchJobs.filter(job => ['target', 'stopped', 'failed'].includes(job.id));
+        return {original, overrides: jobs.map(job => job.cropOverride), states: jobs.map(job => job.state), calls};
+      });
+      assert.deepEqual(second.overrides, second.original); assert.deepEqual(second.states, ['failed', 'failed', 'failed']); assert.equal(second.calls, 3);
+      await page.reload(); await idle();
+      assert.deepEqual(await page.evaluate(() => batchJobs.filter(job => ['target', 'stopped', 'failed'].includes(job.id)).map(job => job.cropOverride)), second.original);
+    });
+    await test('actual target loads reject mismatched aspect and identity to manual crop before any scan', async () => {
+      const result = await page.evaluate(async () => {
+        chrome.permissions = {request: async () => true};
+        const target = batchJobs.find(job => job.id === 'target'), stopped = batchJobs.find(job => job.id === 'stopped'), failed = batchJobs.find(job => job.id === 'failed');
+        target.cropOverride.aspect = 4 / 3;
+        stopped.cropOverride.track = PPTBatch.trackKey({...stopped, url: stopped.url.replace('id=stopped', 'id=other-recording')});
+        failed.cropOverride.crop = {x: .8, y: 0, w: .5, h: 1};
+        const expected = structuredClone([target, stopped, failed].map(job => job.cropOverride));
+        await persistBatch(); const scan = PPTScanner.prototype.scan; let calls = 0;
+        PPTScanner.prototype.scan = async () => { calls++; throw Error('must not scan'); };
+        try { await runBatch(Promise.resolve(true)); } finally { PPTScanner.prototype.scan = scan; }
+        return {calls, expected, jobs: [target, stopped, failed].map(job => ({state: job.state, confirmed: job.cropConfirmed, selected: job.selected, rejected: job.cropRejected, override: job.cropOverride}))};
+      });
+      assert.equal(result.calls, 0);
+      for (const [index, job] of result.jobs.entries()) {
+        assert.equal(job.state, 'needs-crop'); assert.equal(job.confirmed, false); assert.equal(job.selected, false); assert.equal(job.rejected, true);
+        assert.deepEqual(job.override, result.expected[index], 'invalid override retained for inspection and manual adjustment');
+      }
+      await page.reload(); await idle();
+      assert.deepEqual(await page.evaluate(() => batchJobs.filter(job => ['target', 'stopped', 'failed'].includes(job.id)).map(job => job.cropOverride)), result.expected);
+      const adjusted = await page.evaluate(async () => {
+        const job = batchJobs.find(job => job.id === 'target');
+        await prepareManualBatchJob(job, Promise.resolve(true));
+        await setComparisonRegion({x: .2, y: .1, w: .5, h: .7}, null, 'crop', true);
+        const scan = PPTScanner.prototype.scan; let observed;
+        PPTScanner.prototype.scan = async () => { observed = {...crop}; return {complete: true, suspects: []}; };
+        try { await fastScan(); } finally { PPTScanner.prototype.scan = scan; }
+        return {observed, override: job.cropOverride, confirmed: job.cropConfirmed, rejected: job.cropRejected};
+      });
+      assert.deepEqual(adjusted.observed, {x: .2, y: .1, w: .5, h: .7}); assert.equal(adjusted.override.manual, true);
+      assert.equal(adjusted.override.aspect, 640 / 360); assert.equal(adjusted.confirmed, true); assert.equal(adjusted.rejected, false);
+    });
+    await test('reopened crop adjustments belong to the saved batch independently of the displayed batch', async () => {
+      for (const sameCourse of [false, true]) {
+        const a = origin + '/study-capture-courses/42/preview-detail/a', b = sameCourse ? a.replace('/a', '/b') : a.replace('/42/', '/99/');
+        const url = origin + '/' + path.relative(root, fixture).split(path.sep).join('/');
+        const oldCrop = {x: .1, y: .1, w: .7, h: .7}, adjusted = {x: .2, y: .2, w: .5, h: .5};
+        const jobs = [a, b].map((page, index) => ({id: sameCourse ? 'job-' + index : 'shared', course, url: url + '?id=' + index, sourceName: '0-camera.mp4', requiresCrop: true,
+          state: 'pending', selected: true, cropConfirmed: true, options: [], cropOverride: {crop: oldCrop, aspect: 640 / 360, manual: false}}));
+        const savedLessons = [a, b].map((page, index) => lesson('owner-' + index, {page, crop: oldCrop, source: {kind: 'remote', batchJobId: jobs[index].id, page,
+          coursePage: page, url: jobs[index].url, sourceKey: 'url:' + jobs[index].url, sourceName: jobs[index].sourceName}}));
+        await seed({lessons: savedLessons, batches: [{page: a, jobs: [jobs[0]]}, {page: b, jobs: [jobs[1]]}]});
+        await page.evaluate(async () => {
+          chrome.permissions = {request: async () => true};
+          for (const snapshot of savedBatches) {
+            const job = snapshot.jobs[0]; job.cropOverride.track = PPTBatch.trackKey(job);
+            await PPTLibrary.batch(db, snapshot.page, snapshot.jobs);
+          }
+          batchJobs = structuredClone(savedBatches.find(item => item.page === batchPage).jobs);
+        });
+        await choose('owner-1'); await page.locator('#resume-load').click(); await page.waitForFunction(() => sourceReady && !busy());
+        assert.equal(await page.evaluate(async a => {
+          const active = activeBatchJob, jobs = structuredClone(batchJobs);
+          chrome.tabs = {sendMessage: async () => ({ok: true, page: a, jobs, total: jobs.length, eligible: jobs.length})};
+          await discoverBatch(1);
+          return activeBatchJob === active;
+        }, a), true, 'refreshing displayed A preserves loaded B ownership');
+        const before = await stored();
+        const retained = await page.evaluate(() => structuredClone(savedBatches));
+        assert.equal(await page.evaluate(() => batchPage), a, 'reopening B leaves displayed batch A intact');
+        await page.evaluate(async ({b, adjusted}) => {
+          const put = IDBObjectStore.prototype.put;
+          IDBObjectStore.prototype.put = function(value, key) {
+            if (this.name === 'settings' && key === 'batch:' + b) return this.add(value, 'lesson:' + activeLesson.id);
+            return put.call(this, value, key);
+          };
+          try { await setComparisonRegion(adjusted, null, 'adjusted', true); } finally { IDBObjectStore.prototype.put = put; }
+        }, {b, adjusted});
+        assert.match(await page.locator('#status').textContent(), /范围保存失败/);
+        assert.deepEqual(await stored(), before, 'owning-batch failure atomically rolls back lesson and both batches');
+        assert.deepEqual(await page.evaluate(() => savedBatches), retained, 'failed save does not publish the owning snapshot');
+        assert.deepEqual(await page.evaluate(() => crop), oldCrop);
+        await page.evaluate(async adjusted => {
+          await setComparisonRegion(adjusted, null, 'adjusted', true); saveLessonSettings(); await lessonSave;
+          const scan = PPTScanner.prototype.scan;
+          PPTScanner.prototype.scan = async () => ({saved: 0});
+          try { await fastScan(); } finally { PPTScanner.prototype.scan = scan; }
+        }, adjusted);
+        const saved = await stored();
+        assert.equal(saved.batches.find(item => item.page === b).jobs[0].state, 'done', 'manual scan status persists to B while A is displayed');
+        assert.deepEqual(saved.lessons.find(item => item.id === 'owner-1').crop, adjusted);
+        assert.deepEqual(saved.batches.find(item => item.page === b).jobs[0].cropOverride.crop, adjusted);
+        assert.deepEqual(saved.batches.find(item => item.page === a), before.batches.find(item => item.page === a));
+        assert.equal(await page.evaluate(() => batchPage), a);
+        await page.reload(); await idle(); await page.evaluate(() => { chrome.permissions = {request: async () => true}; });
+        await page.locator('#resume-load').click(); await page.waitForFunction(() => sourceReady && !busy());
+        assert.deepEqual(await page.evaluate(() => crop), adjusted);
+        assert.deepEqual((await stored()).batches.find(item => item.page === b).jobs[0].cropOverride.crop, adjusted);
+      }
+    });
+    await test('final manual preparation save failure retains the loaded zero-track crop guard', async () => {
+      for (const rejected of [false, true]) {
+        const base = origin + '/study-capture-courses/42/preview-detail/a';
+        const job = {id: 'guard', course, url: origin + '/' + path.relative(root, fixture).split(path.sep).join('/'), sourceName: '0-guard.mp4',
+          requiresCrop: true, cropConfirmed: false, state: 'needs-crop', selected: false, options: []};
+        await seed({batches: [{page: base, jobs: [job]}]});
+        const result = await page.evaluate(async rejected => {
+          const job = batchJobs[0];
+          if (rejected) job.cropOverride = {crop: {x: .1, y: .1, w: .5, h: .5}, aspect: 4 / 3, track: PPTBatch.trackKey(job), manual: false};
+          await persistBatch();
+          const save = PPTLibrary.batch, scan = PPTScanner.prototype.scan; let failures = 0, calls = 0;
+          PPTLibrary.batch = async (db, page, jobs) => {
+            if (jobs.some(item => item.state === 'manual')) { failures++; throw Error('final manual save failure'); }
+            return save(db, page, jobs);
+          };
+          try { await prepareManualBatchJob(job, Promise.resolve(true)); } finally { PPTLibrary.batch = save; }
+          const afterFailure = {ready: sourceReady, job: activeBatchJob && structuredClone(activeBatchJob), message: $('batch-status').textContent};
+          PPTScanner.prototype.scan = async () => { calls++; return {saved: 0}; };
+          try {
+            await fastScan(); const blocked = calls;
+            await setComparisonRegion({x: .2, y: .2, w: .5, h: .5}, null, 'explicit confirmation', true);
+            await fastScan();
+            return {failures, afterFailure, blocked, calls};
+          } finally { PPTScanner.prototype.scan = scan; }
+        }, rejected);
+        assert.equal(result.failures, 1); assert.match(result.afterFailure.message, /final manual save failure/);
+        assert.equal(result.blocked, 0, 'Start cannot enter scanner after only the final save fails');
+        assert.equal(result.afterFailure.ready, true); assert.equal(result.afterFailure.job.cropConfirmed, false);
+        assert.equal(Object.hasOwn(result.afterFailure.job, 'manualPrepared'), false, 'failed preparation does not publish new flags');
+        if (rejected) assert.equal(result.afterFailure.job.cropRejected, true);
+        assert.equal(result.calls, 1, 'explicit crop confirmation permits retry');
+        await page.reload(); await idle();
+        assert.deepEqual((await stored()).batches[0].jobs[0].cropOverride.crop, {x: .2, y: .2, w: .5, h: .5});
+      }
     });
     assert.deepEqual(errors, [], 'no browser script errors'); assert.deepEqual(blocked, [], 'no nonlocal network requests');
     fs.writeFileSync(path.join(output, 'results.json'), JSON.stringify({passed, errors, blocked, output}, null, 2));

@@ -63,7 +63,19 @@
     const status = String(schedule?.status || '').toUpperCase();
     return !!(schedule?.capture_code || schedule?.captureCode) && !['UPCOMING', 'TRANSCODING', 'LIVE', 'CANCELLED'].includes(status);
   }
-  const api = {courseId, schedules, selectVideo, fallbackVideos, job, eligible};
+  function trackKey(source) {
+    return root.PPTLibrary.key({sourceKey: source?.sourceKey || (source?.url ? 'url:' + source.url : ''), sourceName: source?.sourceName});
+  }
+  function zeroTrack(source) { return /(?:^|\/)0-[^/]+\.mp4(?:$|\?)/i.test(source?.sourceName || ''); }
+  function validCrop(rect) {
+    return !!rect && ['x', 'y', 'w', 'h'].every(key => Number.isFinite(rect[key])) && rect.x >= 0 && rect.y >= 0 && rect.w > 0 && rect.h > 0 && rect.x + rect.w <= 1 && rect.y + rect.h <= 1;
+  }
+  function cropMatches(override, source, aspect) {
+    return validCrop(override?.crop) && Number.isFinite(override.aspect) && override.aspect > 0 && Number.isFinite(aspect) && aspect > 0 && zeroTrack(source)
+      && override.track === trackKey(source) && Math.abs(aspect / override.aspect - 1) <= .01 + Number.EPSILON;
+  }
+  function automatic(job) { return !job.requiresCrop || !!(job.cropConfirmed && job.cropOverride && !job.cropRejected); }
+  const api = {courseId, schedules, selectVideo, fallbackVideos, job, eligible, trackKey, zeroTrack, validCrop, cropMatches, automatic};
   root.PPTBatch = api;
   if (typeof module !== 'undefined') module.exports = api;
 })(globalThis);

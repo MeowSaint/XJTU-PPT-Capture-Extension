@@ -10,7 +10,7 @@ const files = [
   'README.md', 'THIRD_PARTY_NOTICES.md', 'LICENSE', 'vendor/hls.min.js', 'vendor/hls.LICENSE',
   'icons/icon-16.png', 'icons/icon-32.png', 'icons/icon-48.png', 'icons/icon-128.png',
   'icons/browsers/chrome.svg', 'icons/browsers/edge.svg', 'icons/browsers/brave.svg',
-  'icons/browsers/LICENSE.txt', 'icons/logo-1024.png',
+  'icons/browsers/LICENSE.txt', 'icons/logo-1024.png', 'icons/readme-banner.svg',
 ];
 
 const crcTable = Array.from({ length: 256 }, (_, value) => {
