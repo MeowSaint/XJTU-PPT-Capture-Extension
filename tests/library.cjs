@@ -684,6 +684,76 @@ function zipEntries(bytes) {
       assert.deepEqual(saved.pages.map(page => page.id), [352]); assert.deepEqual(saved.assets.map(asset => asset.id), [352]);
       await page.locator('#library-close').click(); await page.reload(); await count(1);
     });
+    await test('crop reuse waits for pending naming before saving the source lesson and related batch', async () => {
+      const base = origin + '/study-capture-courses/42/preview-detail/naming', other = base.replace('/42/', '/99/');
+      const url = origin + '/' + path.relative(root, fixture).split(path.sep).join('/');
+      const jobs = ['naming-source', 'naming-target'].map((id, index) => ({id, course: {...course, date: `2026-11-${10 + index}`},
+        url: url + '?id=' + id, sourceName: '0-' + id + '.mp4', requiresCrop: true, selected: false, cropConfirmed: false,
+        state: 'needs-crop', options: [{url: url + '?id=' + id, sourceName: '0-' + id + '.mp4'}]}));
+      const retained = jobs.map(job => lesson(job.id, {course: job.course, page: base, namingManual: false,
+        source: {kind: 'remote', batchJobId: job.id, page: base, sourceKey: 'url:' + job.url, sourceName: job.sourceName}}));
+      const unrelated = lesson('naming-unrelated', {page: other, source: {kind: 'file', sourceKey: 'unrelated', page: other}});
+      await seed({lessons: [...retained, unrelated], pages: [{id: 601, lessonId: unrelated.id}],
+        batches: [{page: base, jobs}, {page: other, jobs: [{...jobs[1], id: 'unrelated-job'}]}]});
+      const expectedCrop = {x: .1, y: .2, w: .6, h: .6};
+      await page.evaluate(async ({base, expectedCrop}) => {
+        batchPage = base; batchJobs = structuredClone(savedBatches.find(batch => batch.page === base).jobs);
+        chrome.permissions = {request: async () => true}; renderBatchJobs();
+        await prepareManualBatchJob(batchJobs[0], Promise.resolve(true));
+        await setComparisonRegion(expectedCrop, null, 'crop', true);
+      }, {base, expectedCrop});
+      await settled();
+      const before = await stored(), sourceId = await page.evaluate(() => activeLesson.id);
+      const sourceBefore = before.lessons.find(item => item.id === sourceId);
+      assert.equal(sourceBefore.namingManual, false);
+      await page.evaluate(() => {
+        const original = IDBObjectStore.prototype.put;
+        IDBObjectStore.prototype.put = function(value, key) {
+          const request = original.call(this, value, key);
+          if (this.name === 'settings' && key === 'exportNaming') {
+            IDBObjectStore.prototype.put = original;
+            let held = true; window.releaseNaming = () => { held = false; };
+            const keepAlive = () => { if (held) this.get('exportNaming').onsuccess = keepAlive; };
+            keepAlive();
+          }
+          return request;
+        };
+      });
+      const renamed = {name: '手工修改后的模式识别', date: '2026-12-03', start: '14:25:00'};
+      try {
+        await page.locator('#tab-export').click();
+        // One real input event snapshots all fields; later queued renames must not mask a stale reuse write.
+        await page.locator('#course-date').evaluate((input, value) => { input.value = value; }, renamed.date);
+        await page.locator('#course-start').evaluate((input, value) => { input.value = value; }, renamed.start);
+        await page.locator('#course-name').fill(renamed.name);
+        await page.waitForFunction(() => !!window.releaseNaming);
+        assert.deepEqual(await page.evaluate(() => namingInfo()), renamed);
+        assert.deepEqual(await page.evaluate(() => ({course: activeLesson.course, namingManual: activeLesson.namingManual})),
+          {course: sourceBefore.course, namingManual: false}, 'queued naming writes have not published to the live lesson');
+        await page.locator('#tab-extraction').click(); await page.locator('#crop-reuse').click();
+        assert.match(await page.locator('#crop-reuse-summary').textContent(), /本课程 1 个课次/);
+        await page.locator('#crop-reuse-agree').check(); await page.locator('#crop-reuse-apply').click();
+        assert.equal(await page.evaluate(() => cropReuseWriting), true);
+        assert.equal(await page.locator('#crop-reuse-apply').isDisabled(), true);
+        assert.equal(await page.evaluate(() => batchJobs.find(job => job.id === 'naming-target').cropOverride), undefined,
+          'pending naming cannot publish a target crop override');
+      } finally { await page.evaluate(() => window.releaseNaming?.()); }
+      await settled();
+      const after = await stored(), sourceAfter = after.lessons.find(item => item.id === sourceId);
+      assert.deepEqual(sourceAfter, {...sourceBefore, course: renamed, namingManual: true});
+      assert.deepEqual(after.lessons.filter(item => item.id !== sourceId), before.lessons.filter(item => item.id !== sourceId));
+      assert.deepEqual(after.pages, before.pages); assert.deepEqual(after.assets, before.assets);
+      const expectedBatch = structuredClone(before.batches.find(item => item.page === base));
+      const target = expectedBatch.jobs.find(job => job.id === 'naming-target');
+      Object.assign(target, {cropOverride: {crop: expectedCrop, aspect: 640 / 360, track: await page.evaluate(() => PPTBatch.trackKey(batchJobs.find(job => job.id === 'naming-target'))), manual: false},
+        cropConfirmed: true, cropRejected: false, selected: true, state: 'pending', error: ''});
+      assert.deepEqual(after.batches.find(item => item.page === base), expectedBatch);
+      assert.deepEqual(after.batches.find(item => item.page === other), before.batches.find(item => item.page === other));
+      await page.reload(); await idle();
+      assert.deepEqual(await page.evaluate(() => ({course: activeLesson.course, namingManual: activeLesson.namingManual, input: namingInfo()})),
+        {course: renamed, namingManual: true, input: renamed});
+      assert.deepEqual(await stored(), after);
+    });
     await test('same-camera confirmation atomically reuses crop only for unfinished unprepared zero-track lessons', async () => {
       const base = origin + '/study-capture-courses/42/preview-detail/a', other = base.replace('/42/', '/99/');
       const url = origin + '/' + path.relative(root, fixture).split(path.sep).join('/');

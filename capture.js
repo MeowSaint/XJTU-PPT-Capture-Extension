@@ -1314,6 +1314,7 @@ $('crop-reuse-apply').onclick = async () => {
   cropReuseWriting = true; $('crop-reuse-apply').disabled = true; $('crop-reuse-cancel').disabled = true;
   let committed = false;
   try {
+    await namingSave; await lessonSave;
     const eligible = new Set(cropReuseTargets().map(job => job.id));
     const jobs = batchJobs.map(job => !eligible.has(job.id) || !cropReusePlan.ids.includes(job.id) ? structuredClone(job) : {...structuredClone(job),
       cropOverride: {crop: {...cropReusePlan.crop}, aspect: cropReusePlan.aspect, track: PPTBatch.trackKey(job), manual: false},
