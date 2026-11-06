@@ -22,7 +22,7 @@ const dbReady = PPTPageStore.open({blocked: () => status('请先关掉其他已�
   if (activeLesson) applyLesson();
   else { namingManual = !!saved.naming?.manual; setNaming(saved.naming?.course || sourceCourse, saved.naming?.page || sourceCoursePage); }
   const batch = savedBatches.find(item => item.page === activeLesson?.page) || savedBatches[0];
-  if (batch) { batchPage = batch.page; batchJobs = batch.jobs; renderBatchJobs(); }
+  if (batch) { batchPage = batch.page; batchJobs = structuredClone(batch.jobs); renderBatchJobs(); }
   ready = true; render(); renderLibrary(); controls();
 });
 dbReady.then(() => status('已恢复保存的课次和任务。选择课次后重新加载原视频，即可继续提取或复核。')).catch(e => status('本地存储不可用：' + e.message));
@@ -52,11 +52,13 @@ function applyLesson() {
   $('mode').value = String(settings.step); $('diff').value = settings.threshold; $('dedupe').checked = settings.dedupe; $('stable').value = settings.stable;
   selectedPages.clear(); previewPageId = null; last = candidate = null; candidateSince = 0; cancelSelection();
 }
-function persistLesson(lesson = activeLesson) {
+function persistLesson(lesson = activeLesson, relatedBatch = null) {
   if (!lesson) return Promise.resolve();
   if (lesson === activeLesson) Object.assign(lesson, {course: namingInfo(), page: namingPage || lesson.page || '', namingManual, settings: scanSettings(), crop: {...crop}, ignoreRect: ignoreRect && {...ignoreRect}});
-  const snapshot = structuredClone(lesson);
-  lessonSave = lessonSave.catch(() => {}).then(() => PPTLibrary.put(db, snapshot));
+  const snapshot = structuredClone(lesson), batchSnapshot = relatedBatch && structuredClone(relatedBatch);
+  lessonSave = lessonSave.catch(() => {}).then(() => PPTLibrary.put(db, snapshot, batchSnapshot)).then(() => {
+    if (batchSnapshot) retainBatch(batchSnapshot);
+  });
   return lessonSave;
 }
 function saveLessonSettings() {
@@ -126,11 +128,14 @@ function renderLibrary() {
   }
   $('suspects-count').textContent = `待复核时间段 · ${activeLesson?.suspects?.length || 0}`;
 }
+function retainBatch(snapshot) {
+  const existing = savedBatches.findIndex(item => item.page === snapshot.page);
+  if (existing < 0) savedBatches.push(snapshot); else savedBatches[existing] = snapshot;
+}
 function persistBatch() {
   if (!batchPage) return Promise.resolve();
-  const snapshot = structuredClone({page: batchPage, jobs: batchJobs}), existing = savedBatches.findIndex(item => item.page === batchPage);
-  if (existing < 0) savedBatches.push(snapshot); else savedBatches[existing] = snapshot;
-  return PPTLibrary.batch(db, snapshot.page, snapshot.jobs);
+  const snapshot = structuredClone({page: batchPage, jobs: batchJobs});
+  return PPTLibrary.batch(db, snapshot.page, snapshot.jobs).then(() => retainBatch(snapshot));
 }
 function syncWorkspace() {
   const selected = sources.find(source => source.url === $('sources').value);
@@ -621,19 +626,27 @@ function startSelection(mode) {
   controls(); draw(); status(selectionMode ? `请框选${mode === 'ignore' ? '忽略区' : 'PPT 区域'}；可拖动或用方向键，Enter 确认，Esc 取消。` : '已取消框选。');
 }
 async function setComparisonRegion(nextCrop, nextIgnore, message, confirmCrop = false) {
-  const previous = {crop, ignoreRect, lesson: activeLesson && structuredClone(activeLesson), confirmed: activeBatchJob?.cropConfirmed};
+  const previous = {crop, ignoreRect, lesson: activeLesson && structuredClone(activeLesson), confirmed: activeBatchJob?.cropConfirmed,
+    hadConfirmed: activeBatchJob && Object.hasOwn(activeBatchJob, 'cropConfirmed')};
   const cleared = !sameCrop(crop, nextCrop) && !!ignoreRect;
   crop = {...nextCrop}; ignoreRect = nextIgnore && {...nextIgnore};
   last = candidate = null; candidateSince = 0; cancelSelection(); releaseDedupeContext();
   if (confirmCrop && activeBatchJob?.requiresCrop) activeBatchJob.cropConfirmed = true;
   reviewBusy = true; controls(); draw();
   try {
-    await persistLesson(); if (activeBatchJob?.requiresCrop) await persistBatch();
+    const relatedBatch = confirmCrop && activeBatchJob?.requiresCrop && batchPage ? {page: batchPage, jobs: batchJobs} : null;
+    await persistLesson(activeLesson, relatedBatch);
     status(message + (cleared ? ' 裁剪已变化，旧忽略区已清除，请重新设置。' : ''));
   } catch (error) {
     crop = previous.crop; ignoreRect = previous.ignoreRect;
-    if (activeLesson && previous.lesson) Object.assign(activeLesson, previous.lesson);
-    if (activeBatchJob) activeBatchJob.cropConfirmed = previous.confirmed;
+    if (activeLesson && previous.lesson) {
+      for (const key of Object.keys(activeLesson)) if (!Object.hasOwn(previous.lesson, key)) delete activeLesson[key];
+      Object.assign(activeLesson, previous.lesson);
+    }
+    if (activeBatchJob) {
+      if (previous.hadConfirmed) activeBatchJob.cropConfirmed = previous.confirmed;
+      else delete activeBatchJob.cropConfirmed;
+    }
     status('范围保存失败，已恢复原设置：' + error.message);
   } finally { reviewBusy = false; controls(); draw(); renderLibrary(); }
 }

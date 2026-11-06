@@ -220,6 +220,74 @@ async function test(name, run) { await run(); passed++; console.log('PASS ' + na
       });
       assert.deepEqual(result, {unchanged: true, changed: false});
     });
+    await test('legacy lesson failure restores its exact property set and leaves ignore-only batch state untouched', async () => {
+      const result = await page.evaluate(async () => {
+        activeLesson = {id: 'legacy-failure', course: {}, suspects: []}; lessons.push(activeLesson); applyLesson();
+        await PPTLibrary.put(db, activeLesson); await PPTLibrary.activate(db, activeLesson.id);
+        batchPage = 'synthetic-course'; batchJobs = [{id: 'manual', requiresCrop: true, course: {}, options: [], sourceName: 'synthetic', state: 'needs-crop'}]; activeBatchJob = batchJobs[0];
+        await persistBatch();
+        const before = structuredClone(activeLesson), batches = structuredClone(savedBatches), job = structuredClone(activeBatchJob);
+        const put = PPTLibrary.put, batch = PPTLibrary.batch; let batchWrites = 0;
+        PPTLibrary.put = async () => { throw Error('synthetic legacy failure'); };
+        PPTLibrary.batch = async () => { batchWrites++; };
+        try { await setComparisonRegion(crop, {x: .2, y: .2, w: .3, h: .3}, 'ignore'); }
+        finally { PPTLibrary.put = put; PPTLibrary.batch = batch; }
+        return {before, after: activeLesson, batches, afterBatches: savedBatches, job, afterJob: activeBatchJob,
+          ignore: ignoreRect, batchWrites, message: $('status').textContent};
+      });
+      assert.deepEqual(result.after, result.before); assert.equal(Object.hasOwn(result.after, 'ignoreRect'), false);
+      assert.deepEqual(result.afterBatches, result.batches); assert.deepEqual(result.afterJob, result.job);
+      assert.equal(result.ignore, null); assert.equal(result.batchWrites, 0); assert.match(result.message, /synthetic legacy failure/);
+      await page.reload(); await page.waitForFunction(() => ready);
+      assert.deepEqual(await page.evaluate(() => activeLesson), result.before);
+    });
+    await test('batch request failure atomically rolls back lesson and confirmation in live and reloaded state', async () => {
+      const result = await page.evaluate(async () => {
+        activeBatchJob = batchJobs[0];
+        const before = {lesson: structuredClone(activeLesson), batches: structuredClone(savedBatches), job: structuredClone(activeBatchJob), crop: {...crop}, ignore: ignoreRect};
+        const put = IDBObjectStore.prototype.put; let lessonSucceeded = 0, batchFailed = 0;
+        IDBObjectStore.prototype.put = function(value, key) {
+          // A duplicate-key add fails asynchronously, after the preceding lesson put succeeds.
+          if (this.name === 'settings' && key === 'batch:' + batchPage) {
+            const request = this.add(value, 'lesson:' + activeLesson.id);
+            request.addEventListener('error', () => { batchFailed++; }); return request;
+          }
+          const request = put.call(this, value, key);
+          if (this.name === 'settings' && key === 'lesson:' + activeLesson.id) request.addEventListener('success', () => { lessonSucceeded++; });
+          return request;
+        };
+        try { await setComparisonRegion({x: .1, y: .1, w: .8, h: .8}, null, 'crop', true); }
+        finally { IDBObjectStore.prototype.put = put; }
+        return {before, after: {lesson: activeLesson, batches: savedBatches, job: activeBatchJob, crop, ignore: ignoreRect},
+          lessonSucceeded, batchFailed, message: $('status').textContent};
+      });
+      assert.equal(result.lessonSucceeded, 1); assert.equal(result.batchFailed, 1);
+      assert.deepEqual(result.after, result.before); assert.match(result.message, /范围保存失败/);
+      await page.reload(); await page.waitForFunction(() => ready);
+      assert.deepEqual(await page.evaluate(() => ({lesson: activeLesson, batches: savedBatches, job: batchJobs[0], crop, ignore: ignoreRect})), result.before);
+      const success = await page.evaluate(async () => {
+        activeBatchJob = batchJobs[0];
+        await setComparisonRegion({x: .1, y: .1, w: .8, h: .8}, null, 'crop', true);
+        return {lesson: activeLesson, batches: savedBatches, job: activeBatchJob, crop, ignore: ignoreRect};
+      });
+      assert.deepEqual(success.crop, {x: .1, y: .1, w: .8, h: .8}); assert.equal(success.job.cropConfirmed, true);
+      assert.equal(success.batches.find(item => item.page === 'synthetic-course').jobs[0].cropConfirmed, true);
+      await page.reload(); await page.waitForFunction(() => ready);
+      assert.deepEqual(await page.evaluate(() => ({lesson: activeLesson, batches: savedBatches, job: batchJobs[0], crop, ignore: ignoreRect})), success);
+    });
+    await test('standalone batch failure preserves the last successfully retained snapshot', async () => {
+      const result = await page.evaluate(async () => {
+        const before = structuredClone(savedBatches), original = PPTLibrary.batch; let error;
+        batchJobs[0].cropConfirmed = false;
+        PPTLibrary.batch = async () => { throw Error('synthetic batch failure'); };
+        try { await persistBatch(); } catch (failure) { error = failure.message; }
+        finally { PPTLibrary.batch = original; }
+        return {before, after: savedBatches, error};
+      });
+      assert.deepEqual(result.after, result.before); assert.equal(result.error, 'synthetic batch failure');
+      await page.reload(); await page.waitForFunction(() => ready);
+      assert.deepEqual(await page.evaluate(() => savedBatches), result.before);
+    });
     assert.deepEqual(blocked, []); console.log(`${passed} focused improvement groups passed; no external requests.`);
   } finally { await browser?.close(); if (server) await new Promise(resolve => server.close(resolve)); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

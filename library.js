@@ -46,9 +46,13 @@
       try { result = action(tx); } catch (error) { tx.abort(); reject(error); }
     });
   }
-  function put(db, lesson) {
-    const snapshot = structuredClone(lesson);
-    return transaction(db, ['settings'], tx => { tx.objectStore('settings').put(snapshot, 'lesson:' + snapshot.id); });
+  function put(db, lesson, relatedBatch = null) {
+    const snapshot = structuredClone(lesson), batchSnapshot = relatedBatch && structuredClone(relatedBatch);
+    return transaction(db, ['settings'], tx => {
+      const settings = tx.objectStore('settings');
+      settings.put(snapshot, 'lesson:' + snapshot.id);
+      if (batchSnapshot) settings.put(batchSnapshot, 'batch:' + batchSnapshot.page);
+    });
   }
   function activate(db, id) {
     return transaction(db, ['settings'], tx => { tx.objectStore('settings').put(id, 'activeLesson'); });

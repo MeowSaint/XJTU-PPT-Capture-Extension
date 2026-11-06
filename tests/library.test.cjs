@@ -33,6 +33,36 @@ test('interrupted task states and crop settings are restored without mutating st
   assert.equal(library.recover({...input,task: {...input.task,state: 'done'}}).task.state, 'done');
 });
 
+test('lesson writes remain compatible and optional batch snapshots share one settings transaction', async () => {
+  for (const withBatch of [false, true]) {
+    const writes = [], transactions = []; let tx;
+    const db = {transaction(stores, mode) {
+      transactions.push({stores, mode});
+      return tx = {objectStore(name) { assert.equal(name, 'settings'); return {put(value, key) { writes.push({value, key}); }}; }};
+    }};
+    const lesson = {id: 'one', crop: {x: .1}}, batch = {page: 'local-course', jobs: [{id: 'job', cropConfirmed: true}]};
+    const pending = withBatch ? library.put(db, lesson, batch) : library.put(db, lesson);
+    let complete = false; pending.then(() => { complete = true; });
+    lesson.crop.x = .9; batch.jobs[0].cropConfirmed = false;
+    await Promise.resolve(); assert.equal(complete, false);
+    assert.deepEqual(transactions, [{stores: ['settings'], mode: 'readwrite'}]);
+    assert.deepEqual(writes, [{key: 'lesson:one', value: {id: 'one', crop: {x: .1}}},
+      ...(withBatch ? [{key: 'batch:local-course', value: {page: 'local-course', jobs: [{id: 'job', cropConfirmed: true}]}}] : [])]);
+    tx.oncomplete(); await pending; assert.equal(complete, true);
+  }
+});
+
+test('a related batch write exception aborts the lesson transaction and rejects', async () => {
+  let aborted = false, transactions = 0;
+  const failure = Error('batch write failed');
+  const db = {transaction() {
+    transactions++;
+    return {abort() { aborted = true; }, objectStore() { return {put(_value, key) { if (key.startsWith('batch:')) throw failure; }}; }};
+  }};
+  await assert.rejects(library.put(db, {id: 'one'}, {page: 'local-course', jobs: []}), error => error === failure);
+  assert.equal(aborted, true); assert.equal(transactions, 1);
+});
+
 test('suspect ranges merge overlapping intervals, ignore invalid bounds and keep chronological order', () => {
   assert.deepEqual(library.mergeRanges([{start: 5,end: 7,time: 6},{start: 1,end: 2,time: 1}], {start: 1.5,end: 3,time: 2}), [{start: 1,end: 3,time: 1},{start: 5,end: 7,time: 6}]);
   assert.deepEqual(library.mergeRanges([], {start: NaN,end: 5,time: 4}), []);
