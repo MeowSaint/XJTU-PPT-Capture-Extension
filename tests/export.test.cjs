@@ -373,6 +373,374 @@ test('streaming ZIP accepts 65535 entries and rejects 65536 before reads or writ
   }), /ZIP32.*(limit|overflow)/i);
 });
 
+// Parse the central directory and each local record independently; descriptors end
+// at the next recorded local offset, rather than trusting their reported sizes.
+function readCourseZIP(bytes) {
+  const end = bytes.length - 22;
+  assert.equal(bytes.readUInt32LE(end), 0x06054b50);
+  assert.equal(bytes.readUInt32LE(end + 4), 0);
+  assert.equal(bytes.readUInt16LE(end + 20), 0);
+  const count = bytes.readUInt16LE(end + 10), directory = bytes.readUInt32LE(end + 16);
+  assert.equal(bytes.readUInt16LE(end + 8), count);
+  assert.equal(directory + bytes.readUInt32LE(end + 12), end);
+  const entries = [];
+  let central = directory;
+  for (let i = 0; i < count; i++) {
+    assert.equal(bytes.readUInt32LE(central), 0x02014b50);
+    assert.equal(bytes.readUInt16LE(central + 4), 20);
+    assert.equal(bytes.readUInt16LE(central + 6), 20);
+    assert.equal(bytes.readUInt16LE(central + 8), 0x0808);
+    assert.equal(bytes.readUInt16LE(central + 10), 0);
+    assert.equal(bytes.readUInt16LE(central + 12), 0);
+    assert.equal(bytes.readUInt16LE(central + 14), 33);
+    const size = bytes.readUInt32LE(central + 20), nameSize = bytes.readUInt16LE(central + 28);
+    assert.equal(bytes.readUInt32LE(central + 24), size);
+    assert.equal(bytes.readUInt16LE(central + 30), 0);
+    assert.equal(bytes.readUInt16LE(central + 32), 0);
+    assert.equal(bytes.readUInt16LE(central + 34), 0);
+    assert.equal(bytes.readUInt16LE(central + 36), 0);
+    assert.equal(bytes.readUInt32LE(central + 38), 0);
+    const nameBytes = bytes.subarray(central + 46, central + 46 + nameSize);
+    entries.push({name: nameBytes.toString('utf8'), nameBytes, size,
+      checksum: bytes.readUInt32LE(central + 16), offset: bytes.readUInt32LE(central + 42)});
+    central += 46 + nameSize;
+  }
+  assert.equal(central, end);
+  let offset = 0;
+  for (const [i, entry] of entries.entries()) {
+    assert.equal(entry.offset, offset);
+    assert.equal(bytes.readUInt32LE(offset), 0x04034b50);
+    assert.equal(bytes.readUInt16LE(offset + 4), 20);
+    assert.equal(bytes.readUInt16LE(offset + 6), 0x0808);
+    assert.equal(bytes.readUInt16LE(offset + 8), 0);
+    assert.equal(bytes.readUInt16LE(offset + 10), 0);
+    assert.equal(bytes.readUInt16LE(offset + 12), 33);
+    assert.equal(bytes.readUInt32LE(offset + 14), 0);
+    assert.equal(bytes.readUInt32LE(offset + 18), 0);
+    assert.equal(bytes.readUInt32LE(offset + 22), 0);
+    assert.equal(bytes.readUInt16LE(offset + 26), entry.nameBytes.length);
+    assert.equal(bytes.readUInt16LE(offset + 28), 0);
+    const start = offset + 30 + entry.nameBytes.length;
+    assert.deepEqual(bytes.subarray(offset + 30, start), entry.nameBytes);
+    offset = entries[i + 1]?.offset ?? directory;
+    const descriptor = offset - 16;
+    entry.data = bytes.subarray(start, descriptor);
+    assert.equal(bytes.readUInt32LE(descriptor), 0x08074b50);
+    assert.equal(bytes.readUInt32LE(descriptor + 4), crc32(entry.data));
+    assert.equal(bytes.readUInt32LE(descriptor + 8), entry.data.length);
+    assert.equal(bytes.readUInt32LE(descriptor + 12), entry.data.length);
+    assert.equal(entry.checksum, crc32(entry.data));
+    assert.equal(entry.size, entry.data.length);
+  }
+  assert.equal(offset, directory);
+  return entries;
+}
+
+for (const layout of ['single', 'handout']) {
+  test(`course ZIP stores ordered Chinese PDF members with ${layout} layout and skips empty lessons`, async () => {
+    const api = exportsWith();
+    assert.equal(typeof api.writeCourseZIP, 'function');
+    const originals = [[page(), page(1, 3, 7), page(2)], [page(3, 3, 7)]];
+    const lessons = [
+      {name: '001-第一课 绪论.pdf', pages: []},
+      {name: '001-第一课 绪论.pdf', pages: metadata(originals[0])},
+      {name: '空课次', pages: []},
+      {name: '002-第九课.PDF', pages: metadata(originals[1])},
+      {name: '末尾空课次', pages: []}
+    ];
+    const expectedReads = lessons.flatMap(lesson => lesson.pages), reads = [], chunks = [];
+    const result = await api.writeCourseZIP(lessons, {
+      ...(layout === 'handout' ? {layout} : {}),
+      async readImage(p) {
+        assert.equal(p, expectedReads[reads.length]);
+        reads.push(p);
+        return Uint8Array.from(jpeg);
+      },
+      async write(chunk) { chunks.push(Buffer.from(chunk)); }
+    });
+    assert.equal(result, undefined);
+    assert.deepEqual(reads, expectedReads);
+    const entries = readCourseZIP(Buffer.concat(chunks));
+    assert.deepEqual(entries.map(entry => entry.name), ['001-第一课 绪论.pdf', '002-第九课.PDF']);
+    for (const [i, entry] of entries.entries()) {
+      const pdf = await PDFDocument.load(entry.data);
+      assert.equal(pdf.getPageCount(), Math.ceil(originals[i].length / (layout === 'handout' ? 2 : 1)));
+      for (const [j, sheet] of pdf.getPages().entries()) {
+        assert.deepEqual(sheet.getSize(), layout === 'handout' ? {width: 595, height: 842}
+          : {width: 842, height: 842 * originals[i][j].h / originals[i][j].w});
+      }
+      assert.deepEqual(entry.data, Buffer.from(await api.makePDF(originals[i], {layout}).arrayBuffer()));
+    }
+  });
+}
+
+test('course ZIP preserves safe names and resolves sanitized and duplicate names without taking unique names', async () => {
+  const {writeCourseZIP} = exportsWith();
+  assert.equal(typeof writeCourseZIP, 'function');
+  const names = ['001-中文 课次.pdf', '重复.pdf', '重复.pdf', '重复 (2).pdf', '../坏\\名?.pdf',
+    'CON.pdf', ' . ', '尾点. ', 'chapter', '终章.PDF', '控制\0\t\n符.pdf', 'chapter.pdf'];
+  const chunks = [];
+  await writeCourseZIP(names.map(name => ({name, pages: [page()]})), {
+    async readImage() { return Uint8Array.from(jpeg); },
+    async write(chunk) { chunks.push(Buffer.from(chunk)); }
+  });
+  const entries = readCourseZIP(Buffer.concat(chunks));
+  assert.deepEqual(entries.map(entry => entry.name), ['001-中文 课次.pdf', '重复.pdf', '重复 (3).pdf',
+    '重复 (2).pdf', '.._坏_名_.pdf', '_CON.pdf', 'lesson.pdf', '尾点.pdf', 'chapter.pdf',
+    '终章.PDF', '控制___符.pdf', 'chapter (2).pdf']);
+  assert.equal(new Set(entries.map(entry => entry.name)).size, entries.length);
+  for (const entry of entries) {
+    assert.doesNotMatch(entry.name, /[\\/<>:"|?*\u0000-\u001f\u007f]|[ .]$/);
+    assert.equal((await PDFDocument.load(entry.data)).getPageCount(), 1);
+  }
+});
+
+test('course ZIP writes a valid empty archive and counts only nonempty lessons', async () => {
+  const {writeCourseZIP} = exportsWith();
+  assert.equal(typeof writeCourseZIP, 'function');
+  const lessons = Array.from({length: 65536}, () => ({name: 'empty', pages: []})), chunks = [];
+  await writeCourseZIP(lessons, {
+    async readImage() { assert.fail('empty lessons must not read images'); },
+    async write(chunk) { chunks.push(Buffer.from(chunk)); }
+  });
+  assert.equal(Buffer.concat(chunks).length, 22);
+  assert.deepEqual(readCourseZIP(Buffer.concat(chunks)), []);
+});
+
+for (const layout of ['single', 'handout']) {
+  test(`course ZIP ${layout} waits for each asynchronous operation and writes JPEGs directly`, {timeout: 5000}, async () => {
+    const {writeCourseZIP} = exportsWith({
+      Blob: class { constructor() { assert.fail('course ZIP must not collect a PDF Blob'); } },
+      atob() { assert.fail('course ZIP must use readImage'); }
+    });
+    assert.equal(typeof writeCourseZIP, 'function');
+    const pages = metadata([page(), page(1), page(2), page(3), page(4)]), pending = [], events = [];
+    const lessons = [{name: '第一节', pages: pages.slice(0, 3)}, {name: 'empty', pages: []},
+      {name: '第二节', pages: pages.slice(3)}];
+    let image = null, reads = 0, payloads = 0, finished = false;
+    const exporting = writeCourseZIP(lessons, {
+      layout,
+      readImage(p) {
+        assert.equal(image, null, 'the previous JPEG must reach the outer writer before the next read');
+        assert.equal(p, pages[reads++]);
+        image = Uint8Array.of(255, p.id, 0, 128);
+        events.push('read');
+        return new Promise(resolve => pending.push(() => resolve(image)));
+      },
+      write(chunk) {
+        assert.ok(chunk instanceof Uint8Array);
+        events.push('write');
+        return new Promise(resolve => pending.push(() => {
+          if (chunk === image) { image = null; payloads++; }
+          resolve();
+        }));
+      }
+    });
+    exporting.then(() => { finished = true; }, () => { finished = true; });
+    while (!finished) {
+      await nextTurn();
+      if (finished) break;
+      assert.equal(pending.length, 1, 'only one read or write may be in flight');
+      const count = events.length;
+      await nextTurn();
+      assert.equal(events.length, count, 'a pending operation must stop PDF and ZIP generation');
+      pending.shift()();
+    }
+    await exporting;
+    assert.equal(pending.length, 0);
+    assert.equal(reads, pages.length);
+    assert.equal(payloads, pages.length);
+    assert.equal(image, null);
+  });
+}
+
+test('course ZIP streams 1000 metadata-only pages across lessons one JPEG at a time', async () => {
+  const {writeCourseZIP} = exportsWith();
+  assert.equal(typeof writeCourseZIP, 'function');
+  const pages = Array.from({length: 1000}, (_, id) => ({id, w: 7, h: 3}));
+  let image = null, reads = 0, payloads = 0, writing = false;
+  await writeCourseZIP([{name: 'first', pages: pages.slice(0, 700)}, {name: 'second', pages: pages.slice(700)}], {
+    async readImage(p) {
+      assert.equal(writing, false);
+      assert.equal(image, null, 'no JPEG read-ahead or whole-PDF buffering');
+      assert.equal(p, pages[reads++]);
+      await Promise.resolve();
+      image = Uint8Array.of(p.id & 255, 0, 255);
+      return image;
+    },
+    async write(chunk) {
+      assert.equal(writing, false);
+      writing = true;
+      await Promise.resolve();
+      if (chunk === image) { image = null; payloads++; }
+      writing = false;
+    }
+  });
+  assert.equal(reads, 1000);
+  assert.equal(payloads, 1000);
+  assert.equal(image, null);
+});
+
+for (const failAt of ['read', 'local write', 'image write', 'descriptor write', 'central write', 'final write']) {
+  test(`course ZIP propagates ${failAt} errors and stops`, async () => {
+    const {writeCourseZIP} = exportsWith();
+    assert.equal(typeof writeCourseZIP, 'function');
+    const pages = metadata([page(), page(1), page(2), page(3), page(4)]);
+    const failure = new Error(`${failAt} failed`);
+    let image, reads = 0, writes = 0;
+    await assert.rejects(writeCourseZIP([{name: 'first', pages: pages.slice(0, 3)},
+      {name: 'second', pages: pages.slice(3)}], {
+      async readImage(p) {
+        reads++;
+        await Promise.resolve();
+        if (failAt === 'read' && p.id === 1) throw failure;
+        image = Uint8Array.of(p.id, 255);
+        return image;
+      },
+      async write(chunk) {
+        writes++;
+        await Promise.resolve();
+        const signature = chunk.byteLength >= 4 ? new DataView(chunk.buffer, chunk.byteOffset, chunk.byteLength).getUint32(0, true) : 0;
+        if ((failAt === 'local write' && signature === 0x04034b50)
+          || (failAt === 'image write' && chunk === image)
+          || (failAt === 'descriptor write' && signature === 0x08074b50)
+          || (failAt === 'central write' && signature === 0x02014b50)
+          || (failAt === 'final write' && signature === 0x06054b50)) throw failure;
+      }
+    }), error => error === failure);
+    assert.equal(reads, {'read': 2, 'local write': 0, 'image write': 1, 'descriptor write': 3,
+      'central write': 5, 'final write': 5}[failAt]);
+    const stopped = {reads, writes};
+    await nextTurn();
+    assert.deepEqual({reads, writes}, stopped);
+  });
+}
+
+// Size the existing PDF stream using zero-allocation JPEG stand-ins.
+async function imageSizeForPDF(api, target) {
+  let size = target;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    let length = 0;
+    await api.writePDF([{w: 7, h: 3}], {
+      async readImage() { return sizedImage(size); },
+      async write(chunk) { length += chunk.length; }
+    });
+    if (length === target) return size;
+    size += target - length;
+  }
+  assert.fail('PDF size calculation must converge');
+}
+
+test('course ZIP accepts the exact ZIP32 byte limit and rejects oversized chunks before CRC or payload writes', async () => {
+  const api = exportsWith();
+  assert.equal(typeof api.writeCourseZIP, 'function');
+  const max = 0xffffffff, name = '课次.pdf', nameSize = Buffer.byteLength(name);
+  const pdfSize = max - (30 + nameSize) - 16 - (46 + nameSize) - 22;
+  const imageSize = await imageSizeForPDF(api, pdfSize), image = sizedImage(imageSize), headers = [];
+  let length = 0;
+  await api.writeCourseZIP([{name, pages: [{w: 7, h: 3}]}], {
+    async readImage() { return image; },
+    async write(chunk) {
+      length += chunk.length;
+      if (chunk !== image && chunk.byteLength >= 4) {
+        const signature = new DataView(chunk.buffer, chunk.byteOffset, chunk.byteLength).getUint32(0, true);
+        if ([0x04034b50, 0x08074b50, 0x02014b50, 0x06054b50].includes(signature)) headers.push(Buffer.from(chunk));
+      }
+    }
+  });
+  assert.equal(length, max);
+  assert.equal(headers.length, 4);
+  assert.equal(headers[0].readUInt32LE(18), 0);
+  assert.equal(headers[1].readUInt32LE(8), pdfSize);
+  assert.equal(headers[2].readUInt32LE(20), pdfSize);
+  assert.equal(headers[2].readUInt32LE(42), 0);
+  assert.equal(headers[3].readUInt32LE(16), 30 + nameSize + pdfSize + 16);
+  assert.equal(headers[3].readUInt32LE(12), 46 + nameSize);
+  const oneByteOver = sizedImage(imageSize + 1);
+  let wroteEnd = false;
+  await assert.rejects(api.writeCourseZIP([{name, pages: [{w: 7, h: 3}]}], {
+    async readImage() { return oneByteOver; },
+    async write(chunk) {
+      if (chunk !== oneByteOver && chunk.byteLength >= 4
+        && new DataView(chunk.buffer, chunk.byteOffset, chunk.byteLength).getUint32(0, true) === 0x06054b50) wroteEnd = true;
+    }
+  }), /ZIP32.*(limit|overflow)/i);
+  assert.equal(wroteEnd, false, 'overflow must not produce a completed archive');
+  for (const size of [max, max + 1]) {
+    const oversized = sizedImage(size);
+    oversized[Symbol.iterator] = () => { assert.fail('overflow must precede CRC iteration'); };
+    await assert.rejects(api.writeCourseZIP([{name, pages: [{w: 7, h: 3}]}], {
+      async readImage() { return oversized; },
+      async write(chunk) { assert.notEqual(chunk, oversized, 'overflow must precede the payload write'); }
+    }), /ZIP32.*(limit|overflow)/i);
+  }
+});
+
+test('course ZIP reserves all local headers, descriptors and central records before consuming remaining space', async () => {
+  const api = exportsWith();
+  assert.equal(typeof api.writeCourseZIP, 'function');
+  const nameSize = Buffer.byteLength('a.pdf');
+  const pdfSize = 0xffffffff - 2 * (30 + nameSize + 16 + 46 + nameSize) - 22 - 1;
+  const image = sizedImage(await imageSizeForPDF(api, pdfSize));
+  let reads = 0, descriptors = 0;
+  await assert.rejects(api.writeCourseZIP([{name: 'a.pdf', pages: [{w: 7, h: 3}]},
+    {name: 'b.pdf', pages: [{w: 7, h: 3}]}], {
+    async readImage() { reads++; return image; },
+    async write(chunk) {
+      if (chunk !== image && chunk.byteLength >= 4
+        && new DataView(chunk.buffer, chunk.byteOffset, chunk.byteLength).getUint32(0, true) === 0x08074b50) descriptors++;
+    }
+  }), /ZIP32.*(limit|overflow)/i);
+  assert.equal(reads, 1, 'second PDF must fail before reading another JPEG');
+  assert.equal(descriptors, 1);
+});
+
+test('course ZIP checks UTF-8 filename lengths and minimum archive totals before I/O', async () => {
+  const api = exportsWith();
+  assert.equal(typeof api.writeCourseZIP, 'function');
+  const name = '中'.repeat(21843) + 'aa.pdf'; // Exactly 65535 UTF-8 bytes.
+  const chunks = [];
+  await api.writeCourseZIP([{name, pages: [page()]}], {
+    async readImage() { return Uint8Array.from(jpeg); },
+    async write(chunk) { chunks.push(Buffer.from(chunk)); }
+  });
+  assert.equal(readCourseZIP(Buffer.concat(chunks))[0].name, name);
+  const noIO = {
+    async readImage() { assert.fail('metadata overflow must precede image reads'); },
+    async write() { assert.fail('metadata overflow must precede writes'); }
+  };
+  for (const invalid of [name + 'a', 'a'.repeat(65536)]) {
+    await assert.rejects(api.writeCourseZIP([{name: invalid, pages: [page()]}], noIO), /ZIP32.*(limit|overflow)/i);
+  }
+  const largeNames = exportsWith({TextEncoder: class extends TextEncoder {
+    encode() { return sizedImage(65535); }
+  }});
+  await assert.rejects(largeNames.writeCourseZIP(Array.from({length: 32768}, (_, i) => ({name: `${i}.pdf`, pages: [page()]})), noIO),
+    /ZIP32.*(limit|overflow)/i);
+});
+
+test('course ZIP accepts 65535 nonempty members and rejects 65536 before reads or writes', async () => {
+  const {writeCourseZIP} = exportsWith();
+  assert.equal(typeof writeCourseZIP, 'function');
+  const pages = [{w: 7, h: 3}];
+  const lessons = Array.from({length: 65535}, (_, i) => ({name: `${i}.pdf`, pages}));
+  let reads = 0, end;
+  await writeCourseZIP(lessons, {
+    async readImage() { reads++; return new Uint8Array(); },
+    async write(chunk) {
+      if (chunk.byteLength === 22 && new DataView(chunk.buffer, chunk.byteOffset, chunk.byteLength).getUint32(0, true) === 0x06054b50) end = Buffer.from(chunk);
+    }
+  });
+  assert.equal(reads, 65535);
+  assert.equal(end.readUInt16LE(8), 65535);
+  assert.equal(end.readUInt16LE(10), 65535);
+  lessons.push({name: 'overflow.pdf', pages});
+  await assert.rejects(writeCourseZIP(lessons, {
+    async readImage() { assert.fail('entry count overflow must precede reads'); },
+    async write() { assert.fail('entry count overflow must precede writes'); }
+  }), /ZIP32.*(limit|overflow)/i);
+});
+
 test('manifest icons are exact square RGBA PNGs derived from the approved art', async () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '../manifest.json'), 'utf8'));
   assert.deepEqual(manifest.action.default_icon, manifest.icons);

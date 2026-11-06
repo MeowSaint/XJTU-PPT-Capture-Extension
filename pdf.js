@@ -19,6 +19,104 @@ async function writeZIP(pages, {readImage, write}) {
   await writeExport(zipParts(pages), readImage, write);
 }
 
+async function writeCourseZIP(lessons, {layout = 'single', readImage, write}) {
+  const max = 0xffffffff, entries = [], names = new Set(), suffixes = new Map();
+  for (const lesson of lessons) {
+    if (!lesson.pages.length) continue;
+    if (entries.length === 0xffff) zip32Overflow();
+    entries.push({name: lesson.name, pages: lesson.pages});
+  }
+  for (const entry of entries) {
+    let name = String(entry.name ?? 'lesson');
+    if (name.length > 0xffff) zip32Overflow();
+    name = name.replace(/[\\/<>:"|?*\u0000-\u001f\u007f]/g, '_').replace(/[ .]+$/g, '') || 'lesson';
+    if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name)) name = '_' + name;
+    if (!/\.pdf$/i.test(name)) name += '.pdf';
+    entry.name = name;
+    names.add(name);
+  }
+  const enc = new TextEncoder();
+  let directoryLength = 0, localLength = 0;
+  for (const entry of entries) {
+    const name = entry.name;
+    let suffix = suffixes.get(name);
+    if (suffix) {
+      do { entry.name = `${name.slice(0, -4)} (${suffix++})${name.slice(-4)}`; } while (names.has(entry.name));
+      names.add(entry.name);
+    }
+    suffixes.set(name, suffix || 2);
+    if (entry.name.length > 0xffff) zip32Overflow();
+    const size = enc.encode(entry.name).length;
+    if (size > 0xffff) zip32Overflow();
+    directoryLength += 46 + size;
+    localLength += 30 + size + 16;
+    if (localLength + directoryLength + 22 > max) zip32Overflow();
+  }
+  const directory = [], crcTable = Uint32Array.from({length: 256}, (_, value) => {
+    for (let bit = 0; bit < 8; bit++) value = (value >>> 1) ^ ((value & 1) ? 0xedb88320 : 0);
+    return value >>> 0;
+  });
+  let length = 0, reserved = localLength + directoryLength + 22;
+  async function put(bytes) {
+    if (length + bytes.length + reserved > max) zip32Overflow();
+    await write(bytes);
+    length += bytes.length;
+  }
+  for (const entry of entries) {
+    const name = enc.encode(entry.name), offset = length;
+    const local = new Uint8Array(30 + name.length), localView = new DataView(local.buffer);
+    localView.setUint32(0, 0x04034b50, true);
+    localView.setUint16(4, 20, true);
+    localView.setUint16(6, 0x0808, true); // Data descriptor and UTF-8 filename.
+    localView.setUint16(12, 33, true);
+    localView.setUint16(26, name.length, true);
+    local.set(name, 30);
+    reserved -= local.length;
+    await put(local);
+    let size = 0, crc = 0xffffffff;
+    await writeExport(pdfParts(entry.pages, layout), readImage, async bytes => {
+      if (size + bytes.length > max || length + bytes.length + reserved > max) zip32Overflow();
+      for (const byte of bytes) crc = (crc >>> 8) ^ crcTable[(crc ^ byte) & 0xff];
+      size += bytes.length;
+      await put(bytes);
+    });
+    crc = (crc ^ 0xffffffff) >>> 0;
+    const descriptor = new Uint8Array(16), descriptorView = new DataView(descriptor.buffer);
+    descriptorView.setUint32(0, 0x08074b50, true);
+    descriptorView.setUint32(4, crc, true);
+    descriptorView.setUint32(8, size, true);
+    descriptorView.setUint32(12, size, true);
+    reserved -= descriptor.length;
+    await put(descriptor);
+    const central = new Uint8Array(46 + name.length), centralView = new DataView(central.buffer);
+    centralView.setUint32(0, 0x02014b50, true);
+    centralView.setUint16(4, 20, true);
+    centralView.setUint16(6, 20, true);
+    centralView.setUint16(8, 0x0808, true);
+    centralView.setUint16(14, 33, true);
+    centralView.setUint32(16, crc, true);
+    centralView.setUint32(20, size, true);
+    centralView.setUint32(24, size, true);
+    centralView.setUint16(28, name.length, true);
+    centralView.setUint32(42, offset, true);
+    central.set(name, 46);
+    directory.push(central);
+  }
+  const start = length;
+  for (const central of directory) {
+    reserved -= central.length;
+    await put(central);
+  }
+  const end = new Uint8Array(22), view = new DataView(end.buffer);
+  view.setUint32(0, 0x06054b50, true);
+  view.setUint16(8, entries.length, true);
+  view.setUint16(10, entries.length, true);
+  view.setUint32(12, directoryLength, true);
+  view.setUint32(16, start, true);
+  reserved -= end.length;
+  await put(end);
+}
+
 // Parts are byte chunks or requests for one image; neither generator caches JPEGs.
 function collectExport(parts, type) {
   const chunks = [];
