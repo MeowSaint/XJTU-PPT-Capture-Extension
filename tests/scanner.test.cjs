@@ -4,12 +4,17 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 
 const Scanner = vm.runInNewContext(fs.readFileSync(require.resolve('../scanner.js'), 'utf8') + '\nPPTScanner', {
-  PPTCore: {sampleTimes: () => [0, 1, 2, 3], similar: (a, b) => a === b},
+  PPTCore: {...require('../media.js'), similar: (a, b) => a === b},
 });
 function fixture() {
   const scanner = new Scanner({duration: 4}, null);
   scanner.seek = async time => ({sig: ['A', 'B', 'A', 'C'][Math.floor(time)], sourceTime: time});
   return scanner;
+}
+function rangeFixture(duration = 10, signature = () => 'A') {
+  const scanner = new Scanner({duration}, null), sought = [];
+  scanner.seek = async time => { sought.push(time); return {sig: signature(time), sourceTime: time}; };
+  return {scanner, sought};
 }
 function options(extra = {}) {
   return {step: 1, threshold: 1.2, dedupe: true, signal: new AbortController().signal, progress() {}, ...extra};
@@ -71,4 +76,309 @@ test('disabled dedupe skips disk reads and still preserves returning slides', as
   await fixture().scan(options({dedupe: false, isDuplicate: async () => { throw Error('unexpected disk read'); },
     save: async frame => saved.push(frame.sig)}));
   assert.deepEqual(saved, ['A', 'B', 'A', 'C']);
+});
+
+test('partial scans bound coarse, fine, and confirmation seeks and report local progress', async () => {
+  const {scanner, sought} = rangeFixture(10, time => time < 3 ? 'A' : 'B');
+  const saved = [], checkpoints = [], updates = [];
+  const result = await scanner.scan(options({start: 2, end: 4.1, step: 2,
+    save: async frame => saved.push(frame.sourceTime),
+    checkpoint: async point => checkpoints.push({...point}), progress: point => updates.push({...point}),
+  }));
+  assert.ok(sought.every(time => time >= 2 && time <= 4.1), sought.join(', '));
+  assert.ok(sought.includes(2.5), 'changed coarse frames should still trigger fine samples');
+  assert.deepEqual(saved, [2.25, 3.25]);
+  assert.deepEqual(checkpoints.map(point => point.time), [2, 4, 4.1]);
+  assert.deepEqual(updates.map(point => point.ratio), [1 / 3, 2 / 3, 1]);
+  assert.ok(updates.every(point => point.duration === 10));
+  assert.deepEqual(checkpoints.at(-1), {time: 4.1, duration: 10, saved: 2, unstable: 0, baselineTime: 3.25});
+  assert.equal(result.saved, 2);
+});
+
+test('confirmation at a partial end clamps to the exact requested end', async () => {
+  const {scanner, sought} = rangeFixture();
+  const saved = [], checkpoints = [];
+  await scanner.scan(options({start: 2, end: 2.1, step: 3,
+    save: async frame => saved.push(frame.sourceTime), checkpoint: async point => checkpoints.push(point.time),
+  }));
+  assert.deepEqual(sought, [2, 2.1, 2.1]);
+  assert.deepEqual(saved, [2.1]);
+  assert.deepEqual(checkpoints, [2, 2.1]);
+});
+
+test('full scans keep the existing sample progress and safe video tail', async () => {
+  const {scanner, sought} = rangeFixture(4);
+  const checkpoints = [], ratios = [];
+  await scanner.scan(options({step: 2, save: async () => {},
+    checkpoint: async point => checkpoints.push(point.time), progress: point => ratios.push(point.ratio),
+  }));
+  assert.deepEqual(sought, [0, 0.25, 2, 3.95]);
+  assert.deepEqual(checkpoints, [0, 2, 3.95]);
+  assert.deepEqual(ratios, [1 / 3, 2 / 3, 1]);
+});
+
+test('resume replays its start boundary and idempotent false saves do not add pages', async () => {
+  const {scanner, sought} = rangeFixture(3, time => Math.floor(time));
+  const stored = new Set([1.25]), attempted = [], checkpoints = [];
+  const result = await scanner.scan(options({start: 1, end: 2, dedupe: false,
+    save: async frame => {
+      attempted.push(frame.sourceTime);
+      if (stored.has(frame.sourceTime)) return false;
+      stored.add(frame.sourceTime);
+    }, checkpoint: async point => checkpoints.push({...point}),
+  }));
+  assert.equal(sought[0], 1);
+  assert.ok(sought.every(time => time >= 1 && time <= 2));
+  assert.deepEqual(attempted, [1.25, 2]);
+  assert.equal(result.saved, 1);
+  assert.deepEqual(checkpoints.map(point => point.saved), [0, 1]);
+});
+
+test('resume on an unchanged slide matches uninterrupted timestamps with dedupe disabled', async () => {
+  const signature = time => time < 10 ? 'A' : 'B', uninterrupted = [], resumed = [];
+  await rangeFixture(12, signature).scanner.scan(options({step: 2, dedupe: false,
+    save: async frame => uninterrupted.push(frame.sourceTime),
+  }));
+  const controller = new AbortController(); let safe;
+  await assert.rejects(rangeFixture(12, signature).scanner.scan(options({step: 2, dedupe: false, signal: controller.signal,
+    save: async frame => resumed.push(frame.sourceTime), checkpoint: async point => {
+      safe = {...point}; if (point.time === 4) controller.abort(Error('stop at checkpoint four'));
+    },
+  })), /stop at checkpoint four/);
+  const {scanner, sought} = rangeFixture(12, signature);
+  await scanner.scan(options({start: safe.time, baselineTime: safe.baselineTime, step: 2, dedupe: false,
+    save: async frame => { if (resumed.includes(frame.sourceTime)) return false; resumed.push(frame.sourceTime); },
+  }));
+  assert.deepEqual(uninterrupted, [.25, 10.25]);
+  assert.deepEqual(resumed, uninterrupted, 'replaying an unchanged checkpoint must not add a same-slide page');
+  assert.equal(safe.baselineTime, .25); assert.deepEqual(sought.slice(0, 2), [.25, 4]);
+});
+
+test('a baseline seed warms comparison without saving or contributing progress', async () => {
+  for (const baselineTime of [0, .25, 4]) {
+    const {scanner, sought} = rangeFixture(4), points = [], ratios = [];
+    const result = await scanner.scan(options({start: 2, end: 3, baselineTime,
+      save: async () => assert.fail('unchanged seed must not create a page'),
+      checkpoint: async point => points.push({...point}), progress: point => ratios.push(point.ratio),
+    }));
+    assert.deepEqual(sought, [baselineTime, 2, 3]); assert.equal(result.saved, 0);
+    assert.deepEqual(points.map(point => point.baselineTime), [baselineTime, baselineTime]);
+    assert.deepEqual(ratios, [.5, 1]);
+  }
+});
+
+test('checkpoint baseline time follows the captured frame even when disk dedupe skips it', async () => {
+  const {scanner} = rangeFixture(4, time => time < 1 ? 'A' : 'B'), points = [];
+  await scanner.scan(options({end: 1.01, isDuplicate: async () => true,
+    save: async () => assert.fail('duplicate must not be saved'), checkpoint: async point => points.push({...point}),
+  }));
+  assert.deepEqual(points.map(point => [point.time, point.baselineTime]), [[0, .25], [1, 1], [1.01, 1]]);
+});
+
+test('an unstable confirmation leaves the checkpoint baseline null until a stable capture', async () => {
+  const {scanner} = rangeFixture(4, time => time === 0 ? 'transition' : 'B'), points = [], saved = [];
+  await scanner.scan(options({end: 1, save: async frame => saved.push(frame.sourceTime), checkpoint: async point => points.push({...point})}));
+  assert.deepEqual(saved, [.75], 'the changed coarse frame triggers a stable fine-sample confirmation');
+  assert.deepEqual(points.map(point => [point.time, point.baselineTime]), [[0, null], [1, .75]]);
+});
+
+test('a failed baseline seed rejects before pages, checkpoints or progress', async () => {
+  const {scanner, sought} = rangeFixture(4), seek = scanner.seek, callbacks = [];
+  scanner.seek = async time => { if (time === .25) { sought.push(time); throw Error('baseline decode failed'); } return seek(time); };
+  await assert.rejects(scanner.scan(options({start: 2, baselineTime: .25,
+    save: async () => callbacks.push('save'), checkpoint: async () => callbacks.push('checkpoint'), progress: () => callbacks.push('progress'),
+  })), /baseline decode failed/);
+  assert.deepEqual(sought, [.25]); assert.deepEqual(callbacks, []);
+});
+
+test('abort during baseline hydration prevents all scan callbacks and later seeks', async () => {
+  const {scanner, sought} = rangeFixture(4), seek = scanner.seek, controller = new AbortController(), callbacks = [];
+  scanner.seek = async time => {
+    const frame = await seek(time);
+    if (time === .25) controller.abort(Error('stopped during baseline seed'));
+    return frame;
+  };
+  await assert.rejects(scanner.scan(options({start: 2, baselineTime: .25, signal: controller.signal,
+    save: async () => callbacks.push('save'), checkpoint: async () => callbacks.push('checkpoint'), progress: () => callbacks.push('progress'),
+  })), /stopped during baseline seed/);
+  assert.deepEqual(sought, [.25]); assert.deepEqual(callbacks, []);
+});
+
+test('invalid baseline timestamps reject before seeking or writing', async () => {
+  for (const baselineTime of [-1, NaN, Infinity, 4.01, '0', false]) {
+    const {scanner, sought} = rangeFixture(4);
+    await assert.rejects(scanner.scan(options({start: 2, baselineTime,
+      save: async () => assert.fail('invalid seed must not save'), checkpoint: async () => assert.fail('invalid seed must not checkpoint'),
+    })), /无效/);
+    assert.deepEqual(sought, []);
+  }
+});
+
+test('a false save does not add its signature to in-memory dedupe', async () => {
+  const {scanner} = rangeFixture(3, time => ['A', 'B', 'A'][Math.floor(time)]);
+  const attempted = [];
+  const result = await scanner.scan(options({end: 2, save: async frame => {
+    attempted.push(frame.sig); return attempted.length === 1 ? false : undefined;
+  }}));
+  assert.deepEqual(attempted, ['A', 'B', 'A']);
+  assert.equal(result.saved, 2);
+});
+
+test('checkpoints await page commits and block the next coarse interval', async () => {
+  const {scanner, sought} = rangeFixture(3, time => Math.floor(time));
+  const saveEntered = gate(), saveRelease = gate(), checkpointEntered = gate(), checkpointRelease = gate();
+  const events = [];
+  const pending = scanner.scan(options({end: 2, save: async frame => {
+    events.push(`save:${frame.sourceTime}`);
+    if (frame.sourceTime === 0.25) { saveEntered.resolve(); await saveRelease.promise; }
+    events.push(`committed:${frame.sourceTime}`);
+  }, checkpoint: async point => {
+    events.push(`checkpoint:${point.time}`);
+    if (point.time === 0) { checkpointEntered.resolve(); await checkpointRelease.promise; }
+  }}));
+  await saveEntered.promise;
+  assert.deepEqual(events, ['save:0.25']);
+  assert.deepEqual(sought, [0, 0.25]);
+  saveRelease.resolve();
+  await Promise.race([checkpointEntered.promise, pending.then(() => assert.fail('scan finished without a checkpoint'))]);
+  assert.deepEqual(events, ['save:0.25', 'committed:0.25', 'checkpoint:0']);
+  assert.deepEqual(sought, [0, 0.25]);
+  checkpointRelease.resolve(); await pending;
+  assert.deepEqual(events, [
+    'save:0.25', 'committed:0.25', 'checkpoint:0',
+    'save:1.25', 'committed:1.25', 'checkpoint:1',
+    'save:2', 'committed:2', 'checkpoint:2',
+  ]);
+});
+
+test('a coarse checkpoint follows all fine and coarse page commits in its interval', async () => {
+  const {scanner} = rangeFixture(3, time => time < 0.8 ? 'A' : time < 1.8 ? 'B' : 'C');
+  const events = [];
+  await scanner.scan(options({end: 2, step: 2,
+    save: async frame => { await Promise.resolve(); events.push(`saved:${frame.sourceTime}`); },
+    checkpoint: async point => events.push(`checkpoint:${point.time}:${point.saved}`),
+  }));
+  assert.deepEqual(events, ['saved:0.25', 'checkpoint:0:1', 'saved:1.25', 'saved:2', 'checkpoint:2:3']);
+});
+
+test('unstable confirmations await a bounded suspect record before their checkpoint', async () => {
+  const {scanner, sought} = rangeFixture(4, time => time === 1 ? 'transition' : 'B');
+  const suspectEntered = gate(), suspectRelease = gate(), suspects = [], checkpoints = [];
+  const pending = scanner.scan(options({start: 1, end: 1.3,
+    save: async () => {}, suspect: async range => {
+      suspects.push({...range}); suspectEntered.resolve(); await suspectRelease.promise;
+    }, checkpoint: async point => checkpoints.push({...point}),
+  }));
+  await Promise.race([suspectEntered.promise, pending.then(() => assert.fail('scan finished without a suspect record'))]);
+  assert.deepEqual(suspects, [{start: 1, end: 1.3, time: 1}]);
+  assert.deepEqual(sought, [1, 1.25]);
+  assert.deepEqual(checkpoints, []);
+  suspectRelease.resolve();
+  const result = await pending;
+  assert.deepEqual(checkpoints.map(point => [point.time, point.unstable]), [[1, 1], [1.3, 1]]);
+  assert.equal(result.unstable, 1);
+});
+
+test('an unstable fine sample is recorded before its coarse checkpoint', async () => {
+  const {scanner} = rangeFixture(4, time => time < 1 ? 'A' : time === 1 ? 'transition' : 'B');
+  const events = [];
+  await scanner.scan(options({start: 0.5, end: 2, step: 2, save: async () => {},
+    suspect: async range => { await Promise.resolve(); events.push(['suspect', {...range}]); },
+    checkpoint: async point => events.push(['checkpoint', point.time]),
+  }));
+  assert.deepEqual(events, [
+    ['checkpoint', 0.5], ['suspect', {start: 0.5, end: 1.5, time: 1}], ['checkpoint', 2],
+  ]);
+});
+
+test('checkpoint failure rejects and prevents later seeks or page writes', async () => {
+  const {scanner, sought} = rangeFixture();
+  let writes = 0;
+  await assert.rejects(scanner.scan(options({save: async () => { writes++; },
+    checkpoint: async () => { throw Error('checkpoint commit failed'); },
+  })), /checkpoint commit failed/);
+  assert.equal(writes, 1);
+  assert.deepEqual(sought, [0, 0.25]);
+});
+
+test('a failed page commit preserves only checkpoints from earlier intervals', async () => {
+  const checkpoints = [];
+  await assert.rejects(fixture().scan(options({save: async frame => {
+    if (frame.sig === 'B') throw Error('page commit failed');
+  }, checkpoint: async point => checkpoints.push(point.time)})), /page commit failed/);
+  assert.deepEqual(checkpoints, [0]);
+});
+
+test('a failed suspect commit rejects before a checkpoint can mark that interval safe', async () => {
+  const {scanner, sought} = rangeFixture(4, time => time === 0 ? 'transition' : 'B');
+  const checkpoints = [];
+  await assert.rejects(scanner.scan(options({save: async () => {},
+    suspect: async () => { throw Error('suspect commit failed'); },
+    checkpoint: async point => checkpoints.push(point.time),
+  })), /suspect commit failed/);
+  assert.deepEqual(checkpoints, []);
+  assert.deepEqual(sought, [0, 0.25]);
+});
+
+test('abort during a committed save prevents an unsafe next checkpoint', async () => {
+  const controller = new AbortController(), checkpoints = [], saved = [];
+  await assert.rejects(fixture().scan(options({signal: controller.signal, save: async frame => {
+    saved.push(frame.sig);
+    if (frame.sig === 'B') controller.abort(new Error('stopped during save'));
+  }, checkpoint: async point => checkpoints.push(point.time)})), /stopped during save/);
+  assert.deepEqual(saved, ['A', 'B']);
+  assert.deepEqual(checkpoints, [0]);
+});
+
+test('abort during suspect commit prevents its next checkpoint', async () => {
+  const {scanner} = rangeFixture(4, time => time === 0 ? 'transition' : 'B');
+  const controller = new AbortController(), checkpoints = [];
+  await assert.rejects(scanner.scan(options({signal: controller.signal, save: async () => {},
+    suspect: async () => { controller.abort(new Error('stopped during suspect')); },
+    checkpoint: async point => checkpoints.push(point.time),
+  })), /stopped during suspect/);
+  assert.deepEqual(checkpoints, []);
+});
+
+test('abort after an asynchronous duplicate result cannot checkpoint the skipped page', async () => {
+  const {scanner} = rangeFixture(0.1);
+  const controller = new AbortController(), checkpoints = [];
+  await assert.rejects(scanner.scan(options({signal: controller.signal,
+    isDuplicate: async () => { controller.abort(new Error('stopped after duplicate')); return true; },
+    save: async () => assert.fail('duplicate page must not be saved'),
+    checkpoint: async point => checkpoints.push(point.time),
+  })), /stopped after duplicate/);
+  assert.deepEqual(checkpoints, []);
+});
+
+test('a zero-length playable range samples its boundary once without confirming outside it', async () => {
+  const {scanner, sought} = rangeFixture();
+  const saved = [], checkpoints = [], ratios = [];
+  const result = await scanner.scan(options({start: 2, end: 2,
+    save: async frame => saved.push(frame.sourceTime), checkpoint: async point => checkpoints.push(point.time),
+    progress: point => ratios.push(point.ratio),
+  }));
+  assert.deepEqual(sought, [2]);
+  assert.deepEqual(saved, [2]);
+  assert.deepEqual(checkpoints, [2]);
+  assert.deepEqual(ratios, [1]);
+  assert.equal(result.saved, 1);
+});
+
+test('invalid duration, step, and bounds reject before seeking or writing', async () => {
+  const invalid = [
+    [0, {}], [-1, {}], [NaN, {}], [Infinity, {}],
+    [4, {step: 0}], [4, {step: -1}], [4, {step: NaN}], [4, {step: Infinity}],
+    [4, {step: Number.MIN_VALUE}], [4, {start: -1}], [4, {start: NaN}], [4, {start: Infinity}],
+    [4, {end: NaN}], [4, {end: Infinity}], [4, {end: 5}], [4, {start: 2, end: 1}],
+    [4, {start: 4, end: 4}], [4, {start: 3.99}],
+  ];
+  for (const [duration, extra] of invalid) {
+    const {scanner, sought} = rangeFixture(duration);
+    await assert.rejects(scanner.scan(options({...extra,
+      save: async () => assert.fail('invalid scan must not save'),
+      checkpoint: async () => assert.fail('invalid scan must not checkpoint'),
+    })), /无效/, `duration=${duration}, options=${JSON.stringify(extra)}`);
+    assert.deepEqual(sought, []);
+  }
 });
