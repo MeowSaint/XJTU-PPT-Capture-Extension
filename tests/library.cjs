@@ -630,6 +630,14 @@ function zipEntries(bytes) {
       assert.deepEqual(await page.evaluate(() => ({active: activeLesson.id, undo: undoState, selected: [...selectedPages], anchor: selectionAnchor, source: objectURL})), live);
       await page.locator('#library-close').click(); await page.locator('#undo').click(); await count(2);
       await page.reload(); await count(2); assert(!(await stored()).lessons.some(lesson => lesson.id === 'manage-inactive'));
+      await page.evaluate(async ({base, jobs}) => {
+        chrome.tabs = {sendMessage: async () => ({ok: true, page: base, jobs, total: jobs.length, eligible: jobs.length})};
+        await discoverBatch(1);
+      }, {base, jobs});
+      const rediscovered = await stored();
+      assert(!rediscovered.lessons.some(lesson => lesson.id === 'manage-inactive')); assert(!rediscovered.pages.some(page => page.id === 303));
+      assert(!rediscovered.assets.some(asset => asset.id === 303));
+      assert.equal(rediscovered.batches.find(batch => batch.page === base).jobs.find(job => job.id === 'shared').state, 'pending');
     });
     await test('active, empty and whole-course deletion release transient state without resurrecting history', async () => {
       await load(); await page.evaluate(async () => { await deletePages([302]); selectedPages.add(301); selectionAnchor = 301; controls(); });
