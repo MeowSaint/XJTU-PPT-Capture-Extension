@@ -60,4 +60,30 @@ Memory integration reads 1000 signatures once across repeated dedupe lookups, ve
 
 The installed Playwright package initially expected absent Chromium 1234 and could not launch its default executable. Tests were rerun successfully using the existing Chromium 1248 executable shown verbatim above; no browser download was attempted. Early focused-fixture failures were corrected (`'0.5'` HTML select value and `applyLesson()` reading global active lesson), then all final groups passed.
 
-Precise 0.5-second sampling still cannot guarantee capture of slides shorter than the sample/confirmation window. Legacy pages lack recoverable crop geometry and intentionally receive conservative unmasked comparisons, which can retain extra pages. Pages beyond the cache cap can require repeated bounded reads; none are silently omitted. Cache release clears retained references; garbage-collection timing is browser controlled. Cancellation prevents subsequent writes but does not undo a transaction already committed. Verification is synthetic and local; real authenticated course playback is outside this task's authorization. No known unresolved implementation concern remains after self-review; independent review is still required by the parent.
+Precise 0.5-second sampling still cannot guarantee capture of slides shorter than the sample/confirmation window. Legacy pages lack recoverable crop geometry and intentionally receive conservative unmasked comparisons, which can retain extra pages. Pages beyond the cache cap can require repeated bounded reads; none are silently omitted. Cache release clears retained references; garbage-collection timing is browser controlled. Cancellation prevents subsequent writes but does not undo a transaction already committed. Verification is synthetic and local; real authenticated course playback is outside this task's authorization. No known unresolved implementation concern remained after the initial self-review; independent review subsequently identified I1/I2, addressed below.
+
+## Fix round 1 — I1 and I2
+
+Status: addressed, ready for fresh scoped review. Fix base: `98b128ea56b5d0b63552cad2c9b6e2bb9eebbde2`. Fix implementation/tests commit: `661f9990a2d0c4d373d6438dfd738129ece2abd8` (`fix: persist crop confirmation atomically and restore exact state`). The appended report is committed separately and its hash is supplied in the handoff.
+
+The parent extended the write allowlist to `library.js` and `tests/library.test.cjs` for this round. The fix changes only `capture.js`, `library.js`, `tests/library.test.cjs`, `tests/improvements.cjs` and this report. Initial-scope statements above describe the original implementation, before this extension.
+
+- **I1:** `PPTLibrary.put(db, lesson, relatedBatch = null)` preserves existing callers and optionally writes both snapshots in one existing settings-store transaction. Required manual crop confirmation passes the related batch through the serialized lesson-save operation. Ignore-only changes save just the lesson. There are no compensating writes. Both ordinary batch saves and related saves publish `savedBatches` only after successful persistence. Restored editable jobs are cloned from retained snapshots, preventing mutations through shared references before a save succeeds.
+- **I2:** comparison-setting rollback deletes newly introduced lesson properties absent from the prior snapshot before restoring prior values. Optional `cropConfirmed` presence is restored as well. The retained lesson object keeps its identity and its exact prior property set.
+
+Added unit coverage checks existing two-argument `put` behavior, optional batch snapshot isolation, one transaction, resolution only on transaction completion, and transaction abort/rejection if the second write throws. Added three browser groups exercise real IndexedDB and reloads: legacy absent-field rollback including the complete lesson; asynchronous second-request failure after a successful lesson request, atomic rollback of both records and confirmation state, followed by successful atomic persistence; and failed standalone batch persistence preserving the last retained snapshot. The second-request failure is injected with a duplicate-key `add` and verifies exactly one lesson request success and one batch request failure. Both live state and reloaded state equal the complete pre-change snapshots.
+
+Exact fix-round commands:
+
+```sh
+node --check capture.js
+node --check library.js
+node --test tests/library.test.cjs
+PPT_TEST_BROWSER='/Users/jasondai/Library/Caches/ms-playwright/chromium-1248/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing' node tests/improvements.cjs
+PPT_TEST_BROWSER='/Users/jasondai/Library/Caches/ms-playwright/chromium-1248/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing' node tests/library.cjs
+git diff --check
+```
+
+Final output/counts: Node library `tests 7`, `pass 7`, `fail 0`; browser improvements `13 focused improvement groups passed; no external requests.`; browser library `10 focused library groups passed.`; all exited 0. Syntax and whitespace checks passed. Library evidence: `.test-output/v3.1.0/library-rHM9pE/`. The existing library suite was run because its shared persistence API and restored batch objects changed. The full Node and memory suites were not repeated; their original results above are historical, not claims of fresh fix-round execution.
+
+An initial new browser fixture lacked the existing batch renderer's required `course`/`options` fields and timed out on reload; the fixture was corrected. The next run exposed the real restored-job/snapshot alias covered by I1; clone-at-restore fixed it. The final run passed all 13 groups. All testing remained isolated, synthetic and local with the existing Chromium 1248; no dependency installation, external site access, or user browser data was used. Self-review found no remaining I1/I2 issue; fresh scoped independent review is pending.
