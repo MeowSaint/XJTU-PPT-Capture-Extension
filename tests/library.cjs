@@ -6,7 +6,7 @@ const {spawnSync} = require('node:child_process');
 const {dependency, browserOptions} = require('./runtime.cjs');
 const {chromium} = dependency('playwright'), sharp = dependency('sharp');
 const {PDFDocument, PDFName} = dependency('pdf-lib');
-const root = path.resolve(__dirname, '..'), scratch = path.join(root, '.test-output', 'v3.1.0');
+const root = path.resolve(__dirname, '..'), scratch = path.join(root, '.test-output', 'v3.1.1');
 fs.mkdirSync(scratch, {recursive: true});
 const output = fs.mkdtempSync(path.join(scratch, 'library-'));
 const fixture = path.join(output, 'library-video.mp4'), moving = path.join(output, 'library-moving.mp4'), continuity = path.join(output, 'library-continuity.mp4');

@@ -121,9 +121,9 @@ async function main() {
       globalThis.fetch = (input, options) => {
         const url = typeof input === 'string' ? input : input.url;
         if (url.startsWith('https://api.github.com/')) return Promise.resolve(new Response(JSON.stringify({
-          tag_name: 'v3.1.0', draft: false, prerelease: false, published_at: '2026-11-05T00:00:00Z',
-          html_url: 'https://github.com/MeowSaint/XJTU-PPT-Capture-Extension/releases/tag/v3.1.0',
-          assets: [{name: 'ppt-capture.zip', browser_download_url: 'https://github.com/MeowSaint/XJTU-PPT-Capture-Extension/releases/download/v3.1.0/ppt-capture.zip'}]
+          tag_name: 'v3.1.1', draft: false, prerelease: false, published_at: '2026-11-05T00:00:00Z',
+          html_url: 'https://github.com/MeowSaint/XJTU-PPT-Capture-Extension/releases/tag/v3.1.1',
+          assets: [{name: 'ppt-capture.zip', browser_download_url: 'https://github.com/MeowSaint/XJTU-PPT-Capture-Extension/releases/download/v3.1.1/ppt-capture.zip'}]
         }), {headers: {'Content-Type': 'application/json'}}));
         return fetchFixture(input, options);
       };
@@ -423,9 +423,10 @@ async function main() {
     await fallbackRow.locator('select').selectOption(fallbackOptions[1].download_url);
     assert.equal((await savedBatchJob(page, 'batch-c')).sourceName, screenName);
     await fallbackRow.getByRole('button', {name: '加载 0 路并框选'}).click();
-    await page.waitForFunction(() => sourceReady && activeBatchJob?.id === 'batch-c' && cropEditing);
+    await page.waitForFunction(() => sourceReady && activeBatchJob?.id === 'batch-c' && selectionMode === 'crop');
     await page.locator('#run').click();
     await page.waitForFunction(() => document.querySelector('#status').textContent.includes('请先在 0 路视频画面中'));
+    assert.equal(await page.evaluate(() => selectionMode), 'crop', 'the scan guard keeps the required crop selection active');
     const fallbackBox = await page.locator('#overlay').boundingBox();
     await page.mouse.move(fallbackBox.x + fallbackBox.width * 0.2, fallbackBox.y + fallbackBox.height * 0.2); await page.mouse.down();
     await page.mouse.move(fallbackBox.x + fallbackBox.width * 0.8, fallbackBox.y + fallbackBox.height * 0.8); await page.mouse.up();
@@ -440,7 +441,7 @@ async function main() {
     if (!await page.locator('#batch-panel').evaluate(panel => panel.open)) await page.locator('#batch-panel > summary').click();
     await fallbackRow.locator('.batch-manual button').click();
     await page.waitForFunction(() => sourceReady && !task && activeBatchJob?.id === 'batch-c');
-    assert.equal(await page.evaluate(() => cropEditing), false, 'restored screen crop is already confirmed');
+    assert.equal(await page.evaluate(() => selectionMode), null, 'restored screen crop is already confirmed');
     const screenTask = await pauseScan(page);
     assert.equal(await page.evaluate(() => canResume()), true);
     for (let refresh = 0; refresh < 2; refresh++) {
@@ -490,7 +491,7 @@ async function main() {
     assert.equal(await page.evaluate(() => activeLesson.task), null, 'changing the underlying channel discards its old scan task ' + abandonedTask.id);
     assert.deepEqual(await page.evaluate(() => activeLesson.suspects), [], 'old-channel review ranges cannot follow the replacement video');
     assert.deepEqual(await page.evaluate(() => crop), {x: 0, y: 0, w: 1, h: 1});
-    assert.equal(await page.evaluate(() => cropEditing), true, 'replacement video requires a new crop');
+    assert.equal(await page.evaluate(() => selectionMode), 'crop', 'replacement video requires a new crop');
     assert.equal(await page.evaluate(() => canResume()), false);
     assert.deepEqual(await storedPageSnapshot(page), beforeChannelChange, 'channel replacement keeps every original screenshot, order and asset byte');
     await page.locator('#run').click();
@@ -507,7 +508,7 @@ async function main() {
     if (!await page.locator('#batch-panel').evaluate(panel => panel.open)) await page.locator('#batch-panel > summary').click();
     await fallbackRow.locator('.batch-manual button').click();
     await page.waitForFunction(() => sourceReady && !task && activeBatchJob?.id === 'batch-c');
-    assert.equal(await page.evaluate(() => cropEditing), false, 'full-frame confirmation survives an immediate reload');
+    assert.equal(await page.evaluate(() => selectionMode), null, 'full-frame confirmation survives an immediate reload');
     await page.locator('#run').click();
     await page.waitForFunction(() => !task && batchJobs.find(job => job.id === 'batch-c')?.state === 'done', {timeout: 60000});
     console.log('Two 0-channel videos: selected screen, renewed URLs, immediate crop/full-frame reload, paused checkpoint and missing-channel invalidation passed');
