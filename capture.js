@@ -1189,7 +1189,7 @@ async function exportRetained(kind, selected = false) {
 }
 $('pdf').onclick = () => exportRetained('pdf'); $('export-zip').onclick = () => exportRetained('zip');
 $('selected-pdf').onclick = () => exportRetained('pdf', true); $('selected-zip').onclick = () => exportRetained('zip', true);
-$('course-zip').onclick = () => exportCourseZIP(currentCourseKey());
+$('course-zip').onclick = () => exportCourseZIP();
 $('batch-course-zip').onclick = () => exportCourseZIP(batchCourseKey(), 'batch-status');
 async function exportCourseZIP(courseKey, statusId = 'status') {
   if (busy()) return;
@@ -1197,8 +1197,10 @@ async function exportCourseZIP(courseKey, statusId = 'status') {
   const options = pdfOptions();
   exportBusy = true; controls(); let cache;
   try {
-    if (!courseKey) throw Error('请先读取课程录像列表');
     await namingSave; await lessonSave; syncAllPages();
+    // Local lessons are grouped by name, which pending saves may change.
+    if (courseKey === undefined) courseKey = currentCourseKey();
+    if (!courseKey) throw Error('请先读取课程录像列表');
     const course = currentCourseLessons(courseKey).sort((a, b) => (a.course?.date || '').localeCompare(b.course?.date || '') || (a.course?.start || '').localeCompare(b.course?.start || '') || a.created - b.created);
     const entries = course.map((lesson, index) => ({name: `${String(index + 1).padStart(3, '0')}-${PPTCourse.filename(lesson.course) || lessonLabel(lesson) + '.pdf'}`, pages: allPages.filter(page => page.lessonId === lesson.id).sort((a, b) => a.order - b.order).map(page => ({...page}))}));
     const nonempty = entries.filter(entry => entry.pages.length), total = nonempty.reduce((sum, entry) => sum + entry.pages.length, 0);

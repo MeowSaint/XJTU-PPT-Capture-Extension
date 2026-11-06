@@ -456,6 +456,50 @@ async function test(name, run) { await run(); passed++; console.log('PASS ' + na
       assert.match(result.messages[0], /请先读取课程录像列表/); assert.match(result.messages[1], /本课程还没有截图/); assert.match(result.messages[2], /synthetic unavailable image/);
       assert.equal(result.busy, false); assert.equal(result.enabled, true);
     });
+    await test('main course ZIP waits for a pending local rename before choosing its course group', async () => {
+      await idle();
+      await page.evaluate(async () => {
+        await namingSave; await lessonSave;
+        // Keep a nonempty sibling in the old name group: stale scope would silently export it.
+        for (const id of ['A', 'B']) {
+          const lesson = lessons.find(item => item.id === id);
+          lesson.page = ''; lesson.source.page = ''; lesson.course = {...lesson.course, name: 'Old local course'};
+          await PPTLibrary.put(db, lesson);
+        }
+        activeLesson = lessons.find(item => item.id === 'A'); coursePage = '';
+        applyLesson(); render(); renderLibrary(); controls();
+        const original = IDBObjectStore.prototype.put;
+        IDBObjectStore.prototype.put = function(value, key) {
+          const request = original.call(this, value, key);
+          if (this.name === 'settings' && key === 'exportNaming') {
+            IDBObjectStore.prototype.put = original;
+            let held = true; window.releaseNaming = () => { held = false; };
+            const keepAlive = () => { if (held) this.get('exportNaming').onsuccess = keepAlive; };
+            keepAlive();
+          }
+          return request;
+        };
+      });
+      await page.locator('#tab-export').click();
+      await page.locator('#course-name').fill('Renamed local course');
+      await page.waitForFunction(() => !!window.releaseNaming);
+      assert.equal(await page.evaluate(() => activeLesson.course.name), 'Old local course');
+      const event = page.waitForEvent('download');
+      try {
+        await page.locator('#course-zip').click();
+        assert(await page.locator('#course-zip').isDisabled());
+        assert.equal(await page.evaluate(() => exportBusy), true);
+        assert.equal(await page.evaluate(() => activeLesson.course.name), 'Old local course');
+      } finally { await page.evaluate(() => releaseNaming()); }
+      const file = await event, destination = path.join(output, 'renamed-local-course.zip');
+      await file.saveAs(destination); await idle();
+      const entries = members(fs.readFileSync(destination));
+      assert.equal(entries.length, 1);
+      await inspectPDF(entries[0].bytes, [images[2], images[0], images[1]], {annotated: true, sheets: 2});
+      assert.equal(file.suggestedFilename(), 'Renamed local course-课次PDF.zip');
+      assert.match(entries[0].name, /Renamed local course/);
+      assert.equal(await page.evaluate(() => lessons.find(lesson => lesson.id === 'B').course.name), 'Old local course');
+    });
     assert.deepEqual(errors, []); await exportContext.close();
     assert.deepEqual(blocked, []); console.log(`${passed} focused improvement groups passed; no external requests.`);
   } finally { await browser?.close(); if (server) await new Promise(resolve => server.close(resolve)); }
