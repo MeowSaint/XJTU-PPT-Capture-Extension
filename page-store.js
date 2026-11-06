@@ -44,12 +44,28 @@ const PPTPageStore = (() => {
       };
     });
   }
+  function assetSize(asset) {
+    return (asset?.image?.size || 0) + (asset?.thumbnail?.size || 0) + (asset?.sig?.byteLength || 0);
+  }
+  async function estimate(db, pages) {
+    let bytes = 0, missing = 0;
+    // Old records have no byte metadata: read and release one asset at a time.
+    for (const page of pages) {
+      if (Number.isFinite(page.assetBytes) && page.assetBytes >= 0) bytes += page.assetBytes;
+      else {
+        const [record] = await assets(db, [page.id]);
+        if (record) bytes += assetSize(record); else missing++;
+      }
+    }
+    return {bytes, missing};
+  }
   async function add(db, metadata, asset) {
     let id;
     await transaction(db, ['pages', 'assets'], 'readwrite', tx => {
-      const request = tx.objectStore('pages').add(metadata);
+      const request = tx.objectStore('pages').add({...metadata, assetBytes: assetSize(asset)});
       request.onsuccess = () => { id = request.result; tx.objectStore('assets').put({...asset, id}); };
     });
+    metadata.assetBytes = assetSize(asset);
     return id;
   }
   function assets(db, ids) {
@@ -83,9 +99,14 @@ const PPTPageStore = (() => {
     let small;
     try { small = await makeThumbnail(bitmap, bitmap.width, bitmap.height); }
     finally { bitmap.close(); }
-    await transaction(db, ['assets'], 'readwrite', tx => {
-      const request = tx.objectStore('assets').get(id);
-      request.onsuccess = () => { if (request.result) tx.objectStore('assets').put({...request.result, thumbnail: small}); };
+    await transaction(db, ['assets', 'pages'], 'readwrite', tx => {
+      const request = tx.objectStore('assets').get(id), page = tx.objectStore('pages').get(id);
+      page.onsuccess = () => {
+        if (!request.result) return;
+        const next = {...request.result, thumbnail: small};
+        tx.objectStore('assets').put(next);
+        if (Number.isFinite(page.result?.assetBytes)) tx.objectStore('pages').put({...page.result, assetBytes: assetSize(next)});
+      };
     });
     return small;
   }
@@ -133,5 +154,5 @@ const PPTPageStore = (() => {
     })();
     return pageLease;
   }
-  return {open, add, asset, assets, encode, thumbnail, imageBytes, discard, prune};
+  return {open, add, asset, assets, encode, thumbnail, imageBytes, discard, prune, estimate};
 })();

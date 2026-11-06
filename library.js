@@ -100,7 +100,46 @@
       return () => result;
     });
   }
-  const api = {key, courseKey, recover, mergeRanges, restore, put, activate, batch};
+  function remove(db, {lessonIds, course = null, undoIds = []}) {
+    const wanted = new Set(lessonIds);
+    return transaction(db, ['pages', 'assets', 'settings'], tx => {
+      const pageStore = tx.objectStore('pages'), assets = tx.objectStore('assets'), settings = tx.objectStore('settings');
+      const pageRead = pageStore.getAll(), values = settings.getAll(), keys = settings.getAllKeys();
+      let result;
+      keys.onsuccess = () => {
+        try {
+          const saved = new Map(keys.result.map((key, i) => [key, values.result[i]]));
+          const storedLessons = [...saved].filter(([key]) => typeof key === 'string' && key.startsWith('lesson:')).map(([, value]) => value);
+          const removed = storedLessons.filter(lesson => wanted.has(lesson.id));
+          const lessons = storedLessons.filter(lesson => !wanted.has(lesson.id));
+          const pages = pageRead.result.filter(page => !wanted.has(page.lessonId)), retained = new Set(pages.map(page => page.id));
+          for (const page of pageRead.result) if (wanted.has(page.lessonId)) { pageStore.delete(page.id); assets.delete(page.id); }
+          // Only this view's explicitly removed undo assets are ours to discard. Other live leases stay intact.
+          for (const id of undoIds) if (!retained.has(id)) assets.delete(id);
+          for (const id of wanted) settings.delete('lesson:' + id);
+          const batches = [];
+          for (const [name, value] of saved) {
+            if (typeof name !== 'string' || !name.startsWith('batch:')) continue;
+            if (course !== null && courseKey(value.page, value.jobs[0]?.course) === course) { settings.delete(name); continue; }
+            const jobs = value.jobs.filter(job => !removed.some(lesson => lesson.source?.batchJobId === job.id && courseKey(lesson.page, lesson.course) === courseKey(value.page, job.course)));
+            const next = {...value, jobs}; settings.put(next, name); batches.push(next);
+          }
+          const oldActive = saved.get('activeLesson');
+          const activeId = wanted.has(oldActive) ? lessons[0]?.id || '' : oldActive || '';
+          settings.put(activeId, 'activeLesson');
+          let naming = saved.get('exportNaming');
+          if (wanted.has(oldActive)) {
+            const active = lessons.find(lesson => lesson.id === activeId);
+            naming = {course: active?.course || {}, page: active?.page || '', manual: !!active?.namingManual};
+            settings.put(naming, 'exportNaming');
+          }
+          result = {lessons, pages, batches, activeId, naming};
+        } catch { tx.abort(); }
+      };
+      return () => result;
+    });
+  }
+  const api = {key, courseKey, recover, mergeRanges, restore, put, activate, batch, remove};
   root.PPTLibrary = api;
   if (typeof module !== 'undefined') module.exports = api;
 })(globalThis);

@@ -64,12 +64,11 @@ function persistLesson(lesson = activeLesson, relatedBatch = null) {
 }
 function saveLessonSettings() {
   if (!ready) return;
-  Promise.all([persistLesson(), activeBatchJob?.requiresCrop ? persistBatch() : null]).then(renderLibrary).catch(e => status('课次设置保存失败：' + e.message));
+  persistLesson(activeLesson, activeBatchJob?.requiresCrop && batchPage ? {page: batchPage, jobs: batchJobs} : null).then(renderLibrary).catch(e => status('课次设置保存失败：' + e.message));
 }
 function sameMediaSource(a, b) {
   if (!a || !b) return false;
-  const key = source => PPTLibrary.key({sourceKey: source.sourceKey || (source.url ? 'url:' + source.url : ''), sourceName: source.sourceName});
-  return !!a.sourceName && a.sourceName === b.sourceName || key(a) === key(b);
+  return PPTBatch.trackKey(a) === PPTBatch.trackKey(b);
 }
 async function bindLesson(source) {
   await dbReady; await lessonSave;
@@ -145,6 +144,96 @@ async function dismissSuspect(range) {
   } catch (e) { status('确认保存失败，请重试：' + e.message); }
   finally { reviewBusy = false; controls(); }
 }
+let libraryRemoval = null, libraryWriting = false, libraryRenderRevision = 0;
+function confirmLibraryRemoval(group, course = null) {
+  if (libraryWriting) return;
+  const ids = group.map(lesson => lesson.id), count = allPages.filter(page => ids.includes(page.lessonId)).length;
+  libraryRemoval = {lessonIds: ids, course};
+  $('library-confirm-text').textContent = `永久删除${course === null ? '课次' : '整门课程'}“${course === null ? lessonLabel(group[0]) : group[0].course?.name || '未命名课程'}”：${group.length} 节、${count} 页。截图、课次设置及关联批量任务会一起删除，无法撤销。`;
+  $('library-confirm').hidden = false; $('library-cancel-delete').focus();
+}
+async function renderLibraryManager() {
+  const revision = ++libraryRenderRevision, list = $('library-list'); list.replaceChildren(); $('library-confirm').hidden = true; libraryRemoval = null;
+  $('library-status').textContent = lessons.length ? '正在估算截图资源大小…' : '本机尚未保存课次。';
+  const groups = new Map();
+  for (const lesson of lessons) {
+    const key = PPTLibrary.courseKey(lesson.page, lesson.course);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(lesson);
+  }
+  const estimates = [];
+  for (const [key, group] of groups) {
+    const section = document.createElement('section'), heading = document.createElement('h3'), remove = document.createElement('button');
+    section.className = 'library-course'; heading.textContent = group[0].course?.name || '未命名课程';
+    remove.textContent = '删除整课'; remove.setAttribute('aria-label', `删除整课 ${heading.textContent}`);
+    remove.onclick = () => confirmLibraryRemoval(group, key); section.append(heading, remove);
+    if (group[0].page) { const context = document.createElement('p'); context.className = 'note library-context'; context.textContent = '课程页面：' + group[0].page; section.append(context); }
+    for (const lesson of group) {
+      const row = document.createElement('div'), text = document.createElement('span'), button = document.createElement('button');
+      row.className = 'library-lesson'; row.dataset.lessonId = lesson.id;
+      const retained = allPages.filter(page => page.lessonId === lesson.id), label = `${lessonLabel(lesson)} · ${retained.length} 页`;
+      text.textContent = label + ' · 估算中'; button.textContent = '删除课次'; button.setAttribute('aria-label', `删除课次 ${lessonLabel(lesson)}`);
+      button.onclick = () => confirmLibraryRemoval([lesson]); row.append(text, button); section.append(row);
+      estimates.push({text, retained, label});
+    }
+    list.append(section);
+  }
+  let missing = 0;
+  try {
+    for (const item of estimates) {
+      if (!$('library-dialog').open || !item.text.isConnected) return;
+      const estimate = await PPTPageStore.estimate(db, item.retained);
+      if (revision !== libraryRenderRevision || !$('library-dialog').open) return;
+      missing += estimate.missing;
+      item.text.textContent = `${item.label} · 约 ${(estimate.bytes / 1024 ** 2).toFixed(2)} MB`;
+    }
+    if ($('library-dialog').open) $('library-status').textContent = missing ? `${missing} 页的资源缺失，估算未包含这些资源。` : lessons.length ? '大小估算完成。' : '本机尚未保存课次。';
+  } catch (error) { if (revision === libraryRenderRevision && $('library-dialog').open) $('library-status').textContent = '大小估算失败：' + error.message; }
+}
+$('library-manage').onclick = async () => {
+  if (busy() || !ready) return;
+  reviewBusy = true; controls(); $('library-dialog').showModal();
+  await namingSave.catch(() => {}); await lessonSave.catch(() => {}); renderLibraryManager();
+};
+function closeLibrary() {
+  if (libraryWriting) return;
+  libraryRenderRevision++; $('library-dialog').close(); libraryRemoval = null; reviewBusy = false; controls(); $('library-manage').focus();
+}
+$('library-close').onclick = closeLibrary;
+$('library-dialog').oncancel = event => { event.preventDefault(); closeLibrary(); };
+$('library-cancel-delete').onclick = () => { libraryRemoval = null; $('library-confirm').hidden = true; };
+$('library-delete').onclick = async () => {
+  if (!libraryRemoval || libraryWriting) return;
+  libraryWriting = true; libraryRenderRevision++;
+  $('library-dialog').querySelectorAll('button').forEach(button => { button.disabled = true; });
+  let committed = false;
+  const request = libraryRemoval, activeRemoved = request.lessonIds.includes(activeLesson?.id);
+  const undoIds = undoState?.removed.filter(item => request.lessonIds.includes(item.page.lessonId)).map(item => item.page.id) || [];
+  try {
+    await namingSave.catch(() => {}); await lessonSave.catch(() => {});
+    const saved = await PPTLibrary.remove(db, {...request, undoIds}); committed = true;
+    // The disk commit is final. Detach the removed lesson before source cleanup can save it again.
+    let cleanupError;
+    if (activeRemoved) {
+      activeLesson = null; undoState = null; activeBatchJob = null; selectedPages.clear(); selectionAnchor = null;
+      previewPageId = null; $('lightbox').close(); previewRevision++; previewLoadingId = null;
+      if (previewURL) URL.revokeObjectURL(previewURL); previewURL = null; $('lightbox-img').removeAttribute('src'); releaseDedupeContext();
+      try { await releaseSource(); } catch (error) { cleanupError = error; }
+    }
+    lessons = saved.lessons; allPages = saved.pages; savedBatches = saved.batches;
+    activeLesson = lessons.find(lesson => lesson.id === (activeRemoved ? saved.activeId : activeLesson?.id)) || null;
+    const batch = savedBatches.find(item => item.page === batchPage);
+    batchJobs = batch ? structuredClone(batch.jobs) : []; if (!batch) batchPage = '';
+    activeBatchJob = activeBatchJob && batchJobs.find(job => job.id === activeBatchJob.id) || null;
+    if (activeRemoved) {
+      if (activeLesson) applyLesson();
+      else { pages = []; sourceName = ''; sourceCourse = {}; sourceCoursePage = ''; crop = {x: 0, y: 0, w: 1, h: 1}; ignoreRect = null; cancelSelection(); restoreNaming(saved.naming || {course: {}, page: '', manual: false}); }
+    }
+    batchDiscoverySerial++; render(); renderLibrary(); renderBatchJobs(); draw(); await renderLibraryManager();
+    $('library-status').textContent = cleanupError ? '课次已永久删除；视频缓存释放失败：' + cleanupError.message : '已永久删除所选课次及关联批量任务。';
+  } catch (error) { $('library-status').textContent = (committed ? '课次已永久删除；界面更新失败，请刷新：' : '删除失败，课次和截图仍保留：') + error.message; }
+  finally { libraryWriting = false; $('library-dialog').querySelectorAll('button').forEach(button => { button.disabled = false; }); controls(); }
+};
 function retainBatch(snapshot) {
   const existing = savedBatches.findIndex(item => item.page === snapshot.page);
   if (existing < 0) savedBatches.push(snapshot); else savedBatches[existing] = snapshot;
@@ -531,6 +620,8 @@ function controls() {
   $('run').disabled = active || !sourceReady || !ready;
   $('run').textContent = stream ? '开始实时截取' : canResume() ? `继续提取 · ${timecode(activeLesson.task.checkpoint)}` : '开始快速提取';
   $('lesson-select').disabled = active || !ready || !lessons.length;
+  $('library-manage').disabled = active || !ready;
+  $('crop-reuse').disabled = active || !canReuseCrop();
   $('resume-load').disabled = active || !ready;
   $('restart-scan').hidden = !activeLesson?.task || !!stream; $('restart-scan').disabled = active || !sourceReady;
   $('course-zip').disabled = active || !currentCourseLessons().some(lesson => allPages.some(page => page.lessonId === lesson.id));
@@ -552,10 +643,10 @@ function controls() {
   $('release-cache').disabled = active || !(sourceReady || objectURL || hls || stream || videoCache);
   $('batch-discover').disabled = active;
   $('batch-select').disabled = active || !batchJobs.length;
-  $('batch-start').disabled = active || !batchJobs.some(job => !job.requiresCrop && job.selected && job.state !== 'done');
+  $('batch-start').disabled = active || !batchJobs.some(job => PPTBatch.automatic(job) && job.selected && job.state !== 'done');
   document.querySelectorAll('#batch-jobs input').forEach(input => {
     const job = batchJobs.find(item => item.id === input.closest('.batch-job')?.dataset.jobId);
-    input.disabled = active || !job || job.state === 'done' || job.requiresCrop;
+    input.disabled = active || !job || job.state === 'done' || !PPTBatch.automatic(job);
   });
   document.querySelectorAll('#batch-jobs .batch-manual select, #batch-jobs .batch-manual button').forEach(control => { control.disabled = active; });
   document.querySelectorAll('#batch-jobs .batch-job > button').forEach(button => {
@@ -720,12 +811,15 @@ function startSelection(mode) {
   controls(); draw(); status(selectionMode ? `请框选${mode === 'ignore' ? '忽略区' : 'PPT 区域'}；可拖动或用方向键，Enter 确认，Esc 取消。` : '已取消框选。');
 }
 async function setComparisonRegion(nextCrop, nextIgnore, message, confirmCrop = false) {
-  const previous = {crop, ignoreRect, lesson: activeLesson && structuredClone(activeLesson), confirmed: activeBatchJob?.cropConfirmed,
-    hadConfirmed: activeBatchJob && Object.hasOwn(activeBatchJob, 'cropConfirmed')};
+  const previous = {crop, ignoreRect, lesson: activeLesson && structuredClone(activeLesson),
+    job: activeBatchJob && structuredClone(activeBatchJob)};
   const cleared = !sameCrop(crop, nextCrop) && !!ignoreRect;
   crop = {...nextCrop}; ignoreRect = nextIgnore && {...nextIgnore};
   last = candidate = null; candidateSince = 0; cancelSelection(); releaseDedupeContext();
-  if (confirmCrop && activeBatchJob?.requiresCrop) activeBatchJob.cropConfirmed = true;
+  if (confirmCrop && activeBatchJob?.requiresCrop) {
+    activeBatchJob.cropConfirmed = true; activeBatchJob.cropRejected = false; activeBatchJob.manualPrepared = true;
+    activeBatchJob.cropOverride = {crop: {...crop}, aspect: video.videoWidth / video.videoHeight, track: PPTBatch.trackKey(activeBatchJob), manual: true};
+  }
   reviewBusy = true; controls(); draw();
   try {
     const relatedBatch = confirmCrop && activeBatchJob?.requiresCrop && batchPage ? {page: batchPage, jobs: batchJobs} : null;
@@ -737,9 +831,9 @@ async function setComparisonRegion(nextCrop, nextIgnore, message, confirmCrop = 
       for (const key of Object.keys(activeLesson)) if (!Object.hasOwn(previous.lesson, key)) delete activeLesson[key];
       Object.assign(activeLesson, previous.lesson);
     }
-    if (activeBatchJob) {
-      if (previous.hadConfirmed) activeBatchJob.cropConfirmed = previous.confirmed;
-      else delete activeBatchJob.cropConfirmed;
+    if (activeBatchJob && previous.job) {
+      for (const key of Object.keys(activeBatchJob)) if (!Object.hasOwn(previous.job, key)) delete activeBatchJob[key];
+      Object.assign(activeBatchJob, previous.job);
     }
     status('范围保存失败，已恢复原设置：' + error.message);
   } finally { reviewBusy = false; controls(); draw(); renderLibrary(); }
@@ -971,6 +1065,7 @@ async function loadRemote(raw, options = {}) {
     if (!(video.duration > 0) || !Number.isFinite(video.duration)) throw Error('视频没有可用的完整时长，无法快速扫描');
     sourceReady = true; loadedIdentity = {sourceName, coursePage, batchJobId: batchJob?.id || '', sourceKey: 'url:' + info.url};
     await bindLesson({kind: 'remote', url: info.url, ...loadedIdentity, page: coursePage, duration: video.duration});
+    await applyBatchCrop(batchJob);
     video.pause(); frame(0); draw(); $('progress').value = 0;
     status(`已加载 ${sourceName} · ${timecode(video.duration)} · ${video.videoWidth} × ${video.videoHeight}。可框选 PPT 或直接开始快速提取。`);
     pendingOrigins = []; loaded = true;
@@ -1084,6 +1179,9 @@ $('course-zip').onclick = async () => {
 };
 async function fastScan({restart = false, range = null} = {}) {
   if (task || realtimeTimer || realtimeBusy || reviewBusy || exportBusy || pageWrites || !sourceReady || !ready || !activeLesson) return null;
+  if (activeBatchJob?.requiresCrop && (!activeBatchJob.cropConfirmed || activeBatchJob.cropRejected)) {
+    selectionMode = 'crop'; selectionRect = {...crop}; draw(); status('本节 0 路视频需要手动确认 PPT 裁剪区域。'); return null;
+  }
   const resume = !range && !restart && canResume(), settings = scanSettings(), originalRanges = structuredClone(activeLesson.suspects || []);
   const hasBaseline = resume && Object.hasOwn(activeLesson.task, 'baselineTime'), baselineTime = hasBaseline ? activeLesson.task.baselineTime : null;
   const start = range ? range.start : hasBaseline ? activeLesson.task.checkpoint : 0, end = range ? Math.min(range.end, video.duration) : video.duration;
@@ -1141,13 +1239,69 @@ async function fastScan({restart = false, range = null} = {}) {
   }
   return outcome;
 }
-function batchLesson(job) { return lessons.find(lesson => lesson.source && PPTLibrary.key(lesson.source) === PPTLibrary.key({batchJobId: job.id, page: batchPage})); }
+function canReuseCrop() {
+  return sourceReady && activeBatchJob?.requiresCrop && activeBatchJob.cropConfirmed && !activeBatchJob.cropRejected && PPTBatch.zeroTrack(activeBatchJob)
+    && PPTBatch.validCrop(crop) && video.videoWidth > 0 && video.videoHeight > 0 && activeLesson?.page === batchPage;
+}
+function cropReuseTargets() {
+  const course = PPTLibrary.courseKey(activeLesson?.page, activeLesson?.course);
+  return batchJobs.filter(job => job !== activeBatchJob && job.requiresCrop && PPTBatch.zeroTrack(job) && job.state !== 'done'
+    && batchLesson(job)?.task?.state !== 'done' && !job.manualPrepared && job.state !== 'manual' && !(job.cropConfirmed && !job.cropOverride)
+    && !job.cropOverride?.manual && PPTLibrary.courseKey(batchPage, job.course) === course);
+}
+let cropReusePlan = null, cropReuseWriting = false;
+$('crop-reuse').onclick = () => {
+  if (busy() || !canReuseCrop()) return;
+  const jobs = cropReuseTargets();
+  cropReusePlan = {ids: jobs.map(job => job.id), crop: {...crop}, aspect: video.videoWidth / video.videoHeight};
+  $('crop-reuse-summary').textContent = `将“${lessonLabel(activeLesson)}”的裁剪用于本课程 ${jobs.length} 个课次：${jobs.map(job => [job.course.date, job.course.start?.slice(0, 5), job.sourceName].filter(Boolean).join(' ')).join('、') || '暂无符合条件的课次'}。`;
+  $('crop-reuse-agree').checked = false; $('crop-reuse-apply').disabled = true; $('crop-reuse-status').textContent = '';
+  reviewBusy = true; controls(); $('crop-reuse-dialog').showModal();
+};
+$('crop-reuse-agree').onchange = () => { $('crop-reuse-apply').disabled = !cropReusePlan?.ids.length || !$('crop-reuse-agree').checked || cropReuseWriting; };
+function closeCropReuse() {
+  if (cropReuseWriting) return;
+  $('crop-reuse-dialog').close(); cropReusePlan = null; reviewBusy = false; controls(); $('crop-reuse').focus();
+}
+$('crop-reuse-cancel').onclick = closeCropReuse;
+$('crop-reuse-dialog').oncancel = event => { event.preventDefault(); closeCropReuse(); };
+$('crop-reuse-apply').onclick = async () => {
+  if (cropReuseWriting || !cropReusePlan?.ids.length || !$('crop-reuse-agree').checked) return;
+  cropReuseWriting = true; $('crop-reuse-apply').disabled = true; $('crop-reuse-cancel').disabled = true;
+  let committed = false;
+  try {
+    const eligible = new Set(cropReuseTargets().map(job => job.id));
+    const jobs = batchJobs.map(job => !eligible.has(job.id) || !cropReusePlan.ids.includes(job.id) ? structuredClone(job) : {...structuredClone(job),
+      cropOverride: {crop: {...cropReusePlan.crop}, aspect: cropReusePlan.aspect, track: PPTBatch.trackKey(job), manual: false},
+      cropConfirmed: true, cropRejected: false, selected: true, state: 'pending', error: ''});
+    await PPTLibrary.put(db, activeLesson, {page: batchPage, jobs}); committed = true;
+    retainBatch(structuredClone({page: batchPage, jobs}));
+    const sourceId = activeBatchJob.id; batchJobs = jobs; activeBatchJob = batchJobs.find(job => job.id === sourceId);
+    cropReuseWriting = false; closeCropReuse(); renderBatchJobs(); status('已保存裁剪复用设置。可开始批量提取；每节载入后会核对视频轨道和宽高比。');
+  } catch (error) {
+    const message = (committed ? '复用设置已保存；界面更新失败，请刷新：' : '复用设置保存失败，原设置仍保留：') + error.message;
+    $('crop-reuse-status').textContent = message; if (committed) status(message);
+  }
+  finally { cropReuseWriting = false; $('crop-reuse-cancel').disabled = false; $('crop-reuse-agree').onchange(); }
+};
+async function applyBatchCrop(job) {
+  if (!job?.requiresCrop || !job.cropOverride) return;
+  const valid = PPTBatch.cropMatches(job.cropOverride, loadedIdentity, video.videoWidth / video.videoHeight);
+  const nextJob = {...job, cropConfirmed: valid, cropRejected: !valid, ...(valid ? {} : {selected: false, state: 'needs-crop', error: '视频轨道或宽高比与裁剪设置不匹配，请手动框选。'})};
+  const nextLesson = {...activeLesson, ...(valid ? {crop: {...job.cropOverride.crop}, ignoreRect: sameCrop(crop, job.cropOverride.crop) ? ignoreRect : null} : {})};
+  const jobs = batchJobs.map(item => item.id === job.id ? nextJob : item);
+  await PPTLibrary.put(db, nextLesson, {page: batchPage, jobs});
+  Object.assign(job, nextJob); Object.assign(activeLesson, nextLesson); retainBatch(structuredClone({page: batchPage, jobs}));
+  crop = {...(nextLesson.crop || crop)}; ignoreRect = normalizedIgnore(nextLesson.ignoreRect); releaseDedupeContext();
+  if (!valid) { selectionMode = 'crop'; selectionRect = {...crop}; }
+}
+function batchLesson(job, page = batchPage) { return lessons.find(lesson => lesson.source && PPTLibrary.key(lesson.source) === PPTLibrary.key({batchJobId: job.id, page})); }
 function batchPages(job) { const lesson = batchLesson(job); return lesson ? allPages.filter(page => page.lessonId === lesson.id).sort((a, b) => a.order - b.order) : []; }
 function batchPageCount(job) { return batchPages(job).length; }
 function syncBatchJob(job) {
   const count = batchPageCount(job);
-  if (!count && ['done', 'partial'].includes(job.state)) {
-    job.state = job.requiresCrop ? 'needs-crop' : 'pending'; job.selected = !job.requiresCrop; job.error = '';
+  if (!count && ['done', 'partial'].includes(job.state) && batchLesson(job) && batchLesson(job).task?.state !== 'done') {
+    job.state = PPTBatch.automatic(job) ? 'pending' : 'needs-crop'; job.selected = PPTBatch.automatic(job); job.error = '';
   }
   return count;
 }
@@ -1157,7 +1311,7 @@ function renderBatchJobs() {
   for (const job of batchJobs) {
     const row = document.createElement('div'), choose = document.createElement('input'), title = document.createElement('span'), state = document.createElement('span'), download = document.createElement('button');
     row.className = 'batch-job'; row.dataset.jobId = job.id;
-    choose.type = 'checkbox'; choose.checked = !!job.selected; choose.disabled = batchRunning || job.state === 'done' || job.requiresCrop;
+    choose.type = 'checkbox'; choose.checked = !!job.selected; choose.disabled = batchRunning || job.state === 'done' || !PPTBatch.automatic(job);
     choose.onchange = () => { job.selected = choose.checked; persistBatch().catch(e => status('批量选择保存失败：' + e.message)); controls(); };
     const size = job.size ? ` · ${(job.size / 1024 ** 2).toFixed(0)} MB` : '';
     title.textContent = `${job.course.date || '未知日期'} ${String(job.course.start || '').slice(0, 5)} · ${job.sourceName}${size}${job.requiresCrop ? ' · 仅有 0 路视频' : ''}`;
@@ -1178,13 +1332,19 @@ function renderBatchJobs() {
       manual.className = 'batch-manual';
       for (const item of job.options) { const option = document.createElement('option'); option.value = item.url; option.textContent = item.sourceName; select.append(option); }
       select.value = job.url; select.disabled = batchRunning || !!task;
-      select.onchange = () => {
+      select.onchange = async () => {
+        if (busy()) return;
         const item = job.options.find(candidate => candidate.url === select.value);
-        if (item && !sameMediaSource(job, item)) {
-          if (activeBatchJob === job) activeBatchJob = null;
-          Object.assign(job, item, {cropConfirmed: false, state: batchPageCount(job) ? 'partial' : 'needs-crop'});
-        }
-        persistBatch().catch(e => status('视频选择保存失败：' + e.message)); renderBatchJobs();
+        if (!item) return;
+        const changed = !sameMediaSource(job, item), next = {...job, ...item, ...(changed ? {cropConfirmed: false, cropRejected: true, manualPrepared: false, selected: false, state: 'needs-crop'} : {})};
+        reviewBusy = true; controls();
+        try {
+          const jobs = batchJobs.map(value => value === job ? next : value);
+          await PPTLibrary.batch(db, batchPage, jobs); retainBatch(structuredClone({page: batchPage, jobs}));
+          Object.assign(job, next);
+          if (changed && activeBatchJob === job) { await releaseSource(); activeBatchJob = null; }
+        } catch (error) { status('视频选择保存失败：' + error.message); }
+        finally { reviewBusy = false; renderBatchJobs(); }
       };
       prepare.textContent = count ? '继续用 0 路处理' : '加载 0 路并框选'; prepare.disabled = batchRunning || !!task;
       prepare.onclick = () => { if (!busy()) prepareManualBatchJob(job, chrome.permissions.request({origins: [originPattern(job.url)]})); };
@@ -1201,7 +1361,7 @@ function renderBatchJobs() {
     };
     row.append(view, download); container.append(row);
   }
-  const selected = batchJobs.filter(job => !job.requiresCrop && job.selected && job.state !== 'done').length, manual = batchJobs.filter(job => job.requiresCrop).length;
+  const selected = batchJobs.filter(job => PPTBatch.automatic(job) && job.selected && job.state !== 'done').length, manual = batchJobs.filter(job => job.requiresCrop && !PPTBatch.automatic(job) && job.state !== 'done').length;
   $('batch-count').textContent = batchJobs.length ? `共 ${batchJobs.length} 节，自动 ${selected} 节${manual ? `，需框选 ${manual} 节` : ''}` : '未读取';
   controls();
 }
@@ -1218,20 +1378,25 @@ async function discoverBatch(tabId = Number($('course').value), automatic = fals
     if (!current()) return;
     if (!result?.ok) throw Error(result?.error || '课程页没有返回批量数据');
     const previous = savedBatches.find(item => item.page === result.page)?.jobs || (batchPage === result.page ? batchJobs : []);
-    batchPage = result.page;
-    batchJobs = result.jobs.map(job => {
+    const jobs = result.jobs.map(job => {
       const existing = previous.find(old => old.id === job.id);
       if (job.requiresCrop && existing) {
         const options = job.options || [], option = options.find(item => sameMediaSource(existing, item));
         if (option) job = {...job, ...option};
       }
-      const unchanged = sameMediaSource(existing, job), lesson = batchLesson(job), count = batchPageCount(job);
-      const done = (lesson?.task?.state === 'done' && sameMediaSource(lesson.source, job)) || (count && unchanged && existing?.state === 'done');
-      return {...job, cropConfirmed: unchanged && !!existing?.cropConfirmed, selected: job.requiresCrop || done ? false : existing?.selected ?? true, state: done ? 'done' : count ? 'partial' : unchanged && (existing?.state === 'failed' || existing?.state === 'stopped') ? existing.state : job.requiresCrop ? 'needs-crop' : 'pending', error: unchanged ? existing?.error || '' : ''};
+      const unchanged = sameMediaSource(existing, job), lesson = batchLesson(job, result.page), count = lesson ? allPages.filter(page => page.lessonId === lesson.id).length : 0;
+      const done = (lesson?.task?.state === 'done' && sameMediaSource(lesson.source, job)) || (unchanged && existing?.state === 'done');
+      const next = {...job, ...(existing?.cropOverride ? {cropOverride: structuredClone(existing.cropOverride)} : {}),
+        manualPrepared: !!existing?.manualPrepared, cropRejected: !!existing?.cropRejected || (!!existing?.cropOverride && !unchanged), cropConfirmed: unchanged && !!existing?.cropConfirmed};
+      return {...next, selected: done || !PPTBatch.automatic(next) ? false : existing?.selected ?? true,
+        state: done ? 'done' : count ? 'partial' : unchanged && ['failed', 'stopped', 'manual'].includes(existing?.state) ? existing.state : PPTBatch.automatic(next) ? 'pending' : 'needs-crop', error: unchanged ? existing?.error || '' : ''};
     });
+    await PPTLibrary.batch(db, result.page, jobs); retainBatch(structuredClone({page: result.page, jobs}));
+    if (!current()) return;
+    batchPage = result.page; batchJobs = jobs;
     if (activeBatchJob) activeBatchJob = loadedIdentity?.coursePage === batchPage ? batchJobs.find(job => job.id === activeBatchJob.id && sameMediaSource(job, loadedIdentity)) || null : null;
-    await persistBatch(); if (!current()) return; renderBatchJobs();
-    const skipped = result.total - result.eligible, missing = result.failures?.length || 0, manual = batchJobs.filter(job => job.requiresCrop).length;
+    renderBatchJobs();
+    const skipped = result.total - result.eligible, missing = result.failures?.length || 0, manual = batchJobs.filter(job => job.requiresCrop && !PPTBatch.automatic(job) && job.state !== 'done').length;
     $('batch-status').textContent = `读取完成：${result.total} 个课次，找到 ${batchJobs.length} 个视频${skipped ? `，跳过 ${skipped} 个未完成/转码中课次` : ''}${missing ? `，${missing} 个录像缺少可用视频` : ''}${manual ? `。其中 ${manual} 节只有 0 路视频，请逐节选择并框选 PPT 区域` : ''}。`;
   } catch (error) {
     if (!current()) return;
@@ -1247,7 +1412,7 @@ async function prepareManualBatchJob(job, permission) {
     coursePage = batchPage; sourceCourse = {...job.course}; sourceCoursePage = coursePage;
     const loaded = await loadRemote(job.url, {permissionGranted: true, sourceName: job.sourceName, batchJob: job});
     if (!loaded) throw Error($('status').textContent || '视频加载失败');
-    job.state = 'manual'; if (!job.cropConfirmed) { selectionMode = 'crop'; selectionRect = {...crop}; } await persistBatch(); renderBatchJobs(); controls(); draw();
+    job.state = 'manual'; job.manualPrepared = true; if (!job.cropConfirmed) { selectionMode = 'crop'; selectionRect = {...crop}; } await persistBatch(); renderBatchJobs(); controls(); draw();
     const prompt = job.cropConfirmed ? '已恢复本节裁剪区域，可继续提取或调整框选。' : '本节只有 0 路视频。请在预览中框选 PPT 区域，再点击“开始快速提取”。';
     status(prompt); $('batch-status').textContent = prompt;
   } catch (error) {
@@ -1257,7 +1422,7 @@ async function prepareManualBatchJob(job, permission) {
   }
 }
 async function runBatch(permission) {
-  const selected = batchJobs.filter(job => !job.requiresCrop && job.selected && job.state !== 'done');
+  const selected = batchJobs.filter(job => PPTBatch.automatic(job) && job.selected && job.state !== 'done');
   if (!selected.length || busy()) return;
   batchRunning = true; batchStopRequested = false; coursePage = batchPage; controls();
   let startupError = '';
@@ -1271,6 +1436,9 @@ async function runBatch(permission) {
       const loaded = await loadRemote(job.url, {permissionGranted: true, sourceName: job.sourceName, batchJob: job});
       if (!loaded) { job.state = batchStopRequested ? 'stopped' : 'failed'; job.error = $('status').textContent; await persistBatch(); renderBatchJobs(); continue; }
       if (batchStopRequested) { job.state = 'stopped'; await releaseSource(); renderBatchJobs(); break; }
+      if (job.requiresCrop && (!job.cropConfirmed || job.cropRejected)) {
+        job.state = 'needs-crop'; job.selected = false; await persistBatch(); await releaseSource(); renderBatchJobs(); continue;
+      }
       job.state = 'scanning'; await persistBatch(); renderBatchJobs();
       $('batch-status').textContent = `第 ${index + 1} / ${selected.length} 节：正在提取 PPT…`;
       const result = await fastScan(); job.pages = batchPageCount(job);
@@ -1291,12 +1459,12 @@ async function runBatch(permission) {
 }
 $('batch-discover').onclick = () => discoverBatch();
 $('batch-select').onclick = () => {
-  const selectable = batchJobs.filter(job => !job.requiresCrop && job.state !== 'done'), choose = selectable.some(job => !job.selected);
+  const selectable = batchJobs.filter(job => PPTBatch.automatic(job) && job.state !== 'done'), choose = selectable.some(job => !job.selected);
   selectable.forEach(job => { job.selected = choose; }); persistBatch().catch(e => status('批量选择保存失败：' + e.message)); renderBatchJobs();
 };
 $('batch-start').onclick = () => {
   if (busy()) return;
-  const origins = [...new Set(batchJobs.filter(job => !job.requiresCrop && job.selected && job.state !== 'done').map(job => originPattern(job.url)))];
+  const origins = [...new Set(batchJobs.filter(job => PPTBatch.automatic(job) && job.selected && job.state !== 'done').map(job => originPattern(job.url)))];
   const permission = origins.length ? chrome.permissions.request({origins}) : Promise.resolve(false);
   runBatch(permission);
 };

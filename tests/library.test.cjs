@@ -1,6 +1,23 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const library = require('../library.js');
+const batch = require('../batch.js');
+
+test('crop reuse validates bounds, zero-track identity and actual aspect within one percent', () => {
+  const source = {sourceName: '0-camera.mp4', url: 'https://cdn.invalid/0-camera.mp4?id=1&token=old'};
+  const override = {crop: {x: .1, y: .2, w: .7, h: .6}, aspect: 16 / 9, track: batch.trackKey(source)};
+  assert.equal(batch.cropMatches(override, {...source, url: source.url.replace('old', 'new')}, override.aspect * 1.01), true);
+  assert.equal(batch.cropMatches(override, source, override.aspect * 1.01001), false);
+  assert.equal(batch.cropMatches(override, {...source, url: source.url.replace('id=1', 'id=2')}, override.aspect), false);
+  assert.equal(batch.cropMatches(override, {...source, sourceName: '2-camera.mp4'}, override.aspect), false);
+  for (const crop of [{x: -.1, y: 0, w: 1, h: 1}, {x: .5, y: 0, w: .6, h: 1}, {x: 0, y: 0, w: 0, h: 1}, {x: 0, y: 0, w: NaN, h: 1}]) {
+    assert.equal(batch.cropMatches({...override, crop}, source, override.aspect), false);
+  }
+  assert.equal(batch.cropMatches({...override, aspect: Infinity}, source, override.aspect), false);
+  assert.equal(batch.automatic({requiresCrop: true, cropConfirmed: true}), false, 'legacy confirmation alone cannot enable automatic zero-track scanning');
+  assert.equal(batch.automatic({requiresCrop: true, cropConfirmed: true, cropOverride: override}), true);
+  assert.equal(batch.automatic({requiresCrop: true, cropConfirmed: true, cropOverride: override, cropRejected: true}), false);
+});
 
 test('source identity separates courses, local files and independent batch recordings', () => {
   const a = {page: 'https://rms-v5.xjtu.edu.cn/study-capture-courses/42/preview-detail/1', sourceKey: 'file:["a.mp4",10,1]', sourceName: 'a.mp4'};

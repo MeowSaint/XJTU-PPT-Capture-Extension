@@ -27,6 +27,7 @@
       <aside id="workspace-tools" class="workspace-tools" aria-label="视频与设置">
         <div class="library-tools">
           <label class="field-stack" for="lesson-select"><span>本机课次</span><select id="lesson-select"><option value="">尚未保存课次</option></select></label>
+          <button id="library-manage" type="button">管理本机课次</button>
           <button id="resume-load" class="source-load" type="button" hidden>加载本节原视频</button>
         </div>
         <div class="setting-tabs" role="tablist" aria-label="工作台设置">
@@ -188,6 +189,7 @@
             <div class="frame-actions" role="group" aria-label="画面与缓存">
               <button id="crop-select" class="button-quiet" type="button" aria-pressed="false" disabled>框选 PPT 区域</button>
               <button id="full" class="button-quiet" type="button" disabled>使用完整画面</button>
+              <button id="crop-reuse" class="button-quiet" type="button" disabled>将本节裁剪用于本课其他 0 路课次</button>
               <button id="release-cache" class="button-quiet" type="button" disabled title="卸载当前视频，保留截图和命名信息">释放视频缓存</button>
             </div>
           </div>
@@ -223,6 +225,25 @@
       </main>
     </div>
   </div>
+  <dialog id="library-dialog" class="workspace-dialog" aria-labelledby="library-title">
+    <h2 id="library-title">管理本机课次</h2>
+    <p class="note">估算仅含截图、缩略图和比较签名，不含视频缓存及浏览器存储开销。删除课次或整课后不可撤销。</p>
+    <p id="library-status" role="status" aria-live="polite"></p>
+    <div id="library-list"></div>
+    <div id="library-confirm" hidden>
+      <p id="library-confirm-text"></p>
+      <div class="dialog-actions"><button id="library-cancel-delete" type="button">取消删除</button><button id="library-delete" class="button-danger" type="button">永久删除</button></div>
+    </div>
+    <div class="dialog-actions"><button id="library-close" type="button" autofocus>关闭管理</button></div>
+  </dialog>
+  <dialog id="crop-reuse-dialog" class="workspace-dialog" aria-labelledby="crop-reuse-title">
+    <h2 id="crop-reuse-title">复用本节 PPT 裁剪</h2>
+    <p id="crop-reuse-summary"></p>
+    <p class="note">仅用于本课程尚未完成、未单独框选的 0 路课次。载入时会核对视频轨道和宽高比；不匹配的课次仍需手动框选。</p>
+    <label class="check"><input id="crop-reuse-agree" type="checkbox"><span>我确认这些课次使用相同机位，PPT 在画面中的位置相同。</span></label>
+    <p id="crop-reuse-status" role="status" aria-live="polite"></p>
+    <div class="dialog-actions"><button id="crop-reuse-cancel" type="button" autofocus>取消</button><button id="crop-reuse-apply" type="button" disabled>应用到这些课次</button></div>
+  </dialog>
   <dialog id="lightbox" aria-labelledby="lightbox-meta">
     <div class="lightbox-heading">
       <h2 id="lightbox-meta"></h2>

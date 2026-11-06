@@ -189,6 +189,11 @@ progress::-moz-progress-bar { background: var(--accent); }
 .dialog-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 20px; }
 .workspace-dialog a { color: var(--accent); text-underline-offset: 3px; }
 #terms-accept:not(:disabled) { background: var(--accent); border-color: var(--accent); color: var(--surface); }
+#library-dialog { width: min(760px, calc(100vw - 48px)); }
+.library-course { margin-top: 20px; border-top: 1px solid var(--border); padding-top: 12px; }
+.library-course h3, .library-lesson, .library-context { overflow-wrap: anywhere; }
+.library-lesson { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin-top: 12px; }
+#library-confirm { margin-top: 20px; padding: 12px; border: 1px solid var(--accent); }
 #similar-dialog { width: min(1100px, calc(100vw - 48px)); }
 #similar-pair:not([hidden]) { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 #similar-pair figure { margin: 0; min-width: 0; }
