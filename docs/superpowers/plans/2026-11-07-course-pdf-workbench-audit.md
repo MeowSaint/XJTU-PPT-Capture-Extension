@@ -87,6 +87,12 @@ Ruling：把 I2 交回原 Task2 owner，在保持展开批量和现有固定 Sta
 
 Ruling：限定原 UI owner 只将 integration 的拖拽动作改为正确连续原生鼠标：在源卡内真实移动并断言可信首卡 dragstart 后，正常滚到末卡原 x=width-4/y12 右半落点释放；仍断言原精确序列、刷新持久化和所有后续 Referer/PDF/JPEG/IDB，不改强断言、viewport、batch、权限、拦截或timeout。代价是测试多维护几步输入与启动断言，需保留真实事件/哈希和完整链通过，不能靠赋状态/合成事件/force/sleep；不扩大图库只为让 helper 同时看到两行。此为 Ruling9“保留原 helper”的证据驱动限定例外，不是产品算法修补或削弱排序目标。
 
+## Ruling11 — 保持精确裁剪断言，修正框选输入的几何前提
+
+正确原生首卡手势后的完整 integration（integration 指纹495deb43a3150b8b125465ff419b47af14945299558a3a7a012742bb44e07a64，CSS348d不变，job bash-9f8345d836894e53已收取exit1）已通过原精确排序、新页持久化、HLS Referer/cache/PDF，推进到原375/现395裁剪断言：真实解码为640×361，而原强断言要求高度360。父代理读integration365–429、capture853–879/922–966：测试取整个overlay包围盒25%→75%，产品则按video.clientWidth/clientHeight与原始宽高计算contain后的真实图像界限，再用PointerEvent映射并round源像素尺寸。整个overlay半高不必等于含留边图像的半高，旧用例的精确360前提需要真实几何核对。
+
+Ruling：只允许同一原UI owner在这一框选输入块依据公开video尺寸/原始比例与overlay/canvas坐标，选择扣除contain留边后的真实图像25%→75%原生鼠标点；完整记录公开尺寸、两端点与只读实际crop/输出，不从输出或私有crop倒算expected。保留原宽度范围、高度严格360和保存/预览decode/恢复full/后续全部强断言，不改产品crop/frame/JS/CSS、viewport、权限、route或timeout。若真实几何不支持该解释，先报告而不放宽断言或继续换值。代价是测试多维护图像坐标规划与公开几何记录；不是把361算通过，也不代表已完成最后整链。原生排序Ruling10不变，其他文件仍禁止修改。
+
 ## 最终审查与产物
 
 状态：待完成。需记录整体审查结论、实际截图/合成 PDF、34 成员 3.1.2 安装包的 CRC/源字节/SHA-256，以及实际测试环境与未验证项。
