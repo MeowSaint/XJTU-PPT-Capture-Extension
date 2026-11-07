@@ -15,17 +15,21 @@
 
 ## 1. 在全页比较上保护小区域增量
 
-继续使用PPTCore.similar签名/API与原changed+mean双阈值、亮度小偏置补偿、忽略区。新增 `PPTCore.hasLocalChange(a,b,mask=null) -> boolean`，只对规范192×108 RGBA签名执行局部保护，其他尺寸沿用既有全页逻辑。无效输入仍按既有保守“不相似”处理。
+继续使用PPTCore.similar签名/API与原changed+mean双阈值、亮度小偏置补偿、忽略区。新增 `PPTCore.hasLocalChange(a,b,mask=null) -> boolean`，只对既有192×108 RGBA布局的82944个通道值执行局部保护，数组长度不同的旧输入沿用既有全页逻辑；不增加width/height参数。mask继续为frameDistance已有的每像素标记数组，偏置保持原浮点精度。无效输入仍按既有保守“不相似”处理。
 
-局部规则固定：12×12窗口、6像素stride；在扣除与frameDistance一致的每通道≤8全局亮度偏置后，窗口内至少8个未忽略像素的最大通道差≥48，则判定存在局部变化。边缘窗口裁到实际图像。similar只有全页阈值通过且局部变化不存在时才返回true；相邻变化、稳定确认、全局去重和人工相似页比较用同一规则，不能只在事后补救已经被删掉的知识页。不提高签名分辨率或让高分辨率图常驻内存。
+局部规则固定：在扣除与frameDistance一致的每通道绝对值≤8全局亮度偏置后，只要有一个未忽略像素的最大RGB通道差≥48，就判定存在局部变化。直接逐像素检查，不使用窗口/stride/计数门槛。mask采用与frameDistance第三参数相同的忽略区含义。similar只有全页阈值通过且局部变化不存在时才返回true；相邻变化、稳定确认、全局去重和人工相似页比较用同一规则，不能只在事后补救已经被删掉的知识页。共享内部比较结果，避免similar重复计算偏置和像素循环；不新增跨帧缓存，不提高签名分辨率或让高分辨率图常驻内存。
 
-局部保护可能多保留鼠标等画面，这是保守取舍。通过既有忽略区与后续学习版整理处理；不能声称该规则理解公式。至少证明48黑像素公式/8彩色像素批注可保留、uniform小亮度和mask内动效仍可忽略。
+局部保护可能多保留鼠标、压缩噪声和轻微抖动画面，这是优先保留已有小信号的取舍。通过既有忽略区与后续学习版整理处理；不能声称该规则理解公式，缩小签名时已经消失的细节也无法恢复。至少证明单个强差像素、等价上下标/单数字小区域、48黑像素公式/8彩色像素批注可保留，图像边缘和部分mask不漏计，uniform小亮度和完全位于mask内的动效仍可忽略。
+
+修订依据见[Canvas与Sharp设计核查](../../../.test-output/learning-preflight/2026-11-08-detail-design-review.md)：710×378合成课件缩至192×108后，上标/下标/单数字仅剩2/1/1个强差像素，旧8像素门槛会漏过。此结果支持更保守门槛，不等于对真实课件或知识语义的认证。
 
 新完整scan记录comparisonVersion='local-v1'。旧断点仍可按既有采样/裁剪设置续扫；旧比较与新比较混用的任务记录'mixed'，报告要求核对前段，不删除旧图或假称此前已应用局部保护。物理覆盖证据保持实际含义。
 
 ## 2. 可恢复的学习版
 
-每页新增可选 `learningExcluded:boolean`，默认false；由用户选择排除/恢复时只更新pages元数据，不删除assets。lesson新增 `knowledgeReview:'unreviewed'|'has-content'|'no-content'`，默认unreviewed，非unreviewed核验同时保存 `knowledgeReviewEvidence:{sourceKey,pageIds}`；sourceKey取lesson.task.coverage.sourceKey或lesson.key或null，pageIds为本节全部当前原始页ID。有效核验必须与当前sourceKey和pageIds集合一致，否则按unreviewed显示/报告。新增截图成功但随后lesson元数据写入失败，也不能在重开时沿用旧已审状态。添加新截图或实际切换来源导致旧核验失效时恢复unreviewed，不能把重新扫描后的新页继承为已审。
+每页新增可选 `learningExcluded:boolean`，默认false；由用户选择排除/恢复时只更新pages元数据，不删除assets。lesson新增 `knowledgeReview:'unreviewed'|'has-content'|'no-content'`，默认unreviewed，非unreviewed核验同时保存 `knowledgeReviewEvidence:{sourceKey,trackKey,sourceDuration,pageIds}`。sourceKey按完整性投影使用的当前PPTLibrary.key(lesson.source)推导；没有source元数据时才用lesson.key或null。trackKey复用完整性投影的当前通道身份规则，无可识别来源时为null，不能直接信任旧task.coverage里的source/track值。sourceDuration为当前lesson.source.duration的有限正数，否则显式null；pageIds为本节全部当前原始页ID。
+
+有效核验要求四项均与当前依据一致，包括sourceDuration字段存在且相等，以及完整pageIds集合相等；否则按unreviewed显示/报告。源地址或batch job相同也可能切换通道或更新为更长文件，旧核验不能继续认证。核验始终用本节全部原始页，不能用当前筛选、所选页或学习版子集；只有排除标记、页序或查看范围变化不使原始页集合失效。新增截图成功但随后lesson元数据写入失败，也不能在重开时沿用旧已审状态。添加新截图、实际来源/通道/已知时长变化导致旧核验失效时恢复unreviewed，不能把重新扫描后的新页继承为已审。
 
 本节页面提供“排除所选 / 恢复所选”、每页排除/恢复和“全部 / 学习版保留 / 已排除”查看。当前筛选下全选/计数以可见页为准，跨视图切换清除陈旧选择；原pages/allPages仍保存所有原始记录，不能把视图过滤当删除。排除/恢复为原子metadata事务，失败不改内存和显示；最近一次可撤销，重开后状态保留。原永久删除及其undo资产租约继续有效，切换undo类型需正确释放先前租约。
 
@@ -47,7 +51,11 @@ lesson核验UI明示“尚未核验 / 有独立知识内容 / 无独立知识内
 
 原页序、sourceTime、书签目的地与课次日期保留；课次内页码按实际导出连续，讲义每课次新纸页，中文三级目录和背压沿用。当前课与批量课作用域继续独立；设置或页序在导出过程中变化不污染已冻结的快照。
 
-完整性报告在原schema v1基础上增加view='raw'|'learning'、rawCount/excludedCount/exportedCount、knowledgeReview、comparisonVersion、逐页原ID/sourceTime与导出序号映射。目录/扫描完成与知识核验分别表达；一个已扫尾但无知识的课次可以标已核验无内容，不能说扫描失败或丢课。未核验内容的课程不因PDF数齐全而显示学习版完成。
+完整性报告在原schema v1基础上增加view='raw'|'learning'、rawCount/excludedCount/exportedCount、有效knowledgeReview、comparisonVersion、逐页原ID/sourceTime与导出序号映射。计数以本次请求的raw页面范围为基准：rawCount是过滤前数量，exportedCount是本次实际输出数量，excludedCount=rawCount-exportedCount；raw模式不应用学习排除，excludedCount为0。核验依据另从完整原始页集合计算，不能把所选子集当作旧核验失效，也不能因子集验证失败而绕过整节no-content。
+
+`PPTLibrary.integrity`新增可选reviewPages=pages作为本节/课程完整原始页的核验快照；pages仍是本次请求的raw范围，内部各课次用reviewPages的本节全量记录核验并统计原始savedPages。调用方冻结全量核验依据、所选raw范围、有效状态与view，再得到实际输出；writer、报告和receipt必须消费同一快照。新增knowledgeComplete：报告至少有一行课次，且每一行都有效核验；空页/未扫描课次仍在集合内，无lesson或无有效证据的行是unreviewed。既有complete继续表示目录/物理扫描证据，不用知识标记覆盖它。只有两者均满足才可显示学习版完整；一个已扫尾但无知识的课次可以标已核验无内容，不能说扫描失败或丢课。
+
+公开报告继续使用既有身份别名和受限字段投影，不拷贝内部knowledgeReviewEvidence、原始sourceKey/trackKey、签名URL、名称/备注或凭据字段。页ID需沿用原有必要别名规则。实际字段名继续使用lessons[].lessonId和scan.reachedEnd等现有schema，不另造scan.complete。
 
 ## 5. 3.1.3与最终交付
 

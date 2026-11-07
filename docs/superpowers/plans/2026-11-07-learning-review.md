@@ -34,11 +34,11 @@
 **Files:** Modify `media.js`, `capture.js`, `tests/core.test.cjs`, `tests/scanner.test.cjs`, `tests/improvements.cjs`。保持签名尺寸/缓存和现有scanSettings，不先实现学习版UI。
 
 **Interfaces:**
-- Produces `PPTCore.hasLocalChange(a,b,mask=null) -> boolean`，规范192×108签名、12×12窗口/stride6、8个未mask像素max通道差≥48；与frameDistance相同的≤8偏置修正。
+- Produces `PPTCore.hasLocalChange(a,b,mask=null) -> boolean`，规范192×108签名中任意一个未mask像素maxRGB通道差≥48即true；与frameDistance相同的每通道绝对值≤8偏置修正，mask含义同frameDistance第三参数。逐像素判断，删除无作用的窗口/stride/最小计数参数。
 - Extends已有similar：全页双阈值通过且无局部变化才similar；旧其他尺寸保持原比较。多个调用共用已计算指标，不能复制偏置/像素循环或给全局去重另写一套判定。
 - New scan task `comparisonVersion:'local-v1'`；续旧无版本/其他版本任务记'mixed'，保留原断点与图片；report新增字段由Task2消费。
 
-- [ ] **Step 1: 写失败测试**。规范白底签名加入48个紧邻黑像素/8个彩色像素/跨12px窗口边界的细线时similar=false；两帧相同、≤8均匀亮度、mask内动效仍similar=true。证明变化量足够小到旧全页阈值仍通过。局部窗口边缘与部分mask不能漏/误计。
+- [ ] **Step 1: 写失败测试**。规范签名中单个未遮罩强差像素应使similar=false；48/47边界按扣除原有浮点偏置后的差值构造，边界夹具可用低于48的分散反向变化抵消均值。不能为迎合未经补偿的raw48断言而给偏置取整。覆盖图像角落/边缘、部分mask和完全位于mask内的单像素；mask为既有每像素标记数组。新增上下标/单数字等价小区域，以及48黑像素公式/8彩色批注；两帧相同、≤8均匀亮度、mask内动效仍similar=true。证明小增量在旧全页双阈值下通过。实际Canvas路径复用前置合成画面或等价fixture，断言页图/pixels/sourceTime，不能只保留大于8像素的测试。
 
 ```js
 assert.equal(frameDistance(a,formula).changed < 1.2, true);
@@ -60,15 +60,15 @@ assert.deepEqual(savedKnowledgeFrames, [baseTime,formulaTime,annotationTime]);
 **Files:** Modify `capture.js`, `capture.html`, `style.css`, `library.js`, `page-store.js`, `tests/library.test.cjs`, `tests/library.cjs`, `tests/improvements.cjs`, `tests/memory.cjs`, `README.md`, `tests/README.md`。不改pdf writer字节协议；需要额外直接消费者时先报告控制器。
 
 **Interfaces:**
-- Produces `PPTLibrary.learningPages(pages,{view='raw',knowledgeReview='unreviewed'}={}) -> Page[]`，保持原顺序/对象、旧缺字段保留；learning排除learningExcluded及effective no-content本节，raw保留全部。
-- Produces `PPTLibrary.knowledgeState(lesson,pages) -> 'unreviewed'|'has-content'|'no-content'`，只有Spec §2的knowledgeReviewEvidence与当前sourceKey/pageIds集合完全匹配才认可非unreviewed。
+- Produces `PPTLibrary.learningPages(pages,{view='raw',knowledgeReview='unreviewed'}={}) -> Page[]`，保持原顺序/对象、旧缺字段保留；knowledgeReview参数必须是先用本节全量原始页得到的knowledgeState有效结果，不能直接传lesson未验证字段。learning排除learningExcluded及effective no-content本节，raw保留全部；所选页先选raw范围再过滤，核验依据仍用全量。
+- Produces `PPTLibrary.knowledgeState(lesson,pages) -> 'unreviewed'|'has-content'|'no-content'`，pages必须为本节全部原始页。只有Spec §2的knowledgeReviewEvidence四项sourceKey/trackKey/sourceDuration/pageIds与当前依据完全匹配才认可非unreviewed；source和track用当前来源推导，不用陈旧coverage值，有限正时长否则显式null，缺字段为未知。相同地址延长、相同batch job换通道需失效；已知签名参数续期且内容身份/时长/页集不变仍有效。
 - Produces `PPTPageStore.learning(db,updates) -> Promise<oldFlags>`，updates为[{id,excluded:boolean}]，oldFlags同形；在同一个pages事务读取当前记录并仅改learningExcluded，找不到ID或写失败整体回滚；不读写assets。UI等commit后才改内存，oldFlags支持undo。
-- Extends `PPTLibrary.integrity({...existingArgs,view='raw'})`：原schema v1兼容增加rawCount/excludedCount/exportedCount、knowledgeReview/comparisonVersion、原ID/sourceTime→导出序号映射；task物理覆盖/目录完整与知识核验分开。
+- Extends `PPTLibrary.integrity({...existingArgs,view='raw',reviewPages=pages})`：pages为本次请求raw范围，reviewPages是全量原始核验快照；各课次从reviewPages验证知识状态/统计原始savedPages，再过滤本次pages。原schema v1兼容增加rawCount/excludedCount/exportedCount、有效knowledgeReview/comparisonVersion、原ID/sourceTime→导出序号映射；excludedCount=rawCount-exportedCount，raw模式为0。新增knowledgeComplete，既有complete仍只表示目录/物理覆盖；学习版完整需两者均成立。保留公开字段投影/身份别名，不输出内部核验证据或原始URL。
 - 页面metadata learningExcluded默认false；lesson知识字段/证据见Spec §2。新截图/实际来源变化使核验失效，旧无证据未知；mixed比较版本明确前段需核对。
 - DOM IDs：learning-view(all/kept/excluded)、learning-exclude、learning-restore、learning-suggest、knowledge-review、export-view(raw/learning)。使用现有Stop和undo，最新操作undo类型互斥并正确释放原资产租约。
 - 所有PDF/图片ZIP、本节/所选/整课PDF/分课ZIP入口调用共享过滤，冻结view、courseKey、命名、页ID/time/顺序后导出，成功才存receipt；raw是默认值。
 
-- [ ] **Step 1: 写失败测试**。pure helper测旧页/排除/无知识/有效与陈旧证据/混合比较版本；真实IDB测排除→重开→恢复/undo，事务故障无半更新/原图不变、切lesson清selection和undo lease。
+- [ ] **Step 1: 写失败测试**。pure helper测旧页/排除/无知识/有效与陈旧四项证据/混合比较版本；同key同页集duration3→6、同batch job同duration换通道即使旧coverage未更新也unreviewed，重新明确核验可恢复，已知签名续期不误失效。全量3页核验后所选2页导出仍按全量证据处理no-content，所选与筛选子集不使核验自身失效。测试raw/learning计数及knowledgeComplete与原complete独立，未扫描/空页行无证据时不能被忽略。真实IDB测排除→重开→恢复/undo，事务故障无半更新/原图不变、切lesson清selection和undo lease。
 
 ```js
 assert.equal(raw.length, originalPages.length);
@@ -77,7 +77,7 @@ assert.deepEqual(restoredOriginalImageBytes, originalImageBytes);
 assert.equal(knowledgeState(staleReviewedLesson,newPages), 'unreviewed');
 assert.equal(afterCancel.excludedCount, before.excludedCount);
 assert.deepEqual(exportedOriginalIds, frozenKeptIds);
-assert.equal(report.lessons.find(l=>l.id===partialId).scan.complete, false);
+assert.equal(report.lessons.find(l=>l.lessonId===partialId).scan.reachedEnd, false);
 ```
 
 报告现有实际schema在Task4实现报告中确认；若字段名不同，保持语义并在report记录映射，不凭空另造重复状态。测试所有导出入口至少一条真实消费链：用pdf-lib检查页数/目录目的地，解压JPEG比对图/时间、报告ID映射；异步切换view/课次/命名不串包。无内容本节学习版跳过但raw仍在；新页已写且lesson写失败后重开也unreviewed。
