@@ -105,7 +105,8 @@ summary::marker { color: var(--muted); font-size: 11px; }
 #batch-status { margin-top: 10px; }
 .help-drawer .note { line-height: 1.75; }
 
-.workspace-sheet { display: grid; grid-template-columns: minmax(0, .9fr) minmax(380px, 1.1fr); grid-template-rows: auto minmax(0, 1fr); gap: 20px; min-width: 0; min-height: 0; padding: 16px 20px 20px; background: var(--surface); }
+/* Reserve room for export controls and a complete card; an expanded batch scrolls with the workspace. */
+.workspace-sheet { display: grid; grid-template-columns: minmax(0, .9fr) minmax(380px, 1.1fr); grid-template-rows: max-content minmax(560px, 1fr); gap: 20px; min-width: 0; min-height: 0; overflow: auto; scroll-padding-block: 16px 20px; padding: 16px 20px 20px; background: var(--surface); }
 #batch-panel { grid-column: 1 / -1; min-width: 0; max-height: 42dvh; overflow: auto; border-bottom: 1px solid var(--border); scrollbar-width: thin; }
 #batch-panel > summary { display: list-item; padding: 7px 0 12px; font-size: 14px; }
 #batch-panel > summary > span:first-child { font-weight: 600; }

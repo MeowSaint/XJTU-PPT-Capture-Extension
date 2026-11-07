@@ -539,6 +539,125 @@ function zipEntries(bytes) {
       assert.match(await page.locator('#status').textContent(), /导出失败/);
     });
 
+    await test('low-height expanded batch keeps a bounded reachable gallery and native first-card drag', async () => {
+      const observations = [], captureURL = page.url();
+      const setBatch = () => page.evaluate(async course => {
+        batchPage = location.origin + '/study-capture-courses/low-height/preview-detail/list';
+        batchJobs = [
+          {id: 'low-a', course, sourceName: '12345/2-batch-a.mp4', url: location.origin + '/2-a.mp4', selected: true, state: 'pending', requiresCrop: false, options: []},
+          {id: 'low-b', course, sourceName: '12345/2-batch-b.mp4', url: location.origin + '/2-b.mp4', selected: true, state: 'pending', requiresCrop: false, options: []},
+          {id: 'low-c', course, sourceName: '12345/0-batch-c-teacher.mp4', url: location.origin + '/0-c.mp4', selected: false, state: 'needs-crop', requiresCrop: true, cropConfirmed: false, options: []}
+        ];
+        await persistBatch(); renderBatchJobs();
+      }, {name: '传感网络与大数据技术', date: '2026-11-07', start: '10:10:00'});
+      const measure = () => page.evaluate(() => {
+        const rect = node => { const r = node.getBoundingClientRect(); return {x: r.x, y: r.y, right: r.right, bottom: r.bottom, width: r.width, height: r.height}; };
+        const clips = node => {
+          const regions = [{name: 'viewport', x: 0, y: 0, right: innerWidth, bottom: innerHeight, clipX: true, clipY: true}];
+          for (let parent = node.parentElement; parent; parent = parent.parentElement) {
+            const css = getComputedStyle(parent), clipX = /auto|scroll|hidden|clip/.test(css.overflowX), clipY = /auto|scroll|hidden|clip/.test(css.overflowY);
+            if (clipX || clipY) { const r = parent.getBoundingClientRect(); regions.push({name: parent.id || parent.className || parent.tagName,
+              x: r.x + parent.clientLeft, y: r.y + parent.clientTop, right: r.x + parent.clientLeft + parent.clientWidth,
+              bottom: r.y + parent.clientTop + parent.clientHeight, clipX, clipY}); }
+          }
+          return regions;
+        };
+        const card = document.querySelector('#pages article'), sheet = $('pages'), bounds = rect(sheet);
+        const controls = [card, card.querySelector('.page-select'), card.querySelector('.slide-time'), card.querySelector('button')].map(node => {
+          const r = rect(node), points = [[r.x + 3, r.y + 3], [r.right - 3, r.y + 3], [r.x + 3, r.bottom - 3], [r.right - 3, r.bottom - 3], [r.x + r.width / 2, r.y + r.height / 2]];
+          return {name: node.className || node.tagName, rect: r, clips: clips(node), hits: points.map(([x, y]) => {
+            const target = document.elementFromPoint(x, y); return target === node || node.contains(target);
+          })};
+        });
+        const thumbs = [...sheet.querySelectorAll('img')].map(img => {
+          const r = img.getBoundingClientRect(); return {id: img.closest('article').dataset.pageId, loaded: !!img.getAttribute('src'), allowed: r.bottom >= bounds.y - 200 && r.y <= bounds.bottom + 200};
+        });
+        const workspace = document.querySelector('.workspace-sheet');
+        return {width: innerWidth, height: innerHeight, documentWidth: document.documentElement.scrollWidth, documentHeight: document.documentElement.scrollHeight,
+          windowScroll: scrollY, batchOpen: $('batch-panel').open, batchJobs: batchJobs.length, busy: busy(), task: !!task,
+          workspace: {...rect(workspace), scrollTop: workspace.scrollTop, clientHeight: workspace.clientHeight, scrollHeight: workspace.scrollHeight, overflow: getComputedStyle(workspace).overflowY},
+          results: rect($('results')), pages: {...bounds, clientHeight: sheet.clientHeight, scrollHeight: sheet.scrollHeight, scrollTop: sheet.scrollTop},
+          stop: rect($('stop')), actionRow: rect($('stop').parentElement), controls,
+          thumbnails: {loaded: thumbs.filter(t => t.loaded).length, allowed: thumbs.filter(t => t.allowed).length, outside: thumbs.filter(t => t.loaded && !t.allowed).map(t => t.id)}};
+      });
+      const saveGeometry = () => fs.writeFileSync(path.join(output, 'fix-2-gallery-geometry.json'), JSON.stringify(observations, null, 2));
+      let sourceKey;
+      for (const [width, height] of [[1280, 720], [1440, 900], [390, 844]]) {
+        await page.setViewportSize({width, height}); await seed([]); await load(fixture);
+        sourceKey = await page.evaluate(() => loadedIdentity.sourceKey);
+        await seed(Array.from({length: 4}, (_, i) => ({id: 10 + i, image: i % 3, sourceKey}))); await load(fixture); await setBatch();
+        await page.locator('#batch-panel > summary').click();
+        const observation = {width, height, initial: await measure()}; observations.push(observation); saveGeometry();
+        await page.screenshot({path: path.join(output, `fix-2-expanded-before-scroll-${width}x${height}.png`)});
+        assert.equal(observation.initial.batchOpen && observation.initial.batchJobs === 3 && !observation.initial.busy && !observation.initial.task, true);
+        assert(observation.initial.pages.bottom <= observation.initial.results.bottom + 0.5, 'gallery stays inside its allocated results height instead of escaping below the action row');
+        assert(observation.initial.documentWidth <= width);
+        if (width > 1020) assert(observation.initial.documentHeight <= height, 'desktop workspace scroll does not escape into document overflow');
+        const firstCard = page.locator('#pages article').first(), lastCard = page.locator('#pages article').last();
+        await firstCard.scrollIntoViewIfNeeded();
+        await page.waitForFunction(() => { const img = document.querySelector('#pages article img'); return img.complete && img.naturalWidth > 0; });
+        observation.reached = await measure(); saveGeometry();
+        for (const control of observation.reached.controls) {
+          for (const clip of control.clips) assert((!clip.clipX || (control.rect.x >= clip.x - 0.5 && control.rect.right <= clip.right + 0.5)) &&
+            (!clip.clipY || (control.rect.y >= clip.y - 0.5 && control.rect.bottom <= clip.bottom + 0.5)), `${control.name} is not fully reachable inside ${clip.name}`);
+          assert(control.hits.every(Boolean), `${control.name} corners and center are hit-testable`);
+          assert(control.rect.bottom <= observation.reached.actionRow.y, 'gallery controls remain above the shared action row');
+        }
+        assert(observation.reached.pages.clientHeight >= observation.reached.controls[0].rect.height, 'finite lazy root can display a complete card and its controls');
+        assert(observation.reached.thumbnails.loaded > 0 && observation.reached.thumbnails.loaded <= observation.reached.thumbnails.allowed);
+        assert.deepEqual(observation.reached.thumbnails.outside, []);
+        await firstCard.locator('.page-select').check(); assert.match(await page.locator('#selected-count').textContent(), /已选 1 页/);
+        await firstCard.locator('.page-select').uncheck(); await firstCard.locator('.slide-time').click();
+        await page.screenshot({path: path.join(output, `fix-2-expanded-reachable-${width}x${height}.png`)});
+        const before = await stored(), originalOrder = await ids();
+        await page.evaluate(() => {
+          window.__galleryEvents = [];
+          for (const type of ['pointerdown', 'dragstart', 'drop', 'dragend']) document.addEventListener(type, event => {
+            window.__galleryEvents.push({type, trusted: event.isTrusted, id: event.target.closest('article')?.dataset.pageId,
+              hitId: document.elementFromPoint(event.clientX, event.clientY)?.closest('article')?.dataset.pageId, x: event.clientX, y: event.clientY,
+              busy: busy(), task: !!task, draggable: event.target.closest('article')?.draggable});
+          }, {capture: true, passive: true});
+        });
+        observation.beforeDrag = await measure(); saveGeometry();
+        const firstBox = await firstCard.boundingBox(), source = {x: firstBox.x + firstBox.width / 2, y: firstBox.y + firstBox.height / 2};
+        await page.mouse.move(source.x, source.y); await page.mouse.down();
+        try {
+          // Start a trusted native drag on the visible source before ordinary scrolling reaches the target.
+          await page.mouse.move(source.x + 12, source.y, {steps: 3});
+          await page.waitForFunction(() => window.__galleryEvents.some(event => event.type === 'dragstart'));
+          assert.deepEqual(await page.evaluate(() => window.__galleryEvents.filter(event => event.type === 'dragstart').map(event => ({id: event.id, trusted: event.trusted}))), [{id: String(originalOrder[0]), trusted: true}]);
+          await lastCard.scrollIntoViewIfNeeded();
+          const lastBox = await lastCard.boundingBox(); observation.dropTarget = {x: lastBox.x + lastBox.width - 4, y: lastBox.y + 12};
+          assert.equal(await page.evaluate(({x, y}) => document.elementFromPoint(x, y)?.closest('article')?.dataset.pageId, observation.dropTarget), String(originalOrder.at(-1)));
+          await page.mouse.move(observation.dropTarget.x, observation.dropTarget.y, {steps: 10});
+        } finally { await page.mouse.up(); }
+        try { await page.waitForFunction(id => !busy() && pages.at(-1)?.id === id, originalOrder[0]); }
+        finally { observation.events = await page.evaluate(() => window.__galleryEvents); observation.order = await ids(); saveGeometry(); }
+        assert.deepEqual(observation.events.filter(event => event.type === 'dragstart').map(event => ({id: event.id, trusted: event.trusted})), [{id: String(originalOrder[0]), trusted: true}]);
+        assert(observation.events.some(event => event.type === 'drop' && event.trusted && event.id === String(originalOrder.at(-1))));
+        assert.deepEqual(observation.order, [...originalOrder.slice(1), originalOrder[0]]);
+        const retained = records => records.map(({order, ...record}) => record).sort((a, b) => a.id - b.id);
+        assert.deepEqual(retained((await stored()).pages), retained(before.pages), 'native drag changes order alone, preserving metadata, signatures and image bytes');
+        const orderCheck = await context.newPage(); orderCheck.on('pageerror', error => errors.push(error.message));
+        try { await orderCheck.goto(captureURL); await orderCheck.waitForFunction(expected => pages.length === expected.length && pages.every((item, index) => item.id === expected[index]), observation.order); }
+        finally { await orderCheck.close(); }
+        observation.reloadOrder = observation.order; assert.equal(await page.locator('#batch-panel').evaluate(panel => panel.open), true); saveGeometry();
+      }
+      // A longer restored list must enlarge only the lazy root's content, never the root or workspace row.
+      await page.setViewportSize({width: 1280, height: 720});
+      await seed(Array.from({length: 1000}, (_, i) => ({id: i + 1, image: i % 3, sourceKey}))); await load(fixture); await setBatch();
+      await page.locator('#batch-panel > summary').click(); await page.locator('#pages article').first().scrollIntoViewIfNeeded();
+      await page.waitForFunction(() => { const img = document.querySelector('#pages article img'); return img.complete && img.naturalWidth > 0; });
+      const large = {restored: 1000, reached: await measure()}; observations.push(large); saveGeometry();
+      const small = observations[0].reached;
+      assert(Math.abs(large.reached.pages.height - small.pages.height) <= 1, '1000 cards preserve the same finite lazy-root height');
+      assert(Math.abs(large.reached.workspace.scrollHeight - small.workspace.scrollHeight) <= 1, '1000 cards do not enlarge the outer workspace');
+      assert(large.reached.pages.scrollHeight > large.reached.pages.clientHeight * 10);
+      assert(large.reached.thumbnails.loaded <= large.reached.thumbnails.allowed); assert.deepEqual(large.reached.thumbnails.outside, []);
+      assert.equal(large.reached.documentHeight, 720); assert.equal(large.reached.windowScroll, 0);
+      await page.setViewportSize({width: 1440, height: 900}); await seed([]);
+    });
+
     await test('expanded running batch keeps shared Stop visible and hit-testable at desktop and narrow sizes', async () => {
       const geometry = [];
       for (const [width, height] of [[1280, 800], [1440, 900], [1920, 1080], [390, 844]]) {

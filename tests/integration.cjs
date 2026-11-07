@@ -325,8 +325,28 @@ async function main() {
     assert.equal(await page.locator('#pages article').count(), 4);
     const originalOrder = await page.evaluate(() => pages.map(item => item.id));
     const firstCard = page.locator('#pages article').first(), lastCard = page.locator('#pages article').last();
-    const lastBox = await lastCard.boundingBox();
-    await firstCard.dragTo(lastCard, {targetPosition: {x: lastBox.width - 4, y: 12}});
+    await firstCard.scrollIntoViewIfNeeded();
+    await page.evaluate(() => {
+      window.__integrationFirstDrag = null;
+      document.querySelector('#pages').addEventListener('dragstart', event => {
+        window.__integrationFirstDrag = {id: event.target.closest('article')?.dataset.pageId, trusted: event.isTrusted};
+      }, {once: true, capture: true, passive: true});
+    });
+    const firstDragBox = await firstCard.boundingBox(), dragStartPoint = {x: firstDragBox.x + firstDragBox.width / 2, y: firstDragBox.y + firstDragBox.height / 2};
+    await page.mouse.move(dragStartPoint.x, dragStartPoint.y); await page.mouse.down();
+    try {
+      // Lock the native source before normal target scrolling moves other cards beneath the pointer.
+      await page.mouse.move(dragStartPoint.x + 12, dragStartPoint.y, {steps: 3});
+      await page.waitForFunction(() => window.__integrationFirstDrag);
+      const nativeSourceStart = await page.evaluate(() => window.__integrationFirstDrag);
+      assert.deepEqual(nativeSourceStart, {id: String(originalOrder[0]), trusted: true}, 'native drag starts on the original first card');
+      console.log('Native drag source:', JSON.stringify(nativeSourceStart));
+      await lastCard.scrollIntoViewIfNeeded();
+      const lastBox = await lastCard.boundingBox();
+      await page.mouse.move(lastBox.x + lastBox.width - 4, lastBox.y + 12, {steps: 10});
+    } finally {
+      await page.mouse.up(); await page.evaluate(() => { delete window.__integrationFirstDrag; });
+    }
     await page.waitForFunction(id => pages.at(-1)?.id === id, originalOrder[0]);
     const draggedOrder = await page.evaluate(() => pages.map(item => item.id));
     assert.deepEqual(draggedOrder, [...originalOrder.slice(1), originalOrder[0]], 'dragging changes the export order');
@@ -361,9 +381,20 @@ async function main() {
     assert.deepEqual(await storedPageSnapshot(page), stoppedPages, 'cancelling clear preserves all original screenshots');
     // Crop uses image coordinates, excluding letterbox margins, then restores controls.
     await page.locator('#crop-select').click();
-    const b = await page.locator('#overlay').boundingBox();
-    await page.mouse.move(b.x + b.width * 0.25, b.y + b.height * 0.25); await page.mouse.down();
-    await page.mouse.move(b.x + b.width * 0.75, b.y + b.height * 0.75); await page.mouse.up();
+    const cropInput = await page.locator('#overlay').evaluate(overlay => {
+      const video = document.querySelector('video'), box = overlay.getBoundingClientRect();
+      const client = {width: video.clientWidth, height: video.clientHeight}, raw = {width: video.videoWidth, height: video.videoHeight};
+      const scale = Math.min(client.width / raw.width, client.height / raw.height);
+      const image = {x: box.x + (client.width - raw.width * scale) / 2, y: box.y + (client.height - raw.height * scale) / 2, width: raw.width * scale, height: raw.height * scale};
+      return {client, raw, canvas: {width: overlay.width, height: overlay.height}, overlay: {x: box.x, y: box.y, width: box.width, height: box.height}, image,
+        start: {x: image.x + image.width * 0.25, y: image.y + image.height * 0.25}, end: {x: image.x + image.width * 0.75, y: image.y + image.height * 0.75},
+        wholeOverlayHalfHeight: raw.height * box.height / (2 * image.height)};
+    });
+    console.log('Public crop input geometry:', JSON.stringify(cropInput));
+    assert.equal(cropInput.raw.height, 720, 'local crop fixture retains its public native height');
+    await page.mouse.move(cropInput.start.x, cropInput.start.y); await page.mouse.down();
+    await page.mouse.move(cropInput.end.x, cropInput.end.y); await page.mouse.up();
+    console.log('Read-only crop after native input:', await page.evaluate(() => ({...crop})));
     assert.equal(await page.locator('#overlay').evaluate(el => el.style.pointerEvents), 'none');
     const oldCount = await page.locator('#pages article').count(); await page.locator('#shot').click();
     await page.waitForFunction(n => document.querySelectorAll('#pages article').length === n + 1, oldCount);
