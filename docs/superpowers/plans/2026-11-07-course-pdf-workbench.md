@@ -67,6 +67,14 @@
 - [ ] **Step 4 — 实际交互验证。** 快速往返页签仍单一可交互面板/可立即输入；动画中打开关闭预览并确认焦点/URL释放；reduce 在初始和运行中切换；1000 页恢复不全量动画，缩略图并发 ≤2、活跃 URL 有界。视觉验证至少 1440×900、1280×800、390×844，另检 1920×1080 桌面布局；真实 DOM 的浅色、深色、reduce 截图存 `.test-output/v3.1.2/` 并 read_image，不用重绘 HTML 假预览代替。
 - [ ] **Step 5 — 覆盖与提交。** 依次运行 review、features、memory、library、improvements 浏览器套件及 test:release，命令继承指定 PPT_TEST_BROWSER。每个完整相关套件在最终源码通过一次后不无故重跑。保留全部业务/持久化断言；不触碰测试 runtime 的浏览器配置。自审提交，完整报告附截图、正常/快速切换/reduce/暗色的实际结果与尚未验证项。
 
+### Task 2 integration follow-up — fix round 2/5
+
+Task3 在 1280×720、批量详情仍展开的真实集成链发现结果区布局回归：#pages 只剩 18px 且 y718.39..736.39 越过 bottom645 的 results/固定底栏。原生事件证明 dragstart 实际抓到第三卡 ID12，随后正确持久化为 [10,11,13,12]；这不是 persistOrder 丢事件。先由 Task3 将版本/夹具工作和完整未完成报告分开 checkpoint 后停止，再恢复原 Task2 owner；禁止并行 mutator。
+
+Files 限 style.css、确有必要的 capture.html 布局包装（当前唯一 3.1.2 span/ID/handler 均保持）、tests/review.cjs 覆盖低高度展开状态；append SAME task-2-report.md。只读/运行当前 tests/integration.cjs，不改它的原始拖拽与强断言；不得在此跟进修改产品业务 JS/PDF/存储/权限/依赖/版本或 Task3 metadata/docs。按设计让工作区自然滚动到完整卡片而不越过底栏，保留 #pages 有界 lazy root/1000 页/读取并发2/URL/节点/scroll 与已经修复的可见 Stop。不自动关闭 batch、不扩大 viewport/强制派事件/额外 sleep 取得通过。
+
+先保留当前 integration RED 与事件/几何实证，增加真实低高度布局 RED→GREEN，接着 integration→review→memory→library 完整顺序；保留原 integration first→last dragTo 参数、精确页序及新页面持久化/后续 PDF/JPEG/Referer/IDB 断言，覆盖真实启用 Stop/abort/旧新数据保留。正常 1280×800/1440×900/1920×1080/390 布局不退化；读实际低高度展开/常规与窄屏图。源码/追加报告分开提交，所有 job 收取并停止；独立 scoped review 从上次已审查 b7021c7..新HEAD（不是中间 checkpoint）判断新增 I2/本次破坏，Task3 checkpoint 其他文件只作上下文、不重复审核其完整任务。通过后恢复原 Task3；未改的 PDF/版本/样例与有实际源码覆盖的通过项依 Step3 复用，不宣称旧源码全都重跑。
+
 ### Task 3: 3.1.2 版本、说明与整体验证
 
 **Files:** Modify manifest.json、package.json、package-lock.json 的 root 版本字段、capture.html 的可见版本字段、README.md、tests/README.md、tests/features.cjs / tests/integration.cjs / tests/review.cjs / tests/library.cjs / tests/improvements.cjs 中当前版本/产物目录；`.github/workflows/ci.yml` 仅将已有 test:improvements 加入顺序浏览器任务。仅允许确因 Task 1/2 行为改变的 integration selector/布局适配，先报告再改，不修业务源码；另据实际 `PPTMotion is not defined` probe，限定同步 tests/integration.cjs:102 临时扩展复制清单，加入已由 HTML 加载且实际安装清单已有的 motion.js，保留原强断言、权限与拦截。Create optional docs/releases/3.1.2.md。

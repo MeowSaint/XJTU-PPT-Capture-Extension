@@ -67,9 +67,17 @@
 
 ## Task 3 — 版本与整体验证
 
-状态：实现中。干净 BASE `cc8a935bd5cb3461846fa2ae8d4c7feeb9770d22`，全新独立实现者 `de484aa3-3d8e-43af-9a85-a169486c9d52`（codex/gpt-6.1-sol / high）。范围限 3.1.2 元数据、当前版本夹具、使用/测试说明，以及 CI browser 步骤追加 `test:improvements`；完整九套顺序回归和中文同日两课/奇数讲义 PDF 渲染证据待回报。产品 JS/CSS/PDF/取消与存储算法不可在此任务修改；发现真实业务失败则交回原任务实现者。整体审查、根目录实际打包与校验、发布及工作区清理由父代理负责，实现者无这些动作权限。
+状态：暂停，等待原 Task2 owner 处理新增低高度布局回归。Task3 source checkpoint `20b67b5efc6a79c51adef33bfc4ca27a97532860`（授权十文件，43+/38−）和独立 128 行未完成报告 `5ccfb360e2d65c2fdfec00c427f87dbda4916353` 已提交，父代理完整读取报告并核验 HEAD 与范围；剩余五套尚未运行。任务原干净 BASE 仍为 `cc8a935bd5cb3461846fa2ae8d4c7feeb9770d22`，全新独立实现者 `de484aa3-3d8e-43af-9a85-a169486c9d52`（codex/gpt-6.1-sol / high）。范围限 3.1.2 元数据、当前版本夹具、使用/测试说明，以及 CI browser 步骤追加 `test:improvements`；完整九套顺序回归和中文同日两课/奇数讲义 PDF 渲染证据待回报。产品 JS/CSS/PDF/取消与存储算法不可在此任务修改；发现真实业务失败则交回原任务实现者。整体审查、根目录实际打包与校验、发布及工作区清理由父代理负责，实现者无这些动作权限。
 
 首次 integration probe 在 tests/integration.cjs:212 期望 `/请先补填/`，实际为 `导出失败：PPTMotion is not defined`；作业 `bash-f46eb317080f4612` exit1。父代理只读核实 tests/integration.cjs:102 临时扩展复制表漏掉 motion.js，capture.html:359–361 已在 capture/workspace 之前加载它，scripts/release.cjs:9 实际安装清单也已有该资源。这是夹具消费接口遗漏，未发现新的产品业务问题。Ruling：限定 Task3 为该复制表加入 motion.js，其他断言、权限、拦截与产品源码均保持；只重跑受影响的 integration，再继续后续串行套件。代价是复制清单存在两处，可能继续漂移，须保留这次真实失败与最终打包/强断言核验；不通过模仿 PPTMotion、忽略异常或削弱缺字段检查取得通过。此前本轮 unit224/224、release17/17、bridge三来源已过，只能按实际源覆盖分别记录，不能改称修正后全套重跑。
+
+## Task2 集成跟进 — round2/5，I2 尚待修复
+
+motion 清单补齐后，integration 的 MP4、命名、缓存释放与 HLS 四页提取均已跑过，但原 first→last 拖拽等待在 tests/integration.cjs:330 超时。原实现者只做一次被动诊断，job `bash-888f544487874d9f` exit1，所有 job 已收取；临时观测已还原，integration 指纹精确恢复 `8127cc73b66f834c6d83255d3e28f3a110bf756d5b62f2163b35956c5d0493d1`，没有调整原 dragTo、强断言、窗口或折叠状态。
+
+父代理读两份 JSON 和实际 1280×720 截图：batch 展开高302.390625，results bottom645，但 #pages y718.390625、height18、bottom736.390625，首卡中心与末卡目标均在屏外。Playwright 自动滚动后 windowY16/#pages.scrollTop198，可信 dragstart 实际抓到第三卡12，drop到13，应用正确持久化为 `[10,11,13,12]` 并显示“已调整截图顺序：第4页”。这排除了本次 persistOrder 吞掉事件的说法，也不能作为首卡已移动的通过证明。图库本身越出工作区并落到底栏下，是用户可遇到的布局回归；不能仅靠关闭批量区掩盖它。证据为 task3 的 `task3-dnd-before.json`、`task3-dnd-failed.json`、`task3-dnd-failed.png` 及诊断日志。
+
+Ruling：把 I2 交回原 Task2 owner，在保持展开批量和现有固定 Start/Stop 的条件下修复低高度工作区，让用户能通过正常有界滚动到完整卡片，不覆盖底栏、不改排序算法；Task3 checkpoint 后暂停、无并行 mutator。代价是调整最小可用空间/滚动层并增加低高度几何、真实原生拖拽、1000页 lazy 与 Stop/保留回归；保留原 integration 参数、精确页序与新页持久化等强断言。使用同一 Task2 报告追加证据，round2/5 的新独立 scoped review 从上次已审查 b7021c7 定界，不能用 checkpoint 偷换基线；Task3 其他文件由其后续独立 gate 处理。原三套/七页 PDF 仅按未改来源保留，新的 CSS 覆盖与剩余套件另记，不伪称九套已过。
 
 ## 最终审查与产物
 
