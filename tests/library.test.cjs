@@ -184,3 +184,146 @@ test('suspect ranges merge overlapping intervals, ignore invalid bounds and keep
   assert.deepEqual(library.mergeRanges([{start: 5,end: 7,time: 6},{start: 1,end: 2,time: 1}], {start: 1.5,end: 3,time: 2}), [{start: 1,end: 3,time: 1},{start: 5,end: 7,time: 6}]);
   assert.deepEqual(library.mergeRanges([], {start: NaN,end: 5,time: 4}), []);
 });
+
+// Writes are staged until commit, as in IDB; holding a resolved promise would not model precommit Stop.
+function heldBindingDB(initial, failKey = '') {
+  const saved = new Map(Object.entries(structuredClone(initial))), transactions = [];
+  const db = {transaction(stores, mode) {
+    assert.deepEqual([...stores], ['settings']); assert.equal(mode, 'readwrite');
+    const writes = new Map(); let state = 'pending';
+    const tx = {error: null, objectStore(name) {
+      assert.equal(name, 'settings'); return {put(value, key) { if (key === failKey) throw Error('write failed'); writes.set(key, structuredClone(value)); }};
+    }, abort() {
+      if (state !== 'pending') throw new DOMException('Transaction finished', 'InvalidStateError');
+      state = 'aborted'; queueMicrotask(() => tx.onabort?.());
+    }, fail(error) { tx.error = error; tx.abort(); }, commit(notify = true) {
+      if (state !== 'pending') return false;
+      state = 'committed'; for (const [key, value] of writes) saved.set(key, value);
+      if (notify) tx.complete(); return true;
+    }, complete() { assert.equal(state, 'committed'); tx.oncomplete?.(); }};
+    transactions.push(tx); return tx;
+  }};
+  return {db, saved, transactions};
+}
+function bindingController() {
+  const controller = new AbortController(), signal = controller.signal, listeners = new Set();
+  const add = signal.addEventListener.bind(signal), remove = signal.removeEventListener.bind(signal);
+  signal.addEventListener = (type, fn, options) => { if (type === 'abort') listeners.add(fn); add(type, fn, options); };
+  signal.removeEventListener = (type, fn, options) => { if (type === 'abort') listeners.delete(fn); remove(type, fn, options); };
+  return {controller, signal, listeners};
+}
+const oldBindingLesson = () => ({id: 'old', course: {name: 'Prior', date: '2026-09-15', start: '08:00:00'},
+  source: {sourceKey: 'file:old', sourceName: 'old.mp4', duration: 1}, crop: {x: .1, y: .1, w: .8, h: .8},
+  task: {state: 'paused', checkpoint: .5}, suspects: [{start: .2, end: .3}], namingManual: true});
+
+for (const existing of [false, true]) for (const outcome of ['pre-aborted', 'stop-before-commit', 'transaction-failure']) {
+  test(`atomic binding API ${outcome} retains prior settings for ${existing ? 'same' : 'new'} source`, async () => {
+    const prior = oldBindingLesson(), before = {'lesson:old': prior, activeLesson: 'old'}, h = heldBindingDB(before);
+    const {controller, signal, listeners} = bindingController();
+    if (outcome === 'pre-aborted') controller.abort();
+    const next = {...prior, id: existing ? 'old' : 'new', source: {...prior.source, duration: 2}};
+    const pending = library.bind(h.db, next, {signal}), rejected = assert.rejects(pending,
+      error => outcome === 'transaction-failure' ? error.message === 'held failure' : error.name === 'AbortError');
+    if (outcome !== 'pre-aborted') {
+      assert.equal(h.transactions.length, 1); assert.deepEqual(Object.fromEntries(h.saved), before);
+      if (outcome === 'transaction-failure') h.transactions[0].fail(Error('held failure'));
+      else controller.abort();
+      assert.equal(h.transactions[0].commit(), false, 'aborted writes cannot commit');
+    } else assert.equal(h.transactions.length, 0, 'pre-aborted binding must not open a transaction');
+    await rejected; assert.deepEqual(Object.fromEntries(h.saved), before); assert.equal(listeners.size, 0);
+  });
+}
+for (const lateAbort of ['none', 'after-commit-before-complete', 'after-complete']) {
+  test(`atomic binding API publishes one snapshot and commit wins ${lateAbort}`, async () => {
+    const h = heldBindingDB({'lesson:old': oldBindingLesson(), activeLesson: 'old'});
+    const {controller, signal, listeners} = bindingController(), next = {id: 'new', source: {duration: 2}};
+    const pending = library.bind(h.db, next, {signal}); next.source.duration = 99;
+    assert.equal(h.transactions.length, 1); assert.equal(h.saved.has('lesson:new'), false);
+    h.transactions[0].commit(lateAbort !== 'after-commit-before-complete');
+    if (lateAbort !== 'none') controller.abort();
+    if (lateAbort === 'after-commit-before-complete') h.transactions[0].complete();
+    await pending; assert.equal(h.saved.get('activeLesson'), 'new'); assert.equal(h.saved.get('lesson:new').source.duration, 2);
+    assert.equal(listeners.size, 0);
+  });
+}
+
+function actualBindingHarness() {
+  const vm = require('node:vm'), fs = require('node:fs'), prior = oldBindingLesson();
+  const h = heldBindingDB({'lesson:old': prior, activeLesson: 'old'}), calls = [];
+  const context = vm.createContext({db: h.db, dbReady: Promise.resolve(), lessonSave: Promise.resolve(),
+    PPTLibrary: library, PPTCourse: require('../course.js'), sourceCourse: {}, activeBatchJob: null,
+    crypto: {randomUUID: () => 'new'}, namingManual: true, namingPage: '', Date,
+    lessons: [structuredClone(prior)], activeLesson: null, pages: [{id: 1, lessonId: 'old', bytes: [1, 2, 3]}],
+    allPages: [{id: 1, lessonId: 'old', bytes: [1, 2, 3]}], undoState: {ids: [2]},
+    namingInfo: () => prior.course, scanSettings: () => ({step: .5}),
+    sameMediaSource: (a, b) => batch.trackKey(a) === batch.trackKey(b),
+    syncAllPages: () => calls.push('sync'), forgetUndo: () => { context.undoState = null; calls.push('undo'); },
+    applyLesson: () => { context.pages = context.allPages.filter(page => page.lessonId === context.activeLesson.id); calls.push('apply'); },
+    render: () => calls.push('render'), renderLibrary: () => calls.push('library'), draw: () => calls.push('draw')});
+  context.activeLesson = context.lessons[0];
+  const source = fs.readFileSync(require.resolve('../capture.js'), 'utf8');
+  const start = source.indexOf('async function bindLesson('), end = source.indexOf('async function switchLesson(', start);
+  assert(start >= 0 && end > start); vm.runInContext(source.slice(start, end), context);
+  const snapshot = () => structuredClone({saved: Object.fromEntries(h.saved), lessons: context.lessons,
+    active: context.activeLesson, pages: context.pages, allPages: context.allPages, undo: context.undoState});
+  return {...h, context, snapshot, calls};
+}
+for (const existing of [false, true]) for (const outcome of ['pre-aborted', 'stop-before-commit', 'transaction-failure']) {
+  test(`actual bindLesson ${outcome} leaves DB and memory intact for ${existing ? 'same' : 'new'} source`, async () => {
+    const h = actualBindingHarness(), before = h.snapshot(), refs = {lesson: h.context.activeLesson, list: h.context.lessons, undo: h.context.undoState};
+    const controller = new AbortController(); if (outcome === 'pre-aborted') controller.abort();
+    const pending = h.context.bindLesson({sourceKey: existing ? 'file:old' : 'file:new', sourceName: 'changed.mp4', duration: 2}, {}, controller.signal);
+    const rejected = assert.rejects(pending, error => outcome === 'transaction-failure' ? error.message === 'held failure' : error.name === 'AbortError');
+    await new Promise(setImmediate);
+    if (outcome !== 'pre-aborted') {
+      assert.deepEqual(h.snapshot(), before, 'staged writes must not publish retained objects');
+      assert.equal(h.transactions.length, 1);
+      if (outcome === 'transaction-failure') h.transactions[0].fail(Error('held failure'));
+      else { controller.abort(); h.transactions[0].commit(); }
+    }
+    await rejected; assert.deepEqual(h.snapshot(), before); assert.deepEqual(h.calls, []);
+    assert.equal(h.context.activeLesson, refs.lesson); assert.equal(h.context.lessons, refs.list); assert.equal(h.context.undoState, refs.undo);
+  });
+}
+for (const existing of [false, true]) test(`actual bindLesson commit-before-Stop stays coherent for ${existing ? 'same' : 'new'} source`, async () => {
+  const h = actualBindingHarness(), controller = new AbortController();
+  const pending = h.context.bindLesson({sourceKey: existing ? 'file:old' : 'file:new', sourceName: 'changed.mp4', duration: 2}, {}, controller.signal);
+  await new Promise(setImmediate); assert.equal(h.transactions.length, 1);
+  h.transactions[0].commit(); controller.abort(); await pending;
+  assert.equal(h.saved.get('activeLesson'), existing ? 'old' : 'new');
+  assert.deepEqual(structuredClone(h.context.activeLesson), h.saved.get('lesson:' + h.context.activeLesson.id));
+  assert.equal(h.context.activeLesson.source.duration, 2); assert.equal(h.context.lessons.length, existing ? 1 : 2);
+  assert.deepEqual(h.calls, ['sync', 'undo', 'apply', 'render', 'library', 'draw']);
+});
+
+test('binding second-write failure aborts the first staged write and removes signal listeners', async () => {
+  const before = {'lesson:old': oldBindingLesson(), activeLesson: 'old'}, h = heldBindingDB(before, 'activeLesson');
+  const {signal, listeners} = bindingController();
+  await assert.rejects(library.bind(h.db, {id: 'new'}, {signal}), /write failed/);
+  assert.equal(h.transactions[0].commit(), false); assert.deepEqual(Object.fromEntries(h.saved), before); assert.equal(listeners.size, 0);
+  assert.equal(h.transactions[0].oncomplete, null); assert.equal(h.transactions[0].onabort, null); assert.equal(h.transactions[0].onerror, null);
+});
+test('legacy activation and binding without options remain compatible', async () => {
+  const h = heldBindingDB({'lesson:old': oldBindingLesson(), activeLesson: 'old'});
+  const activation = library.activate(h.db, 'old'); h.transactions[0].commit(); await activation;
+  const binding = library.bind(h.db, {id: 'new'}); h.transactions[1].commit(); await binding;
+  assert.equal(h.saved.get('activeLesson'), 'new'); assert.equal(h.saved.get('lesson:old').id, 'old');
+  assert.deepEqual(h.saved.get('lesson:new'), {id: 'new'});
+});
+for (const stop of [true, false]) test(`changed-channel binding stages crop, task and batch confirmation until ${stop ? 'Stop' : 'commit'}`, async () => {
+  const h = actualBindingHarness(), prior = h.context.activeLesson;
+  prior.source.batchJobId = 'channel-job'; h.saved.set('lesson:old', structuredClone(prior));
+  h.context.activeBatchJob = {id: 'channel-job', cropConfirmed: true, course: prior.course};
+  const before = h.snapshot(), controller = new AbortController();
+  const pending = h.context.bindLesson({...prior.source, sourceKey: 'file:different-channel'}, {}, controller.signal);
+  const result = stop ? assert.rejects(pending, error => error.name === 'AbortError') : pending;
+  await new Promise(setImmediate); assert.deepEqual(h.snapshot(), before); assert.equal(h.context.activeBatchJob.cropConfirmed, true);
+  if (stop) controller.abort(); else h.transactions[0].commit(); await result;
+  if (stop) { assert.deepEqual(h.snapshot(), before); assert.equal(h.context.activeBatchJob.cropConfirmed, true); }
+  else {
+    assert.deepEqual(structuredClone(h.context.activeLesson.crop), {x: 0, y: 0, w: 1, h: 1}); assert.equal(h.context.activeLesson.task, null);
+    assert.equal(h.context.activeLesson.ignoreRect, null); assert.equal(h.context.activeLesson.suspects.length, 0);
+    assert.equal(h.context.activeBatchJob.cropConfirmed, false);
+    assert.deepEqual(structuredClone(h.context.activeLesson), h.saved.get('lesson:old'));
+  }
+});

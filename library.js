@@ -95,12 +95,28 @@
       export: {exportedAt: typeof exportedAt === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(exportedAt) ? exportedAt : null,
         format: ['pdf', 'zip'].includes(format) ? format : null, lessons: snapshot}};
   }
-  function transaction(db, stores, action) {
+  function transaction(db, stores, action, signal) {
     return new Promise((resolve, reject) => {
-      const tx = db.transaction(stores, 'readwrite'); let result;
-      tx.oncomplete = () => resolve(typeof result === 'function' ? result() : result);
-      tx.onerror = tx.onabort = () => reject(tx.error || Error('课次信息保存失败'));
-      try { result = action(tx); } catch (error) { tx.abort(); reject(error); }
+      if (signal?.aborted) { reject(signal.reason); return; }
+      const tx = db.transaction(stores, 'readwrite'); let result, abortReason, settled = false;
+      const finish = (settle, value) => {
+        if (settled) return; settled = true;
+        signal?.removeEventListener('abort', abort);
+        tx.oncomplete = tx.onerror = tx.onabort = null; settle(value);
+      };
+      const abort = () => {
+        abortReason = signal.reason;
+        try { tx.abort(); }
+        catch (error) {
+          // A committed transaction cannot be rolled back; its completion still publishes the binding.
+          abortReason = undefined;
+          if (error.name !== 'InvalidStateError') finish(reject, error);
+        }
+      };
+      tx.oncomplete = () => finish(resolve, typeof result === 'function' ? result() : result);
+      tx.onerror = tx.onabort = () => finish(reject, abortReason ?? tx.error ?? Error('课次信息保存失败'));
+      signal?.addEventListener('abort', abort, {once: true});
+      try { result = action(tx); } catch (error) { tx.abort(); finish(reject, error); }
     });
   }
   function saveBatch(settings, snapshot) {
@@ -122,6 +138,13 @@
   }
   function activate(db, id) {
     return transaction(db, ['settings'], tx => { tx.objectStore('settings').put(id, 'activeLesson'); });
+  }
+  function bind(db, lesson, {signal} = {}) {
+    const snapshot = structuredClone(lesson);
+    return transaction(db, ['settings'], tx => {
+      const settings = tx.objectStore('settings');
+      settings.put(snapshot, 'lesson:' + snapshot.id); settings.put(snapshot.id, 'activeLesson');
+    }, signal);
   }
   function batch(db, page, jobs, discovery = undefined) {
     const snapshot = structuredClone({page, jobs, ...(discovery === undefined ? {} : {discovery})});
@@ -205,7 +228,7 @@
       return () => result;
     });
   }
-  const api = {pageLimit, key, courseKey, recover, mergeRanges, integrity, restore, put, activate, batch, remove};
+  const api = {pageLimit, key, courseKey, recover, mergeRanges, integrity, restore, put, activate, bind, batch, remove};
   root.PPTLibrary = api;
   if (typeof module !== 'undefined') module.exports = api;
 })(globalThis);

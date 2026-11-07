@@ -500,6 +500,99 @@ function zipEntries(bytes) {
       assert.equal(await page.evaluate(() => sourceReady && video.videoWidth === 640 && video.videoHeight === 360), true);
     });
 
+    await test('binding cancellation holds native IDB before commit for new and same local and remote sources', async () => {
+      const evidence = [], url = origin + '/' + path.relative(root, fixture).split(path.sep).join('/');
+      for (const kind of ['file', 'remote']) for (const existing of [false, true]) for (const outcome of ['pre-aborted', 'stop', 'failure', 'commit-stop', 'success']) {
+        const sourceKey = kind === 'file' ? fileKey : 'url:' + url;
+        const prior = lesson('binding-old', {source: {kind, sourceKey: existing ? sourceKey : 'file:prior', sourceName: 'prior.mp4', ...(kind === 'remote' ? {url} : {})},
+          task: {id: 'paused', state: 'paused', checkpoint: .5}, suspects: [{start: .2, end: .3}], ignoreRect: {x: .1, y: .1, w: .1, h: .1}});
+        await seed({lessons: [prior, lesson('binding-unrelated', {source: {kind: 'file', sourceKey: 'file:unrelated', sourceName: 'unrelated.mp4'}})], pages: [{id: 101, lessonId: prior.id}, {id: 102, lessonId: prior.id}, {id: 103, lessonId: 'binding-unrelated'}]});
+        await page.evaluate(async () => { await deletePages([102]); selectedPages.add(101); selectionAnchor = 101; controls(); }); await settled();
+        const before = await stored();
+        const memory = await page.evaluate(outcome => {
+          const originalBind = PPTLibrary.bind, originalTransaction = db.transaction;
+          const snapshot = () => structuredClone({lessons, active: activeLesson, pages, allPages, undo: undoState, selected: [...selectedPages], anchor: selectionAnchor});
+          window.bindingMemory = snapshot;
+          window.bindingRefs = {lesson: activeLesson, list: lessons, pages, allPages, undo: undoState};
+          const probe = window.bindingProbe = {entered: false, intercept: false, release: false, fail: false, reads: 0, events: [], timedOut: false, transactions: 0};
+          PPTLibrary.bind = (...args) => { probe.intercept = true; try { return originalBind(...args); } finally { probe.intercept = false; } };
+          db.transaction = function(...args) {
+            const tx = originalTransaction.apply(this, args);
+            if (probe.intercept) {
+              probe.transactions++; probe.tx = tx; probe.entered = true;
+              const terminal = name => { probe.events.push(name); probe.error = tx.error?.name; clearTimeout(probe.watchdog); probe.watchdog = null; };
+              tx.addEventListener('abort', () => terminal('abort'), {once: true});
+              tx.addEventListener('complete', () => { terminal('complete'); if (outcome === 'commit-stop') $('stop').click(); }, {once: true});
+              probe.watchdog = setTimeout(() => { probe.timedOut = true; try { tx.abort(); } catch {} }, 5000);
+              const settings = tx.objectStore('settings');
+              // Every keepalive is a real IDB request. No transaction has committed while this loop holds it.
+              const hold = () => {
+                const request = settings.get('activeLesson');
+                request.onsuccess = () => {
+                  probe.reads++;
+                  if (probe.fail) { settings.add('duplicate', 'activeLesson'); return; }
+                  if (!probe.release) hold();
+                };
+              };
+              hold();
+            }
+            return tx;
+          };
+          window.restoreBindingProbe = () => {
+            probe.release = true; clearTimeout(probe.watchdog);
+            if (probe.tx && !probe.events.length) try { probe.tx.abort(); } catch {}
+            PPTLibrary.bind = originalBind; db.transaction = originalTransaction;
+          };
+          return snapshot();
+        }, outcome);
+        try {
+          if (outcome === 'pre-aborted') {
+            const result = await page.evaluate(async ({kind, sourceKey, url}) => {
+              const controller = new AbortController(); controller.abort();
+              try { await bindLesson({kind, sourceKey, sourceName: 'changed.mp4', ...(kind === 'remote' ? {url} : {})}, {}, controller.signal); return 'resolved'; }
+              catch (error) { return error.name; }
+            }, {kind, sourceKey, url});
+            assert.equal(result, 'AbortError');
+          } else {
+            if (kind === 'file') await page.locator('#file').setInputFiles(fixture);
+            else await page.evaluate(url => { window.bindingLoad = loadRemote(url, {permissionGranted: true}); }, url);
+            await page.waitForFunction(() => bindingProbe.entered && bindingProbe.reads > 0);
+            assert.deepEqual(await page.evaluate(() => bindingProbe.events), [], 'native transaction is held BEFORE commit');
+            if (outcome === 'stop') await page.locator('#stop').click();
+            else await page.evaluate(outcome => { bindingProbe.fail = outcome === 'failure'; bindingProbe.release = true; }, outcome);
+            await idle(); if (kind === 'remote') await page.evaluate(() => bindingLoad);
+          }
+          const after = await stored(), probe = await page.evaluate(() => ({reads: bindingProbe.reads, events: bindingProbe.events,
+            error: bindingProbe.error, timedOut: bindingProbe.timedOut, transactions: bindingProbe.transactions, sourceReady, objectURL,
+            references: activeLesson === bindingRefs.lesson && lessons === bindingRefs.list && pages === bindingRefs.pages && allPages === bindingRefs.allPages && undoState === bindingRefs.undo}));
+          evidence.push({kind, existing, outcome, ...probe, activeId: after.activeId, retained: after.lessons.map(item => item.id)});
+          fs.writeFileSync(path.join(output, 'binding-cancellation.json'), JSON.stringify(evidence, null, 2));
+          assert.equal(probe.timedOut, false);
+          if (['pre-aborted', 'stop', 'failure'].includes(outcome)) {
+            assert.deepEqual(after, before, `${kind}/${existing}/${outcome} retains settings and every image byte`);
+            assert.deepEqual(await page.evaluate(() => bindingMemory()), memory); assert.equal(probe.references, true);
+            assert.equal(probe.sourceReady, false); assert.equal(probe.objectURL, null);
+            assert.deepEqual(probe.events, outcome === 'pre-aborted' ? [] : ['abort']);
+            if (outcome === 'failure') assert.equal(probe.error, 'ConstraintError');
+          } else {
+            assert.deepEqual(probe.events, ['complete']); assert.equal(probe.transactions, 1);
+            const active = await page.evaluate(() => structuredClone(activeLesson));
+            assert.deepEqual(active, after.lessons.find(lesson => lesson.id === after.activeId));
+            assert.equal(active.source.sourceKey, sourceKey); assert.equal(after.lessons.length, existing ? 2 : 3);
+            assert.equal(existing ? active.id === prior.id : active.id !== prior.id, true);
+            assert.deepEqual(after.pages, before.pages); assert.deepEqual(after.assets, before.assets.filter(asset => asset.id !== 102));
+            assert.equal(probe.sourceReady, outcome === 'success');
+            if (outcome === 'commit-stop') { assert.equal(probe.objectURL, null); assert.notEqual(active.task?.state, 'done'); }
+          }
+          await page.evaluate(() => restoreBindingProbe());
+          await page.reload(); await idle();
+          const reloaded = await stored();
+          assert.deepEqual(reloaded.lessons, after.lessons); assert.equal(reloaded.activeId, after.activeId); assert.deepEqual(reloaded.pages, after.pages);
+          assert.deepEqual(reloaded.assets.filter(asset => asset.id !== 102), after.assets.filter(asset => asset.id !== 102), 'reload preserves every retained page image; orphaned undo assets may be pruned');
+        } finally { await page.evaluate(() => { if (window.restoreBindingProbe) { task?.abort(); restoreBindingProbe(); } }).catch(() => {}); }
+      }
+    });
+
     for (const transport of ['fetch', 'xhr']) await test(`acquisition boundary course opening stays absent through ${transport}, selection, binding and reload`, async () => {
       const base = origin + '/study-capture-courses/42/preview-detail/a';
       const url = origin + '/' + path.relative(root, fixture).split(path.sep).join('/') + '?capture=a';

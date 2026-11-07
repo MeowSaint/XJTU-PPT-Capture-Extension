@@ -233,7 +233,7 @@ async function selectedVMBinding(reply, url) {
     originPattern: raw => new URL(raw).origin + '/*', namingInfo: () => reply.course, scanSettings: () => ({step: .5}),
     syncAllPages: noop, forgetUndo: noop, applyLesson: noop, render: noop, renderLibrary: noop,
     releaseFailedSource: async error => error, acquisitionReason: () => 'VM_LOAD',
-    PPTLibrary: {...require('../library.js'), put: async (_db, lesson) => saved.push(structuredClone(lesson)), activate: async () => {}}});
+    PPTLibrary: {...require('../library.js'), bind: async (_db, lesson) => saved.push(structuredClone(lesson))}});
   for (const file of ['media.js', 'course.js']) vm.runInContext(fs.readFileSync(require.resolve('../' + file), 'utf8'), context);
   const source = fs.readFileSync(require.resolve('../capture.js'), 'utf8');
   for (const [start, end] of [['async function bindLesson(', 'async function switchLesson('], ['async function loadRemote(', "$('load').onclick"]]) {

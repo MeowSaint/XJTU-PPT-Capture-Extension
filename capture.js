@@ -99,20 +99,22 @@ async function bindLesson(source, detectedCourse = sourceCourse, signal) {
   const key = PPTLibrary.key(source);
   let lesson = lessons.find(item => item.source && PPTLibrary.key(item.source) === key);
   const detected = source.batchJobId ? activeBatchJob?.course || {} : detectedCourse;
+  const changedChannel = lesson && source.batchJobId && !sameMediaSource(lesson.source, source);
+  let next;
   if (!lesson) {
     // A course-level form is not a manual override for a newly selected batch lesson.
     const manual = !source.batchJobId && !activeLesson && namingManual && namingPage === (source.page || '');
-    lesson = {id: crypto.randomUUID(), course: PPTCourse.forBinding(detected, namingInfo(), {manual, sameSource: manual}), page: source.page || '', source, crop: {x: 0,y: 0,w: 1,h: 1}, settings: {...scanSettings(), step: 0.5}, suspects: [], created: Date.now(), namingManual: manual};
-    await PPTLibrary.put(db, lesson); lessons.push(lesson);
+    next = {id: crypto.randomUUID(), course: PPTCourse.forBinding(detected, namingInfo(), {manual, sameSource: manual}), page: source.page || '', source, crop: {x: 0,y: 0,w: 1,h: 1}, settings: {...scanSettings(), step: 0.5}, suspects: [], created: Date.now(), namingManual: manual};
   } else {
-    const changedChannel = source.batchJobId && !sameMediaSource(lesson.source, source);
     const course = PPTCourse.forBinding(detected, lesson.course, {manual: lesson.namingManual, sameSource: true});
-    const next = {...lesson, course, source: {...lesson.source, ...source}, ...(changedChannel ? {crop: {x: 0,y: 0,w: 1,h: 1}, ignoreRect: null, task: null, suspects: []} : {})};
-    await PPTLibrary.put(db, next); Object.assign(lesson, next);
-    if (changedChannel && activeBatchJob) activeBatchJob.cropConfirmed = false;
+    next = {...lesson, course, source: {...lesson.source, ...source}, ...(changedChannel ? {crop: {x: 0,y: 0,w: 1,h: 1}, ignoreRect: null, task: null, suspects: []} : {})};
   }
-  signal?.throwIfAborted();
-  await PPTLibrary.activate(db, lesson.id); signal?.throwIfAborted(); syncAllPages(); forgetUndo(); activeLesson = lesson; applyLesson();
+  await PPTLibrary.bind(db, next, {signal});
+  // Commit is the boundary: once it wins, publish the same binding even if Stop arrives afterward.
+  syncAllPages(); forgetUndo();
+  if (lesson) Object.assign(lesson, next); else { lesson = next; lessons.push(lesson); }
+  if (changedChannel && activeBatchJob) activeBatchJob.cropConfirmed = false;
+  activeLesson = lesson; applyLesson();
   render(); renderLibrary(); draw();
 }
 async function switchLesson(id) {
@@ -1283,7 +1285,7 @@ async function loadRemote(raw, options = {}) {
   try {
     if (!await approval) throw Error('未获得该视频域名访问权限，可改用本地视频导入');
     await dbReady; await namingSave;
-    controller.signal.throwIfAborted(); invalidateUndo(); await releaseSource(); task = controller; activeBatchJob = batchJob; controls();
+    controller.signal.throwIfAborted(); await releaseSource(); task = controller; activeBatchJob = batchJob; controls();
     await setCourseReferrer([originPattern(info.url), ...pendingOrigins]);
     sourceName = options.sourceName || info.name; $('progress').value = 0;
     const identity = {sourceName, coursePage, batchJobId: batchJob?.id || '', sourceKey: 'url:' + info.url};
@@ -1329,7 +1331,7 @@ $('file').onchange = async () => {
   const file = $('file').files[0]; if (!file || busy()) return;
   const sourceKey = 'file:' + JSON.stringify([file.name, file.size, file.lastModified]);
   const identity = {sourceName: file.name, sourceKey, fileName: file.name, size: file.size, lastModified: file.lastModified};
-  invalidateUndo(); activeBatchJob = null; task = new AbortController(); const controller = task; controls();
+  activeBatchJob = null; task = new AbortController(); const controller = task; controls();
   try {
     await dbReady; await namingSave; controller.signal.throwIfAborted();
     await releaseSource(); controller.signal.throwIfAborted(); sourceName = identity.sourceName;
