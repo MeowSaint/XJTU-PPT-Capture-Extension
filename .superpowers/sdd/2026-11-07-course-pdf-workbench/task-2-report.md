@@ -271,3 +271,120 @@ PPT_TEST_BROWSER='/Users/jasondai/Library/Caches/ms-playwright/chromium-1248/chr
 报告暂存时普通 `git add -- .superpowers/sdd/2026-11-07-course-pdf-workbench/task-2-report.md` 返回 exit 1，提示 `The following paths are ignored by one of your .gitignore files:`，路径为 `.superpowers`。按既有明确授权，仅对此报告使用 `git add -f -- .superpowers/sdd/2026-11-07-course-pdf-workbench/task-2-report.md`；没有强制暂存其他路径。追加内容检查确认初轮报告仍为完整原前缀，71 个本地证据链接均存在，最终产品 hash 未变。
 
 本轮实现与证据提交后停止变更，交控制器做下一次限定审查；不开展新的修复或 Task 3。
+
+## Task 2 修复轮次 2/5：展开批量列表后的图库边界
+
+本节只追加本轮 I2 的实现与验证证据，供控制器进行 fresh scoped review。前 273 行保持逐字节原样，前缀 SHA-256 为 `594a3fc172256e324569536e78377778a2593fd5f45b9f48e5ce876c5de17601`。
+
+- 本轮开始时的干净 HEAD：`cb23f8b9bac9f46281408d45948c68e421c01fb2`，分支 `feat/v3.1.2`。本轮独立审查的正确 `FIX_BASE` 仍为 `b7021c7c9ed49c8876e732ab2174aa9ee52f6700`。
+- 权威范围：[Task 2 fix 2 brief](./task-2-fix-2-brief.md)。控制器随后以 `e3090579439568d547e1251d352070a8cb71ad51` 记录 Ruling10，以 `8cdee0159ad3699543c941efe3b9a8d994929c38` 记录 Ruling11；我分别读过更新后的授权段，遇到新的裁剪失败时先停报，再按新增的窄例外继续。
+- 本轮源码提交：`353085aa6ba391d14a7767540ca036ae00639561`，`fix(ui): keep expanded batch gallery bounded and reachable`。仅提交下面 3 个文件，157 行增加、6 行删除。报告另作独立提交；其准确 SHA 可在报告提交后用 `git log -1 --format=%H -- .superpowers/sdd/2026-11-07-course-pdf-workbench/task-2-report.md` 取得，最终交接同时提供该 SHA。
+
+### 改动与输入边界
+
+[style.css](../../../style.css) 只调整工作区这一条布局规则：批量区域采用 `max-content`，操作与结果区域最小高 560px，工作区使用 `overflow: auto`，普通滚动保留 `16px 20px` 的上下滚动定位边距。展开列表后，可以滚动工作区来到完整卡片；批量详情仍保持打开，共享 Start/Stop 操作栏继续固定在原位置。长图库仍在有限的 `#pages` 内独立滚动。
+
+[tests/review.cjs](../../../tests/review.cjs) 新增一组真实 DOM 回归：本地视频、真实 IndexedDB 页面与已保存的 3 条批量任务，在 1280×720、1440×900、390×844 下检查实际裁剪祖先、卡片及选择框/时间/删除按钮的四角与中心命中，执行原生选择和时间跳转，再验证原生拖动、精确顺序、新页面持久化，以及元数据/签名/图像字节仅顺序发生变化。另以 1,000 页证明增长发生在图库内容内，观察根和外层工作区不会随所有卡片一起长高。已有业务、范围选择、持久化和运行中 Stop 检查保留。
+
+[tests/integration.cjs](../../../tests/integration.cjs) 只按 Ruling10/11 修改两个原生输入区块：
+
+1. 拖动从可见首卡按下，真实移动 12px 后，通过一次性被动监听确认可信 `dragstart` 来自原首 ID；随后普通滚动到末卡，在原有 `width - 4, y = 12` 位置松开。原有精确顺序、独立新页面持久化及后续检查不变。
+2. 裁剪点从公开的 video client/raw 尺寸、画布和 overlay 坐标计算实际 contain 图像的 25%→75%，仍使用真实鼠标输入和真实保存、预览解码。严格高度 `360`、原宽度范围及所有后续检查不变。实际 crop 只在输入后读取记录，不参与反推鼠标点或期望值。
+
+对原脚本 SHA `8127cc73b66f834c6d83255d3e28f3a110bf756d5b62f2163b35956c5d0493d1` 做两个输入区块掩码后，剩余文本逐字节一致。[最终限定 diff](../../../.test-output/task-2-fix-2-source.diff) 已完整检查。[capture.html](../../../capture.html) 没有改动，154 个 ID 仍完全相同且唯一，精确版本标记 `<span class="version">3.1.2</span>` 保留一次，motion 脚本顺序不变。产品 JS、裁剪/排序/取消/存储逻辑、PDF writer、依赖、版本和其他工作树均未改动。
+
+### RED、失败归因与修正
+
+第一组 RED 在未改 CSS 时确实失败：`AssertionError [ERR_ASSERTION]: gallery stays inside its allocated results height instead of escaping below the action row`，位置见 [RED 堆栈中的 review.cjs:593:9](../../../.test-output/task-2-fix-2-red.log)。1280×720 下，结果区底部 645，图库顶部 718.390625、高 18、底部 736.390625，页面也溢出到 736px，首卡所有命中点均不可达。见 [RED stdout](../../../.test-output/task-2-fix-2-red.log) 和 [RED 几何](../../../.test-output/v3.1.2/review-7i5Knn/fix-2-gallery-geometry.json)。该布局断言始终保留。
+
+第一次 CSS 尝试保留 `auto` 首行，导致低高度下原生批量入口缩至 0，被其他区域遮住；改为 `max-content` 后入口恢复。随后普通滚动留下 0.234375px 的卡片边缘越过操作栏边界，增加正常的上下滚动间距修正。后续失败转为拖动起点问题：被动事件记录显示可信按下首 ID10，但 helper 在真正开始原生拖动前先滚目标，把其他卡片移到了指针下方。
+
+曾用 200px 下滚动间距取得一次 focused 通过，但它没有解决完整 integration 的原生起点问题，已回退到正常 20px。这个临时通过只保留为过程证据，不算最终源码覆盖。控制器允许的一次被动诊断没有改磁盘脚本、事件、产品状态或运行设置：按下 ID10 时 `pages.scrollTop=0`，真正 `dragstart` 时根已滚到 121、目标为 ID12，随后 drop13，应用正确保存 `[10,11,13,12]`。见 [唯一被动诊断摘要](../../../.test-output/v3.1.2/task2-fix2-diagnostic/summary.json)、[前后源码哈希](../../../.test-output/v3.1.2/task2-fix2-diagnostic/source-hashes.json) 和 [实际截图](../../../.test-output/v3.1.2/task2-fix2-diagnostic/after.png)。之后只按 Ruling10 改原生输入起始顺序。
+
+可信首 ID 和精确顺序通过后，完整 integration 继续到原来的裁剪严格断言，实际解码 `640×361`，原样报 `361 !== 360`（[当时的 integration.cjs:395:58](../../../.test-output/task-2-fix-2-final-integration.log)，原位置 375）。我先停报；Ruling11 才允许检查公开图像几何并改输入点。实测原始视频 `1280×720`，client/canvas `417×235`，实际 contain 图像 `417×234.5625`，整画布的一半映射为约 `360.671` 个原始像素。图像内的原生点 `(407.25,203.75) → (615.75,321.03125)` 保存后实际解码 `640×360`。
+
+这个旧手势得到 361 的数值只用于本机的一次归因核对。我最初在调查版 fixture 加了旧预测值必须为 361 的断言；控制器明确其不属于跨平台契约后，只删除这一行。公开尺寸和旧预测仍记录日志，固定视频源高 720 的检查、实际解码严格 h360、原宽度范围和所有后续断言均保留。永久 fixture 再次完整 integration 通过。详见 [裁剪量测证据](../../../.test-output/task-2-fix-2-crop-evidence.json) 与 [最终 integration stdout](../../../.test-output/task-2-fix-2-final-integration-3.log)。
+
+### 全部命令、退出与最终源码覆盖
+
+所有浏览器命令均直接指定同一可执行文件，没有改测试运行时、原生安全设置、依赖或宿主服务。完整调用与重定向、job ID、退出码和收取状态列于 [15 项命令台账](../../../.test-output/task-2-fix-2-command-ledger.json)。focused 调用使用 `PPT_TEST_FILTER='low-height expanded batch' node tests/review.cjs`；唯一被动诊断使用 `node .test-output/task-2-fix-2-diagnostic-launcher.cjs`。
+
+| 执行/日志 | exit | 结果 |
+| --- | --- | --- |
+| [RED](../../../.test-output/task-2-fix-2-red.log) | 1 | 旧布局图库越过分配高度，断言真实失败 |
+| [GREEN 尝试 1](../../../.test-output/task-2-fix-2-green.log) | 1 | 批量入口的 `locator.click` 超时，定位到首行缩为 0 |
+| [GREEN 尝试 2](../../../.test-output/task-2-fix-2-green-2.log) | 1 | 卡片边缘 0.234375px 超出操作栏边界 |
+| [GREEN 尝试 3](../../../.test-output/task-2-fix-2-green-3.log) | 1 | 1440 下 helper 拖动超时，增加被动记录定位原因 |
+| [GREEN 尝试 4](../../../.test-output/task-2-fix-2-green-4.log) | 1 | 实际按下 ID10 后却从 ID13 开始原生拖动 |
+| [GREEN 尝试 5](../../../.test-output/task-2-fix-2-green-5.log) | 0 | 临时 200px 间距下 3 尺寸与 1,000 页通过；此版本已弃用 |
+| [原完整 integration](../../../.test-output/task-2-fix-2-integration.log) | 1 | 临时 CSS 下原脚本第 330 行顺序等待超时 |
+| [正常间距 native GREEN](../../../.test-output/task-2-fix-2-native-green.log) | 0 | 最终 CSS 下可信首卡输入、3 尺寸/新页面/字节/1,000 页通过 |
+| [唯一被动诊断](../../../.test-output/task-2-fix-2-integration-diagnostic.log) | 1 | 保留原顺序失败，观测到按下10→根滚动→开始12→drop13 |
+| [Ruling10 完整 integration](../../../.test-output/task-2-fix-2-final-integration.log) | 1 | 首卡/顺序/新页面/Referer 已过；后续严格裁剪 h360 失败为361 |
+| [Ruling11 量测版完整 integration](../../../.test-output/task-2-fix-2-final-integration-2.log) | 0 | 原整条业务链、实际裁剪640×360、3页PDF视觉比较通过 |
+| [完整 review](../../../.test-output/task-2-fix-2-final-review.log) | 0 | 19/19 组，未设 filter；stdout 沿用旧的 focused 标签 |
+| [完整 memory](../../../.test-output/task-2-fix-2-final-memory.log) | 0 | 14/14 组，0 browser errors |
+| [完整 library](../../../.test-output/task-2-fix-2-final-library.log) | 0 | 24/24 组，未设 filter；stdout 沿用旧的 focused 标签 |
+| [永久 fixture 完整 integration](../../../.test-output/task-2-fix-2-final-integration-3.log) | 0 | 仅移除调查性旧361断言后，整条原业务链再次通过 |
+
+按要求顺序执行的最终四套命令，以及随后因单行 fixture 边界修正而单独重跑的受影响套件，原样如下：
+
+```sh
+PPT_TEST_BROWSER='/Users/jasondai/Library/Caches/ms-playwright/chromium-1248/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing' npm run test:integration > .test-output/task-2-fix-2-final-integration-2.log 2>&1
+PPT_TEST_BROWSER='/Users/jasondai/Library/Caches/ms-playwright/chromium-1248/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing' npm run test:review > .test-output/task-2-fix-2-final-review.log 2>&1
+PPT_TEST_BROWSER='/Users/jasondai/Library/Caches/ms-playwright/chromium-1248/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing' npm run test:memory > .test-output/task-2-fix-2-final-memory.log 2>&1
+PPT_TEST_BROWSER='/Users/jasondai/Library/Caches/ms-playwright/chromium-1248/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing' npm run test:library > .test-output/task-2-fix-2-final-library.log 2>&1
+PPT_TEST_BROWSER='/Users/jasondai/Library/Caches/ms-playwright/chromium-1248/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing' npm run test:integration > .test-output/task-2-fix-2-final-integration-3.log 2>&1
+```
+
+最终源码矩阵见 [冻结记录](../../../.test-output/task-2-fix-2-final-source.json)。量测版完整 integration→review→memory→library 在最终 HTML/CSS/review 源码下顺序完成，当时 integration 自身为 `fddf…`；它随后只删调查性断言，最终为 `7b9a…` 并单独完整重跑。其他三套不消费这份 integration fixture，其实际加载的产品资源和各自测试内容没有改变，因此没有重跑它们。
+
+| 文件/阶段 | SHA-256 |
+| --- | --- |
+| [capture.html，始终未改](../../../capture.html) | `ada7d642ce6969f80cb53aae95fdd04e839d8f62ddc05ba67988207e5223c2a8` |
+| [最终 CSS](../../../style.css) | `348d8ebf56ccd1b1801e121800f7e9fd8fb30147ae17cb1ec3f9c4930b109eb8` |
+| [最终 review](../../../tests/review.cjs) | `84a66cdc7a599c73fd46f379645c2f80f9b4ae98ca77ce1c93ec6fc3c3feb127` |
+| [原 integration 快照](../../../.test-output/v3.1.2/task2-fix2-diagnostic/original-integration.cjs) | `8127cc73b66f834c6d83255d3e28f3a110bf756d5b62f2163b35956c5d0493d1` |
+| [仅 native-start 阶段](../../../.test-output/task-2-fix-2-native-start-source.json) | `495deb43a3150b8b125465ff419b47af14945299558a3a7a012742bb44e07a64` |
+| [Ruling11 量测阶段](../../../.test-output/task-2-fix-2-measured-crop-source.json) | `fddf55b39bfd8b538597b7bf094834bf55ab379970db36cedb175e62d37add4e` |
+| [最终永久 integration](../../../tests/integration.cjs) | `7b9afb5971ca71835dc919c8183c8ec100ef2280a6e9bfc100484d54f73eac24` |
+
+临时 200px 阶段的源码记录另存于 [首轮 integration 快照](../../../.test-output/task-2-fix-2-integration-attempt-1-source.json)，被动观测的内存脚本 SHA 为 `ae1ceed27c1944d7c4fa83e64668f2c5914a547b420968457e29655da724d715`；磁盘原脚本当时仍为 `8127…`。台账中的历史 run 分别指向原阶段快照，没有用最终哈希覆盖旧运行证据。
+
+### 实际几何、交互和截图
+
+最终 [review 结果](../../../.test-output/v3.1.2/review-2LKBss/results.json)、[完整图库几何](../../../.test-output/v3.1.2/review-2LKBss/fix-2-gallery-geometry.json) 与 [量测摘要](../../../.test-output/task-2-fix-2-geometry-summary.json) 记录：
+
+- 1280×720 首屏的图库现在处于分配好的 560px 结果区内部，并由工作区正确裁剪；普通滚动工作区 317px 后，图库为 `506×244`，y=`401.390625…645.390625`，高于操作栏 y665。整张首卡为 `241×170.5625`，卡片、选择框、时间和删除按钮共20个命中点全部通过，批量详情保持打开，文档宽高仍为1280×720。
+- 3 个尺寸的实际原生 `dragstart` 都来自可信 ID10，原落点命中末卡13；顺序成为 `[11,12,13,10]`。真实 IndexedDB 字节、签名和其他元数据保持一致，新页面逐项验证同一顺序。
+- 4 页与1,000页恢复后的图库高度均244px，外层工作区 `scrollHeight` 均918px；只有图库内容高度由377增至94281px。1,000页场景实际加载6个缩略图，根视口加上下200px允许6个，越界已加载列表为空。
+- 已有真实运行中 Stop 组也通过1280×800、1440×900、1920×1080、390×844；四组的按钮20个命中点全部通过，立即取消，状态为stopped、列表仍open，保留页数 `2→3→3`，精确记录与图像字节不丢失。原操作栏和取消实现均未改动。见 [最终 Stop 几何与取消记录](../../../.test-output/v3.1.2/review-2LKBss/fix-1-stop-geometry.json)。
+
+以下均为最终 CSS/review 下真实应用 DOM 截图，我通过 `read_image` 逐张看过；没有重建 HTML、缩略图或安装图像库：
+
+| 实际图像 | 视觉检查 |
+| --- | --- |
+| [1280×720，展开后首屏](../../../.test-output/v3.1.2/review-2LKBss/fix-2-expanded-before-scroll-1280x720.png) | 3条任务仍展开，面板/画面/导出区在操作栏上方裁剪，首屏允许继续滚动到图库 |
+| [1280×720，普通滚动到首卡](../../../.test-output/v3.1.2/review-2LKBss/fix-2-expanded-reachable-1280x720.png) | 完整卡片、选择/时间/删除可见，没有压到固定操作栏 |
+| [1440×900，展开且图库可达](../../../.test-output/v3.1.2/review-2LKBss/fix-2-expanded-reachable-1440x900.png) | 待框选0路条目仍在展开列表中，视频和图库保持左右布局，首行控件完整 |
+| [390×844，图库可达](../../../.test-output/v3.1.2/review-2LKBss/fix-2-expanded-reachable-390x844.png) | 两列卡片和原生控件可用，底部同一操作栏可见，无横向溢出 |
+| [1440×900，普通工作区](../../../.test-output/v3.1.2/review-2LKBss/desktop-1440x900.png) | 视频、文件名/导出范围与有界图库层级保留 |
+| [1920×1080，普通工作区](../../../.test-output/v3.1.2/review-2LKBss/desktop-1920x1080.png) | 宽屏分栏和底部操作栏稳定；拍摄时底部少量缩略图尚在懒加载，未把整图都已加载当作截图结论 |
+| [1280×800，真实批量运行中](../../../.test-output/v3.1.2/review-2LKBss/fix-1-expanded-running-1280x800.png) | 自动课次扫描中且有待框选课次，启用的 Stop 完整可见 |
+| [390×844，真实批量运行中](../../../.test-output/v3.1.2/review-2LKBss/fix-1-expanded-running-390x844.png) | 竖向列表保持展开，Stop 有完整边界，未被本次图库修复遮住 |
+| [1280×800，普通工作区](../../../.test-output/v3.1.2/review-2LKBss/desktop-1280x800.png) | 常规窗口下两列首卡及控件完整，图库在底栏上方裁剪 |
+| [1440×900，深色](../../../.test-output/v3.1.2/review-2LKBss/dark-1440x900.png) | 长来源名、导出范围、分栏与底栏可读，没有重复绘制条带 |
+| [1440×900，减少动态效果](../../../.test-output/v3.1.2/review-2LKBss/reduce-1440x900.png) | 导出页签和表单立即呈现，布局、文件名与图库保持一致；实际取消动画另由交互断言验证 |
+| [1440×900，深色高对比](../../../.test-output/v3.1.2/review-2LKBss/contrast-dark-1440x900.png) | 文本、边界和控件对比清楚，底部操作栏不遮首行图库 |
+
+[最终 memory 报告](../../../.test-output/v3.1.2/memory-1794048020994/report.json) 继续通过1,000条元数据/资产/卡片，恢复动画0、最大并发读取2、节点与非零scrollTop复用；该场景实际URL10=允许10，`bounded/oldRevoked/reused/preservedScroll` 均true。256MiB真实OPFS顺序写入与checksum、配额/取消清理、1,000页ZIP字节与共享撤销租约均通过。JS堆采样差49768字节只代表该采样，不作RSS或整机内存结论。[最终 library 报告](../../../.test-output/v3.1.2/library-YhUSiR/results.json) 24组继续覆盖迁移、命名/设置/裁剪/顺序隔离、检查点、0路手动框选、真实持久化失败及批量裁剪所属关系。
+
+### 日志范围、清理与剩余限制
+
+- integration 的整条链在同一临时扩展上下文内完成，原 pageerror 收集覆盖上下文页面，末尾错误数组与非本地拦截数组均为空；真实PDF渲染由既有 `pdftoppm`/图像比较校验3页，原阈值保留。review 和 library 的结果均为 `errors: []`、`blocked: []`，新增的新页面监听也进入 review 的错误列表。
+- memory 的各临时上下文收集 pageerror/既有未处理拒绝记录，最终 `errors: []`；路由继续阻断非本地请求，但没有独立的尝试次数计数。这里没有声称所有 console 频道、所有原生弹窗或所有外部请求都经过独立审计。
+- 所有15个本轮后台 job 已逐项 `job_output` 收取，退出码和日志均保留；最后一次列表中的本次恢复5个 job 均 completed，没有运行中的 fixture。浏览器、临时上下文和服务器沿用原有 finally 关闭，唯一被动观察随进程结束，没有留下产品开关。没有再次录像或运行其他无关大套件，也没有重做 Task3 的样例7页PDF。
+- `node --check tests/review.cjs`、`node --check tests/integration.cjs`、`git diff --check` 和源码暂存后的 `git diff --cached --check` 均exit0；提交前再次核对冻结源码与273行报告原前缀哈希。显式暂存仅3个授权文件，源码提交后工作区干净，再单独追加本报告。追加校验保留原273行前缀，129个本地证据链接均存在，最终产品与测试哈希未变。
+- 实测环境仍为 macOS arm64、Node `v26.13.0`、指定 Chromium `156.0.8078.4`。使用现有依赖、localhost合成视频/课程API、临时fixture上下文；未验证 Chrome114/Node20 最低版本、其他操作系统、真实学校媒体/账户或原生权限提示。未声称新增键盘重排能力。
+
+本节报告独立提交后停止所有变更，向控制器交接源码/报告 SHA、最终证据和正确 FIX_BASE，由控制器开展 fresh scoped review；Task3 的后续工作继续由控制器决定。
