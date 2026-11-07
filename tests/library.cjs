@@ -561,6 +561,21 @@ function zipEntries(bytes) {
       assert.match(await page.locator('#status').textContent(), /2 节 PDF.*共 3 页/);
       assert.match(await page.locator('#status').textContent(), /跳过 3 个空课次/, 'one empty lesson and two persisted batch jobs have no screenshots');
       assert.match(await page.locator('#status').textContent(), /1 节尚未完成整节扫描/);
+      const [merged] = await Promise.all([page.waitForEvent('download'), page.locator('#course-pdf').click()]);
+      assert.equal(merged.suggestedFilename(), course.name + '-整课.pdf');
+      const mergedPath = path.join(output, merged.suggestedFilename()); await merged.saveAs(mergedPath); await idle();
+      const pdf = await PDFDocument.load(fs.readFileSync(mergedPath)); assert.equal(pdf.getPageCount(), 3);
+      assert.equal(pdf.catalog.get(PDFName.of('PageMode')).toString(), '/UseOutlines');
+      const root = pdf.catalog.lookup(PDFName.of('Outlines')), courseNode = pdf.context.lookup(root.get(PDFName.of('First')));
+      assert.equal(courseNode.get(PDFName.of('Title')).decodeText(), course.name);
+      const titles = []; let ref = courseNode.get(PDFName.of('First'));
+      while (ref) { const node = pdf.context.lookup(ref); titles.push(node.get(PDFName.of('Title')).decodeText()); ref = node.get(PDFName.of('Next')); }
+      assert.deepEqual(titles, ['第 2 课 · 2026-11-04 08:00:00', '第 3 课 · 2026-11-05 10:00:00']);
+      for (const [index, image] of [1, 0, 2].entries()) {
+        const embedded = pdf.getPage(index).node.Resources().lookup(PDFName.of('XObject')).lookup(PDFName.of('Im0'));
+        assert.deepEqual(Buffer.from(embedded.contents), Buffer.from(images[image].split(',')[1], 'base64'));
+      }
+      assert.match(await page.locator('#status').textContent(), /含 2 节，共 3 页.*跳过 3 个空课次.*1 节尚未完成整节扫描/);
     });
     await test('library estimates stream legacy assets and use committed size metadata for new pages', async () => {
       await seed({lessons: [lesson('sizes'), lesson('empty-size')], activeId: 'empty-size', pages: [

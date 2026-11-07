@@ -658,6 +658,8 @@ function controls() {
   $('restart-scan').hidden = !activeLesson?.task || !!stream; $('restart-scan').disabled = active || !sourceReady;
   $('course-zip').disabled = active || !currentCourseLessons().some(lesson => allPages.some(page => page.lessonId === lesson.id));
   $('batch-course-zip').disabled = active || !batchCourseKey();
+  $('course-pdf').disabled = $('course-zip').disabled;
+  $('batch-course-pdf').disabled = $('batch-course-zip').disabled;
   document.querySelectorAll('#suspect-ranges button').forEach(button => { button.disabled = active || (!button.classList.contains('suspect-dismiss') && !sourceReady); });
   $('stop').disabled = !task && !realtimeTimer && !batchRunning;
   $('shot').disabled = active || !sourceReady || !ready;
@@ -1191,6 +1193,42 @@ $('pdf').onclick = () => exportRetained('pdf'); $('export-zip').onclick = () => 
 $('selected-pdf').onclick = () => exportRetained('pdf', true); $('selected-zip').onclick = () => exportRetained('zip', true);
 $('course-zip').onclick = () => exportCourseZIP();
 $('batch-course-zip').onclick = () => exportCourseZIP(batchCourseKey(), 'batch-status');
+$('course-pdf').onclick = () => exportCoursePDF();
+$('batch-course-pdf').onclick = () => exportCoursePDF(batchCourseKey(), 'batch-status');
+async function exportCoursePDF(courseKey, statusId = 'status') {
+  if (busy()) return;
+  const report = message => { status(message); if (statusId !== 'status') $(statusId).textContent = message; };
+  const {layout, timestamps} = pdfOptions();
+  exportBusy = true; controls(); let cache;
+  try {
+    await namingSave; await lessonSave; syncAllPages();
+    if (courseKey === undefined) courseKey = currentCourseKey();
+    if (!courseKey) throw Error('请先读取课程录像列表');
+    const course = currentCourseLessons(courseKey).sort((a, b) => (a.course?.date || '').localeCompare(b.course?.date || '') || (a.course?.start || '').localeCompare(b.course?.start || '') || a.created - b.created);
+    const title = PPTCourse.normalize(course[0]?.course || {}).name || '未命名课程';
+    const entries = course.map((lesson, index) => {
+      const info = PPTCourse.normalize(lesson.course || {});
+      return {title: `第 ${index + 1} 课 · ${info.date || '未知日期'} ${info.start || '未知时间'}`,
+        pages: allPages.filter(page => page.lessonId === lesson.id).sort((a, b) => a.order - b.order).map(page => ({...page}))};
+    });
+    const nonempty = entries.filter(entry => entry.pages.length), total = nonempty.reduce((sum, entry) => sum + entry.pages.length, 0);
+    if (!total) throw Error('本课程还没有截图');
+    const unfinished = course.filter((lesson, index) => entries[index].pages.length && lesson.task?.state !== 'done').length;
+    const knownJobs = new Set(savedBatches.filter(batch => PPTLibrary.courseKey(batch.page, batch.jobs[0]?.course) === courseKey).flatMap(batch => batch.jobs.map(job => job.id)));
+    const empty = course.length - nonempty.length + [...knownJobs].filter(id => !course.some(lesson => lesson.source?.batchJobId === id)).length;
+    cache = await PPTDiskCache.create('export'); let count = 0;
+    await writeCoursePDF(entries, {title, layout, timestamps, write: cache.write, readImage: async page => {
+      report(`正在合并整课 PDF：第 ${++count} / ${total} 页…`); $('progress').value = (count - 1) / total;
+      return PPTPageStore.imageBytes(db, page.id);
+    }});
+    const file = await cache.finish('application/pdf'), name = title.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_');
+    downloadBlob(file, `${name}-整课.pdf`, cache); cache = null; $('progress').value = 1;
+    report(`已生成整课合并 PDF，含 ${nonempty.length} 节，共 ${total} 页。${empty ? `跳过 ${empty} 个空课次（尚无截图）。` : ''}${unfinished ? `其中 ${unfinished} 节尚未完成整节扫描，文件为当前已保留截图。` : ''}`);
+  } catch (e) {
+    let message = e.message; if (cache) try { await cache.remove(); } catch (cleanup) { message += '；临时文件清理失败：' + cleanup.message; }
+    report('整课导出失败：' + message);
+  } finally { exportBusy = false; controls(); }
+}
 async function exportCourseZIP(courseKey, statusId = 'status') {
   if (busy()) return;
   const report = message => { status(message); if (statusId !== 'status') $(statusId).textContent = message; };

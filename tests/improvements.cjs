@@ -339,6 +339,30 @@ async function test(name, run) { await run(); passed++; console.log('PASS ' + na
       if (annotated) assert.match(texts.join('\n'), /\d{2}:\d{2}:\d{2}/);
       return {pdf, titles, texts};
     }
+    async function inspectCourse(bytes, expected, title, {sheets = expected.length, times = true} = {}) {
+      const pdf = await PDFDocument.load(bytes); assert.equal(pdf.getPageCount(), sheets);
+      assert.equal(pdf.catalog.get(PDFName.of('PageMode')).toString(), '/UseOutlines');
+      const originals = [], texts = [], leaves = [], lessonTitles = [];
+      for (const sheet of pdf.getPages()) {
+        const objects = sheet.node.Resources().lookup(PDFName.of('XObject'));
+        for (const key of objects.keys()) originals.push(Buffer.from(objects.lookup(key).contents));
+        texts.push(Buffer.from(pdf.context.lookup(sheet.node.get(PDFName.of('Contents'))).contents).toString('ascii'));
+      }
+      assert.deepEqual(originals, expected.map(image => Buffer.from(image, 'base64')));
+      const root = pdf.catalog.lookup(PDFName.of('Outlines')), course = pdf.context.lookup(root.get(PDFName.of('First')));
+      assert.equal(course.get(PDFName.of('Title')).decodeText(), title);
+      assert.equal(root.get(PDFName.of('Next')), undefined);
+      let ref = course.get(PDFName.of('First'));
+      while (ref) {
+        const lesson = pdf.context.lookup(ref); lessonTitles.push(lesson.get(PDFName.of('Title')).decodeText());
+        let leaf = lesson.get(PDFName.of('First'));
+        while (leaf) { const node = pdf.context.lookup(leaf); leaves.push(node.get(PDFName.of('Title')).decodeText()); leaf = node.get(PDFName.of('Next')); }
+        ref = lesson.get(PDFName.of('Next'));
+      }
+      assert.equal(leaves.length, expected.length);
+      if (times) assert.match(texts.join('\n'), /\d{2}:\d{2}:\d{2}/); else assert(!texts.join('\n').match(/\d{2}:\d{2}:\d{2}/));
+      return {pdf, lessonTitles, leaves, texts};
+    }
     let images;
     await test('PDF defaults, zero selection guards, and synthetic export fixtures', async () => {
       assert(await page.locator('#selected-pdf').isDisabled()); assert(await page.locator('#selected-zip').isDisabled());
@@ -372,6 +396,11 @@ async function test(name, run) { await run(); passed++; console.log('PASS ' + na
       await idle(); assert(await page.locator('#selected-pdf').isDisabled());
       const all = await download('#pdf', 'default-all'); assert(!all.name.includes('-selected'));
       await inspectPDF(all.bytes, [images[2], images[0], images[1]]);
+      await page.locator('#tab-export').click();
+      const merged = await download('#course-pdf', 'merged-default-A'); assert.equal(merged.name, 'Synthetic A-整课.pdf');
+      const parsed = await inspectCourse(merged.bytes, [images[2], images[0], images[1]], 'Synthetic A', {times: false});
+      assert.deepEqual(parsed.lessonTitles, ['第 1 课 · 2026-11-06 08:00:00']);
+      assert.deepEqual(parsed.leaves, ['第 1 页 · 00:01:03', '第 2 页 · 00:01:01', '第 3 页']);
     });
     await test('selected PDF/image ZIP export zero, one and many in displayed order; all-retained ignores selection', async () => {
       const cards = page.locator('#pages article');
@@ -429,6 +458,47 @@ async function test(name, run) { await run(); passed++; console.log('PASS ' + na
       const message = await page.locator('#batch-status').textContent(); assert.match(message, /共 2 页/); assert.match(message, /跳过 2 个空课次/); assert.match(message, /1 节尚未完成/);
       assert.equal(await page.locator('#lesson-select').inputValue(), 'A');
     });
+    await test('merged PDF buttons keep active and batch courses independent, including unselected partial lessons', async () => {
+      await page.locator('#tab-export').click();
+      const main = await download('#course-pdf', 'merged-handout-A'); assert.equal(main.name, 'Synthetic A-整课.pdf');
+      await inspectCourse(main.bytes, [images[2], images[0], images[1]], 'Synthetic A', {sheets: 2});
+      await page.locator('#tab-source').click(); await page.locator('#batch-panel').evaluate(panel => { panel.open = true; });
+      const batch = await download('#batch-course-pdf', 'merged-handout-B'); assert.equal(batch.name, 'Synthetic B-整课.pdf');
+      const parsed = await inspectCourse(batch.bytes, [images[4], images[3]], 'Synthetic B', {sheets: 1});
+      assert.deepEqual(parsed.leaves, ['第 1 页 · 00:01:05', '第 2 页 · 00:01:04']);
+      assert.match(await page.locator('#batch-status').textContent(), /共 2 页.*跳过 2 个空课次.*1 节尚未完成/);
+      assert.equal(await page.locator('#lesson-select').inputValue(), 'A');
+    });
+    await test('merged export freezes metadata, title, warnings and options during actual writes and rejects competing work', async () => {
+      await page.evaluate(() => {
+        window.originalCreate = PPTDiskCache.create;
+        PPTDiskCache.create = async kind => {
+          const cache = await originalCreate(kind), write = cache.write; let held = false;
+          cache.write = async bytes => { if (!held) { held = true; await new Promise(resolve => window.releaseExport = resolve); } return write(bytes); };
+          return cache;
+        };
+        window.exportPromise = exportCoursePDF();
+      });
+      await page.waitForFunction(() => !!window.releaseExport && exportBusy);
+      for (const id of ['selected-pdf', 'selected-zip', 'pdf', 'export-zip', 'course-zip', 'batch-course-zip', 'course-pdf', 'batch-course-pdf', 'pdf-layout', 'pdf-timestamps', 'pdf-bookmarks']) assert(await page.locator('#' + id).isDisabled());
+      const event = page.waitForEvent('download');
+      await page.evaluate(async () => {
+        await exportCoursePDF(batchCourseKey()); await exportCourseZIP(); await exportRetained('pdf');
+        activeLesson.course.name = 'Mutated'; activeLesson.task.state = 'paused'; lessons.reverse(); allPages.reverse();
+        selectedPages.clear(); pages.reverse(); pages[1].sourceTime = 999;
+        $('pdf-layout').value = 'single'; $('pdf-timestamps').checked = false; $('pdf-bookmarks').checked = false;
+        releaseExport();
+      });
+      const file = await event, destination = path.join(output, 'merged-snapshot.pdf'); await file.saveAs(destination);
+      await page.evaluate(async () => {
+        await exportPromise; PPTDiskCache.create = originalCreate; delete window.releaseExport;
+        activeLesson.course.name = 'Synthetic A'; activeLesson.task.state = 'done'; lessons.reverse(); allPages.reverse(); pages.reverse(); pages[1].sourceTime = 61;
+        applyPDFOptions(savedPDFOptions); render(); controls();
+      });
+      assert.equal(file.suggestedFilename(), 'Synthetic A-整课.pdf');
+      await inspectCourse(fs.readFileSync(destination), [images[2], images[0], images[1]], 'Synthetic A', {sheets: 2});
+      assert(!await page.locator('#status').textContent().then(text => text.includes('尚未完成')));
+    });
     await test('selected export snapshots metadata/options before asynchronous writes and locks competing exports', async () => {
       await page.locator('#select-all').click();
       await page.evaluate(() => {
@@ -455,6 +525,39 @@ async function test(name, run) { await run(); passed++; console.log('PASS ' + na
       });
       assert.match(result.messages[0], /请先读取课程录像列表/); assert.match(result.messages[1], /本课程还没有截图/); assert.match(result.messages[2], /synthetic unavailable image/);
       assert.equal(result.busy, false); assert.equal(result.enabled, true);
+    });
+    await test('merged course export rejects missing/empty scopes, honors real busy guards and cleans failed caches', async () => {
+      const result = await page.evaluate(async () => {
+        const messages = [], create = PPTDiskCache.create, read = PPTPageStore.imageBytes; let created = 0, removed = 0;
+        await exportCoursePDF(null, 'batch-status'); messages.push($('batch-status').textContent);
+        await exportCoursePDF('missing-course', 'batch-status'); messages.push($('batch-status').textContent);
+        try {
+          PPTDiskCache.create = async () => { created++; throw Error('guard bypass'); };
+          const reset = () => { studyAccepted = true; task = null; realtimeTimer = null; realtimeBusy = false; reviewBusy = false; batchRunning = false; exportBusy = false; pageWrites = 0; };
+          for (const guard of [() => studyAccepted = false, () => task = {}, () => realtimeTimer = 1, () => realtimeBusy = true,
+            () => reviewBusy = true, () => batchRunning = true, () => exportBusy = true, () => pageWrites = 1]) {
+            guard(); await exportCoursePDF(batchCourseKey(), 'batch-status'); reset();
+          }
+          if (created) throw Error('merged export ignored a busy guard');
+          for (const stage of ['read', 'write', 'finish', 'cleanup']) {
+            PPTDiskCache.create = async kind => {
+              const cache = await create(kind), remove = cache.remove; created++;
+              cache.remove = async () => { await remove(); removed++; if (stage === 'cleanup') throw Error('synthetic cleanup failure'); };
+              if (stage === 'write') cache.write = async () => { throw Error('synthetic write failure'); };
+              if (stage === 'finish') cache.finish = async () => { throw Error('synthetic finish failure'); };
+              return cache;
+            };
+            PPTPageStore.imageBytes = stage === 'read' || stage === 'cleanup' ? async () => { throw Error('synthetic unavailable image'); } : read;
+            await exportCoursePDF(batchCourseKey(), 'batch-status'); messages.push($('batch-status').textContent);
+            if (busy() || $('batch-course-pdf').disabled) throw Error('merged export retained busy state');
+          }
+        } finally { PPTDiskCache.create = create; PPTPageStore.imageBytes = read; controls(); }
+        return {messages, created, removed, busy: busy()};
+      });
+      assert.match(result.messages[0], /请先读取课程录像列表/); assert.match(result.messages[1], /本课程还没有截图/);
+      assert.match(result.messages[2], /synthetic unavailable image/); assert.match(result.messages[3], /synthetic write failure/);
+      assert.match(result.messages[4], /synthetic finish failure/); assert.match(result.messages[5], /synthetic unavailable image.*临时文件清理失败.*synthetic cleanup failure/);
+      assert.equal(result.created, 4); assert.equal(result.removed, 4); assert.equal(result.busy, false);
     });
     await test('main course ZIP waits for a pending local rename before choosing its course group', async () => {
       await idle();
@@ -499,6 +602,71 @@ async function test(name, run) { await run(); passed++; console.log('PASS ' + na
       assert.equal(file.suggestedFilename(), 'Renamed local course-课次PDF.zip');
       assert.match(entries[0].name, /Renamed local course/);
       assert.equal(await page.evaluate(() => lessons.find(lesson => lesson.id === 'B').course.name), 'Old local course');
+    });
+    await test('main merged PDF resolves its default group after a real naming transaction commits', async () => {
+      // The preceding document delivered ten downloads; isolate this case from the observed burst suppression.
+      await page.reload(); await idle();
+      await page.evaluate(async () => {
+        await namingSave; await lessonSave;
+        activeLesson.course.name = 'Old local course'; await PPTLibrary.put(db, activeLesson); applyLesson(); render(); controls();
+        const original = IDBObjectStore.prototype.put;
+        IDBObjectStore.prototype.put = function(value, key) {
+          const request = original.call(this, value, key);
+          if (this.name === 'settings' && key === 'exportNaming') {
+            IDBObjectStore.prototype.put = original;
+            let held = true; window.releaseNaming = () => { held = false; };
+            const keepAlive = () => { if (held) this.get('exportNaming').onsuccess = keepAlive; }; keepAlive();
+          }
+          return request;
+        };
+      });
+      await page.locator('#tab-export').click(); await page.locator('#course-name').fill('中文😀 (课程) / 标题');
+      await page.waitForFunction(() => !!window.releaseNaming);
+      const event = page.waitForEvent('download');
+      try {
+        await page.locator('#course-pdf').click();
+        assert.equal(await page.evaluate(() => activeLesson.course.name), 'Old local course');
+        assert.equal(await page.evaluate(() => exportBusy), true); assert(await page.locator('#course-pdf').isDisabled());
+      } finally { await page.evaluate(() => { releaseNaming(); delete window.releaseNaming; }); }
+      const file = await event, destination = path.join(output, 'merged-pending-naming.pdf'); await file.saveAs(destination); await idle();
+      assert.equal(file.suggestedFilename(), '中文😀 (课程) _ 标题-整课.pdf');
+      await inspectCourse(fs.readFileSync(destination), [images[2], images[0], images[1]], '中文😀 (课程) / 标题', {sheets: 2});
+      assert.equal(await page.evaluate(() => lessons.find(lesson => lesson.id === 'B').course.name), 'Old local course');
+    });
+    await test('main merged PDF waits for a real library put commit before scope, title and fallback snapshots', async () => {
+      await page.evaluate(async () => {
+        await namingSave; await lessonSave;
+        const original = IDBObjectStore.prototype.put;
+        IDBObjectStore.prototype.put = function(value, key) {
+          const request = original.call(this, value, key);
+          if (this.name === 'settings' && key === 'lesson:A') {
+            IDBObjectStore.prototype.put = original;
+            let held = true; window.releaseLesson = () => { held = false; };
+            const keepAlive = () => { if (held) this.get('lesson:A').onsuccess = keepAlive; }; keepAlive();
+          }
+          return request;
+        };
+        // The library clones at call and updates the retained record only after its real transaction completes.
+        lessonSave = lessonSave.then(async () => {
+          const next = {...activeLesson, course: {}};
+          await PPTLibrary.put(db, next); Object.assign(activeLesson, next);
+        });
+      });
+      await page.waitForFunction(() => !!window.releaseLesson);
+      const event = page.waitForEvent('download');
+      try {
+        await page.locator('#course-pdf').click();
+        assert.equal(await page.evaluate(() => activeLesson.course.name), '中文😀 (课程) / 标题');
+        assert.equal(await page.evaluate(() => exportBusy), true);
+      } finally { await page.evaluate(() => { releaseLesson(); delete window.releaseLesson; }); }
+      const file = await event, destination = path.join(output, 'merged-pending-lesson.pdf'); await file.saveAs(destination); await idle();
+      assert.equal(file.suggestedFilename(), '未命名课程-整课.pdf');
+      const parsed = await inspectCourse(fs.readFileSync(destination), [images[2], images[0], images[1]], '未命名课程', {sheets: 2});
+      assert.deepEqual(parsed.lessonTitles, ['第 1 课 · 未知日期 未知时间']);
+      assert.deepEqual(await page.evaluate(async () => {
+        const request = db.transaction('settings').objectStore('settings').get('lesson:A');
+        return new Promise(resolve => request.onsuccess = () => resolve(request.result.course));
+      }), {});
     });
     assert.deepEqual(errors, []); await exportContext.close();
     assert.deepEqual(blocked, []); console.log(`${passed} focused improvement groups passed; no external requests.`);

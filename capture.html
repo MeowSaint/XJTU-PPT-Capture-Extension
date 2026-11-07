@@ -68,6 +68,7 @@
                   <button id="batch-select" type="button" disabled>全选</button>
                   <button id="batch-start" type="button" disabled>开始批量提取</button>
                   <button id="batch-course-zip" type="button" disabled>下载本课 PDF 包</button>
+                  <button id="batch-course-pdf" type="button" disabled>下载整课合并 PDF</button>
                   <span id="batch-count">已选 0 / 0 节</span>
                 </div>
                 <div id="batch-jobs" class="batch-jobs" role="list"></div>
@@ -161,7 +162,9 @@
           <label class="check"><input id="pdf-timestamps" type="checkbox"><span>标注视频时间</span></label>
           <label class="check"><input id="pdf-bookmarks" type="checkbox"><span>生成页码书签</span></label>
           <button id="course-zip" class="source-load" type="button" disabled>下载整课 PDF 包</button>
+          <button id="course-pdf" class="source-load" type="button" disabled>下载整课合并 PDF</button>
           <p class="note pane-note">右上角导出本节全部保留页面；“导出所选”只导出勾选页面。整课 PDF 包会把同课程各节分别保存为 PDF。</p>
+          <p class="note pane-note">整课合并 PDF 包含同课程全部保留截图，并始终生成“课程 → 课次 → 页码与时间”目录；讲义版式每节从新纸页开始。</p>
           <p class="note pane-note">笔记讲义为 A4 双联并带手写横线；图片包内为按页序命名的原图 JPEG。</p>
         </section>
       </aside>
