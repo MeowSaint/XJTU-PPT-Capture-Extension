@@ -5,7 +5,7 @@ const { randomUUID } = require('node:crypto');
 
 const files = [
   'manifest.json', 'background.js', 'media.js', 'course.js', 'batch.js', 'content.js',
-  'page-hook.js', 'capture.html', 'capture.js', 'scanner.js', 'pdf.js', 'style.css',
+  'page-hook.js', 'capture.html', 'capture.js', 'mp4-recovery.js', 'scanner.js', 'pdf.js', 'style.css',
   'extension-state.js', 'preflight.js', 'workspace.js', 'disk-cache.js', 'page-store.js', 'library.js', 'motion.js',
   'README.md', 'THIRD_PARTY_NOTICES.md', 'LICENSE', 'vendor/hls.min.js', 'vendor/hls.LICENSE',
   'icons/icon-16.png', 'icons/icon-32.png', 'icons/icon-48.png', 'icons/icon-128.png',

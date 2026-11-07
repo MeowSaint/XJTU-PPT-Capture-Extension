@@ -15,7 +15,7 @@ assert.equal(fs.realpathSync(output), output, 'test output must stay inside the 
 const suite = fs.mkdtempSync(path.join(output, 'node-release-'));
 const files = [
   'manifest.json', 'background.js', 'media.js', 'course.js', 'batch.js', 'content.js',
-  'page-hook.js', 'capture.html', 'capture.js', 'scanner.js', 'pdf.js', 'style.css',
+  'page-hook.js', 'capture.html', 'capture.js', 'mp4-recovery.js', 'scanner.js', 'pdf.js', 'style.css',
   'extension-state.js', 'preflight.js', 'workspace.js', 'disk-cache.js', 'page-store.js', 'library.js', 'motion.js',
   'README.md', 'THIRD_PARTY_NOTICES.md', 'LICENSE', 'vendor/hls.min.js', 'vendor/hls.LICENSE',
   'icons/icon-16.png', 'icons/icon-32.png', 'icons/icon-48.png', 'icons/icon-128.png',
@@ -161,14 +161,14 @@ const oldZips = [
   },
 ];
 
-test('packs exactly 34 members with original LICENSE, notices and every resource byte', () => {
+test('packs exactly 35 members with original LICENSE, notices and every resource byte', () => {
   const root = fixture('contents');
   fs.writeFileSync(path.join(root, '.env'), 'must never be packaged');
   fs.mkdirSync(path.join(root, 'tests'));
   fs.writeFileSync(path.join(root, 'tests', 'private.txt'), 'must never be packaged');
   build(root);
   const entries = inspectZip(latest(root));
-  assert.equal(entries.size, 34);
+  assert.equal(entries.size, 35);
   assert.deepEqual([...entries.keys()].sort(), [...files].sort());
   for (const name of files) assert.deepEqual(entries.get(name), fs.readFileSync(path.join(root, name)), name);
   assert.deepEqual(entries.get('LICENSE'), fs.readFileSync(path.join(project, 'LICENSE')));
@@ -270,7 +270,7 @@ test('explicit Chinese and space root works from an unrelated cwd, including rel
   build(path.relative(cwd, root), { cwd });
   const version = JSON.parse(inspectZip(old).get('manifest.json')).version;
   assert.deepEqual(fs.readFileSync(path.join(root, 'last-release', `ppt-capture-v${version}.zip`)), old);
-  assert.equal(inspectZip(latest(root)).size, 34);
+  assert.equal(inspectZip(latest(root)).size, 35);
 });
 
 test('CLI defaults to its own repository root independently of cwd', () => {
@@ -280,7 +280,7 @@ test('CLI defaults to its own repository root independently of cwd', () => {
   fs.copyFileSync(release, script);
   const cwd = fs.mkdtempSync(path.join(suite, 'default-unrelated-'));
   build(undefined, { script, cwd });
-  assert.equal(inspectZip(latest(root)).size, 34);
+  assert.equal(inspectZip(latest(root)).size, 35);
   assert.deepEqual(fs.readdirSync(cwd), [], 'must not create archives in cwd');
 });
 
@@ -301,3 +301,16 @@ for (const directory of ['last-release', 'tmp']) {
     assert.deepEqual(zipNames(root), ['ppt-capture.zip']);
   });
 }
+
+
+test('recovery asset loads before capture and stays out of school scripts', () => {
+  const html = fs.readFileSync(path.join(project, 'capture.html'), 'utf8');
+  assert(html.indexOf('src="mp4-recovery.js"') >= 0);
+  assert(html.indexOf('src="mp4-recovery.js"') < html.indexOf('src="capture.js"'));
+  assert.match(html, /id="video-only"[^>]*checked/);
+  const manifest = JSON.parse(fs.readFileSync(path.join(project, 'manifest.json')));
+  assert(!JSON.stringify(manifest.content_scripts).includes('mp4-recovery.js'));
+  for (const name of ['content.js', 'page-hook.js']) assert(!fs.readFileSync(path.join(project, name), 'utf8').includes('PPTMP4'));
+  const root = fixture('missing-recovery', 'mp4-recovery.js');
+  assert.notEqual(run(root).status, 0);
+});

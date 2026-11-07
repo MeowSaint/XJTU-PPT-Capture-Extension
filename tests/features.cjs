@@ -86,7 +86,7 @@ async function setup() {
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
   origin = `http://127.0.0.1:${server.address().port}`; alternate = `http://localhost:${server.address().port}`; updateOrigin = `http://updates.test:${server.address().port}`;
   temp = fs.mkdtempSync(path.join(os.tmpdir(), 'ppt-features-')); const ext = path.join(temp, 'extension'); fs.mkdirSync(ext);
-  for (const name of ['manifest.json', 'background.js', 'media.js', 'course.js', 'batch.js', 'page-hook.js', 'content.js', 'capture.html', 'capture.js', 'page-store.js', 'library.js', 'disk-cache.js', 'scanner.js', 'style.css', 'pdf.js', 'extension-state.js', 'preflight.js', 'workspace.js', 'motion.js', 'vendor', 'icons']) {
+  for (const name of ['manifest.json', 'background.js', 'media.js', 'course.js', 'batch.js', 'page-hook.js', 'content.js', 'capture.html', 'capture.js', 'mp4-recovery.js', 'page-store.js', 'library.js', 'disk-cache.js', 'scanner.js', 'style.css', 'pdf.js', 'extension-state.js', 'preflight.js', 'workspace.js', 'motion.js', 'vendor', 'icons']) {
     fs.cpSync(path.join(root, name), path.join(ext, name), {recursive: true});
     if (fs.statSync(path.join(ext, name)).isFile()) copiedHashes[name] = createHash('sha256').update(fs.readFileSync(path.join(ext, name))).digest('hex');
   }
@@ -280,6 +280,7 @@ async function closeTools() { for (const page of context.pages()) if (page.url()
     await test('simultaneous tool tabs serialize update GET and claim one 3.10.0 automatic dialog', async () => {
       await resetUpdate('available', true); const before = updateRequests.length;
       const tabs = await Promise.all([openTool(), openTool()]); await until(() => pending.update.length === 1, 'held update request not observed');
+      await Promise.all(tabs.map(tab => tab.waitForFunction(() => ready && !busy()))); // Automatic offers require idle restored tabs.
       holdUpdate = false; release('update'); await Promise.all(tabs.map(tab => tab.waitForFunction(() => document.querySelector('#check-updates').dataset.available === 'true')));
       await until(async () => (await Promise.all(tabs.map(tab => tab.locator('#update-dialog').evaluate(node => node.open)))).filter(Boolean).length === 1, 'expected exactly one automatic update dialog');
       assert.equal(updateRequests.length - before, 1, 'background serial queue shares one cached GET');

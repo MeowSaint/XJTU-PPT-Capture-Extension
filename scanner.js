@@ -1,18 +1,18 @@
 /* Decode only requested timestamps, not real-time playback. */
 class PPTScanner {
-  constructor(video, capture) { this.video = video; this.capture = capture; }
+  constructor(video, capture, mediaContext = {}) { this.video = video; this.capture = capture; this.mediaContext = {local: /^(blob:|file:)/i.test(video.currentSrc || video.src || ''), ...mediaContext}; }
   async seek(time, signal) {
     signal?.throwIfAborted();
     const v = this.video;
-    if (Math.abs(v.currentTime - time) > 0.015 || v.readyState < 2) {
+    if (Math.abs(v.currentTime - time) > 0.015 || v.readyState < 2 || v.getVideoPlaybackQuality && !v.getVideoPlaybackQuality().totalVideoFrames) {
       await new Promise((resolve, reject) => {
         const cleanup = () => { clearTimeout(timer); v.removeEventListener('seeked', done); v.removeEventListener('error', fail); signal?.removeEventListener('abort', abort); };
         const done = () => { if (v.readyState >= 2 && !v.seeking) { cleanup(); resolve(); } };
-        const fail = () => { cleanup(); reject(Error('视频解码失败，请尝试 MP4 或本地视频')); };
+        const fail = () => { cleanup(); reject(PPTCore.mediaError(v.error, {...this.mediaContext, phase: 'seek', time})); };
         const abort = () => { cleanup(); reject(new DOMException('已停止', 'AbortError')); };
-        const timer = setTimeout(() => { cleanup(); reject(Error('跳转视频超时，服务器可能不支持随机访问或网络较慢')); }, 30000);
+        const timer = setTimeout(() => { cleanup(); reject(PPTCore.mediaError({code: 'MEDIA_TIMEOUT'}, {...this.mediaContext, phase: 'seek', time})); }, 30000);
         v.addEventListener('seeked', done); v.addEventListener('error', fail); signal?.addEventListener('abort', abort, {once: true});
-        v.currentTime = time;
+        try { v.currentTime = time; } catch (error) { cleanup(); reject(Object.assign(PPTCore.mediaError(v.error, {...this.mediaContext, phase: 'seek', time}), {cause: error})); }
       });
     }
     signal?.throwIfAborted();

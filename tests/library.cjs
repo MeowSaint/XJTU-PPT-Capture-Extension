@@ -3,6 +3,7 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path'), http = require('node:http');
 const {spawnSync} = require('node:child_process');
+const {gzipSync} = require('node:zlib');
 const {dependency, browserOptions} = require('./runtime.cjs');
 const {chromium} = dependency('playwright'), sharp = dependency('sharp');
 const {PDFDocument, PDFName} = dependency('pdf-lib');
@@ -165,10 +166,11 @@ async function test(name, body) {
 async function boundedScanner(duration = 694) {
   await page.evaluate(async duration => {
     Object.defineProperty(video, 'duration', {configurable: true, value: duration});
-    await bindLesson({...activeLesson.source, duration: video.duration});
+    if (activeLesson?.source) await bindLesson({...activeLesson.source, duration: video.duration});
     window.longProbe = {seeks: [], commits: [], maximumSignatures: 0, maximumSignatureBytes: 0, estimates: []};
     const seek = PPTScanner.prototype.seek, add = PPTPageStore.add, cache = cacheSignature;
     PPTScanner.prototype.seek = async function(time, signal) {
+      if (!sourceReady) return seek.call(this, time, signal); // Loading still proves real native video readiness.
       signal?.throwIfAborted(); longProbe.seeks.push(time);
       const index = Math.floor(time / .5), canvas = document.createElement('canvas'); canvas.width = 32; canvas.height = 18;
       const ctx = canvas.getContext('2d'); ctx.fillStyle = index % 2 ? '#ffffff' : '#000000'; ctx.fillRect(0, 0, 32, 18);
@@ -231,12 +233,23 @@ function zipEntries(bytes) {
     fs.utimesSync(fixture, 1793808000, 1793808000);
     const stat = fs.statSync(fixture); fileKey = 'file:' + JSON.stringify([path.basename(fixture), stat.size, stat.mtimeMs]);
     const wrong = path.join(output, 'other', path.basename(fixture)); fs.mkdirSync(path.dirname(wrong));
-    fs.writeFileSync(wrong, Buffer.concat([fs.readFileSync(fixture), Buffer.from('different size, identical file name')]));
+    fs.writeFileSync(wrong, Buffer.concat([fs.readFileSync(fixture), Buffer.from([0, 0, 0, 8]), Buffer.from('free')])); // Valid extra box: different size, identical filename.
     images = await Promise.all(['#24354a', '#9e2437', '#596779'].map(async color => 'data:image/jpeg;base64,' +
       (await sharp({create: {width: 640, height: 360, channels: 3, background: color}}).jpeg({quality: 95}).toBuffer()).toString('base64')));
     server = http.createServer((req, res) => {
       const pathname = decodeURIComponent(new URL(req.url, 'http://localhost').pathname);
       if (pathname === '/fixture.html') { res.writeHead(200, {'Content-Type': 'text/html'}); res.end('<!doctype html><title>Isolated library fixture</title>'); return; }
+      if (pathname.startsWith('/media-transport/')) {
+        const kind = pathname.split('/').pop();
+        if (kind === 'header-stall') return;
+        if (kind === '403') { res.writeHead(403); res.end('denied'); return; }
+        if (kind === 'html') { res.writeHead(200, {'Content-Type': 'text/html'}); res.end('<html>login</html>'); return; }
+        if (kind === 'body-stall') { res.writeHead(200, {'Content-Type': 'video/mp4'}); res.flushHeaders(); res.write('A'); return; }
+        if (kind === 'range-bad' || kind === 'range-ok') { res.writeHead(206, {'Content-Range': kind === 'range-ok' ? 'bytes 0-1/2' : 'bytes 1-2/3'}); res.end('AB'); return; }
+        if (kind === 'encoded') { const zipped = gzipSync('AB'); res.writeHead(200, {'Content-Encoding': 'gzip', 'Content-Length': zipped.length}); res.end(zipped); return; }
+        if (kind === 'interrupted') { res.writeHead(200, {'Content-Length': 100, Connection: 'close'}); res.write('A'); res.socket.destroy(); return; }
+        res.writeHead(200); res.end(); return;
+      }
       const file = path.resolve(root, '.' + pathname);
       if (!file.startsWith(root + path.sep)) { res.writeHead(403); res.end(); return; }
       fs.readFile(file, (error, bytes) => {
@@ -246,7 +259,7 @@ function zipEntries(bytes) {
     });
     await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
     origin = `http://127.0.0.1:${server.address().port}`;
-    browser = await chromium.launch({...browserOptions(), downloadsPath: output});
+    browser = await chromium.launch({...browserOptions(), downloadsPath: output, args: ['--mute-audio', '--disable-background-networking', '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost, EXCLUDE 127.0.0.1', '--no-proxy-server']});
     fs.writeFileSync(path.join(output, 'environment.json'), JSON.stringify({node: process.version, platform: process.platform, arch: process.arch,
       playwright: dependency('playwright/package.json').version, browser: browser.version(), executablePath: process.env.PPT_TEST_BROWSER || 'runtime default'}, null, 2));
     context = await browser.newContext({viewport: {width: 1440, height: 900}, acceptDownloads: true, reducedMotion: 'reduce'});
@@ -258,6 +271,234 @@ function zipEntries(bytes) {
     page = await context.newPage(); page.setDefaultTimeout(10000);
     page.on('pageerror', error => errors.push(error.message));
     await open();
+
+
+    await test('media native fixed AAC configuration differential and conservative controls', async () => {
+      const media = {}, log = [];
+      const run = (name, args) => {
+        const result = spawnSync(ffmpeg, ['-y', '-v', 'error', ...args], {encoding: 'utf8'});
+        log.push({command: [ffmpeg, '-y', '-v', 'error', ...args], stdout: result.stdout, stderr: result.stderr, exit: result.status});
+        fs.writeFileSync(path.join(output, 'media-ffmpeg.json'), JSON.stringify(log, null, 2));
+        assert.equal(result.status, 0, result.stderr || result.error?.message);
+      };
+      media.av = path.join(output, 'media-av.mp4');
+      run('av', [...['0x24354a:d=3', '0x9e2437:d=2', '0x596779:d=3'].flatMap(color => ['-f', 'lavfi', '-i', `color=c=${color}:s=640x360:r=20`]),
+        '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000:duration=7.9', '-filter_complex',
+        '[0:v]drawbox=x=20:y=20:w=50:h=30:color=white:t=fill[a];[1:v]drawbox=x=20:y=20:w=100:h=30:color=white:t=fill[b];[2:v]drawbox=x=20:y=20:w=150:h=30:color=white:t=fill[c];[a][b][c]concat=n=3:v=1:a=0[v]',
+        '-map', '[v]', '-map', '3:a', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-g', '20', '-bf', '0', '-c:a', 'aac', '-af', 'asetpts=PTS+1024/SR/TB', '-t', '8', '-use_editlist', '0', '-movflags', '+faststart', media.av]);
+      const ungroup = file => {
+        const bytes = fs.readFileSync(file);
+        function walk(start, end) {
+          for (let at = start; at < end;) {
+            const size = bytes.readUInt32BE(at), type = bytes.toString('ascii', at + 4, at + 8);
+            assert(size >= 8 && at + size <= end, 'fixture uses ordinary bounded boxes');
+            if (type === 'tkhd') { assert.equal(bytes[at + 8], 0); bytes.writeUInt16BE(0, at + 8 + 34); }
+            if (type === 'sgpd' || type === 'sbgp') bytes.write('free', at + 4);
+            if (['moov', 'trak', 'mdia', 'minf', 'stbl'].includes(type)) walk(at + 8, at + size);
+            at += size;
+          }
+        }
+        // Remove only explicit grouping metadata in this synthetic control, without altering samples or offsets.
+        walk(0, bytes.length);
+        fs.writeFileSync(file, bytes);
+      };
+      // FFmpeg marks its single audio track as alternate_group=1. Our control deliberately has no grouping.
+      // This changes no sample data and does not broaden the parser's conservative group rejection.
+      media.raw = path.join(output, 'media-raw-ffmpeg.mp4'); fs.copyFileSync(media.av, media.raw); ungroup(media.av);
+      for (const [name, args] of [['video', ['-an', '-movflags', '+faststart']], ['tail', []], ['fragmented', ['-movflags', '+frag_keyframe+empty_moov']]]) {
+        media[name] = path.join(output, `media-${name}.mp4`); run(name, ['-i', media.av, '-c', 'copy', '-use_editlist', '0', ...args, media[name]]); ungroup(media[name]);
+      }
+      const bytes = fs.readFileSync(media.av), badAudio = Buffer.from(bytes);
+      const esds = badAudio.indexOf(Buffer.from('esds')), config = badAudio.indexOf(Buffer.from([5, 128, 128, 128, 5]), esds);
+      assert(esds > 0 && config > esds && config < esds + 100, 'fixed FFmpeg AAC descriptor layout');
+      Buffer.from([0x17, 0x80, 0, 0, 0]).copy(badAudio, config + 5); // AAC LC, explicit zero sampling frequency; box sizes unchanged.
+      media.badAudio = path.join(output, 'media-bad-aac.mp4'); fs.writeFileSync(media.badAudio, badAudio);
+      const badVideo = Buffer.from(bytes), avcC = badVideo.indexOf(Buffer.from('avcC'));
+      assert(avcC > 0); badVideo.fill(0, avcC + 4, avcC + badVideo.readUInt32BE(avcC - 4) - 4);
+      media.badVideo = path.join(output, 'media-bad-video.mp4'); fs.writeFileSync(media.badVideo, badVideo);
+      const withoutIndex = Buffer.from(bytes); const moov = withoutIndex.indexOf(Buffer.from('moov'));
+      withoutIndex.write('free', moov); media.missing = path.join(output, 'media-missing-moov.mp4'); fs.writeFileSync(media.missing, withoutIndex);
+      const probe = await context.newPage();
+      const results = {fixtureHashes: Object.fromEntries(Object.entries(media).map(([name, file]) => [name, require('node:crypto').createHash('sha256').update(fs.readFileSync(file)).digest('hex')]))};
+      try {
+        await probe.goto(origin + '/fixture.html');
+        for (const name of ['media.js', 'scanner.js', 'mp4-recovery.js']) await probe.addScriptTag({url: origin + '/' + name});
+        const decode = (file, prepare = false) => probe.evaluate(async ({url, prepare}) => {
+          const original = await (await fetch(url)).blob(), v = document.createElement('video'); v.muted = true; v.preload = 'auto'; document.body.append(v);
+          let objectURL, timer, listeners = [], inspection, mode = 'original';
+          const result = {nativeFailed: false, decoded: false, reachedEnd: false, slidePixels: [], sourceTimes: []};
+          try {
+            let blob = original;
+            if (prepare) {
+               const prepared = await PPTMP4.prepare(original); ({inspection, mode} = prepared); blob = prepared.blob;
+               if (mode === 'audio-omitted') {
+                 const before = new Uint8Array(await original.arrayBuffer()), after = new Uint8Array(await blob.arrayBuffer());
+                 const text = new TextDecoder('latin1').decode(before), audioTypeOffset = text.lastIndexOf('trak', text.indexOf('soun'));
+                 result.changedOffsets = [...before.keys()].filter(i => before[i] !== after[i]); result.audioTypeOffset = audioTypeOffset;
+                 if (before.length !== after.length || result.changedOffsets.some(i => i < audioTypeOffset || i >= audioTypeOffset + 4)) throw Error('rewrite altered non-audio-type bytes');
+               }
+             }
+            Object.assign(result, {mode, inspection}); if (!blob) return result;
+            await new Promise((resolve, reject) => {
+              const done = () => resolve(), fail = () => reject(PPTCore.mediaError(v.error));
+              listeners = [['loadeddata', done], ['error', fail]]; listeners.forEach(([type, fn]) => v.addEventListener(type, fn, {once: true}));
+              timer = setTimeout(() => reject(Error('native probe timeout')), 5000);
+              objectURL = URL.createObjectURL(blob); v.src = objectURL;
+            }).finally(() => { clearTimeout(timer); listeners.forEach(([type, fn]) => v.removeEventListener(type, fn)); listeners = []; });
+            const canvas = document.createElement('canvas'); canvas.width = 1; canvas.height = 1;
+            const scanner = new PPTScanner(v, time => { canvas.getContext('2d').drawImage(v, 320, 180, 1, 1, 0, 0, 1, 1); return {pixel: [...canvas.getContext('2d').getImageData(0, 0, 1, 1).data], time, nativeTime: v.currentTime}; });
+            for (const time of [.1, 4, 7.9]) { const frame = await scanner.seek(time, new AbortController().signal); result.slidePixels.push(frame.pixel); result.sourceTimes.push([frame.time, frame.nativeTime]); }
+            result.decoded = v.videoWidth > 0 && result.slidePixels.every(pixel => pixel[3] === 255); result.reachedEnd = Math.abs(v.currentTime - 7.9) < .05; result.duration = v.duration;
+          } catch (error) { result.nativeFailed = true; result.error = {message: error.message, nativeCode: v.error?.code || null}; }
+          finally { clearTimeout(timer); listeners.forEach(([type, fn]) => v.removeEventListener(type, fn)); v.pause(); v.removeAttribute('src'); v.load(); v.remove(); if (objectURL) URL.revokeObjectURL(objectURL); }
+          return result;
+        }, {url: origin + '/' + path.relative(root, file).split(path.sep).join('/'), prepare});
+        results.cleanControl = await decode(media.av); assert.equal(results.cleanControl.decoded, true);
+        // Establish the original result before asking the parser to prepare the SAME deterministic bad AAC bytes.
+        results.originalBadAudio = await decode(media.badAudio);
+        results.preparedBadAudio = await decode(media.badAudio, true);
+        results.differential = results.originalBadAudio.nativeFailed && results.preparedBadAudio.mode === 'audio-omitted' && results.preparedBadAudio.decoded;
+        results.gap = results.preparedBadAudio.mode !== 'audio-omitted' ? 'parser-profile-passthrough' : !results.originalBadAudio.nativeFailed ? 'browser-tolerates-damaged-audio' : null;
+        assert.equal(results.preparedBadAudio.decoded, true);
+        assert.deepEqual(results.preparedBadAudio.slidePixels, results.cleanControl.slidePixels);
+        assert.deepEqual(results.preparedBadAudio.sourceTimes, results.cleanControl.sourceTimes);
+        assert.equal(results.preparedBadAudio.reachedEnd, true);
+        if (results.differential) assert.equal(results.originalBadAudio.nativeFailed, true);
+        for (const name of ['raw', 'av', 'video', 'tail', 'fragmented', 'missing', 'badVideo']) results[name] = await decode(media[name], true);
+        assert.equal(results.raw.mode, 'original');
+        assert.equal(results.av.mode, 'audio-omitted'); assert.equal(results.tail.mode, 'audio-omitted');
+        assert.equal(results.preparedBadAudio.mode, 'audio-omitted'); assert.equal(results.preparedBadAudio.changedOffsets.length, 3);
+        assert.equal(results.video.mode, 'original'); assert.equal(results.fragmented.mode, 'original');
+        assert.equal(results.missing.mode, 'reject'); assert.equal(results.badVideo.mode, 'original'); assert.equal(results.badVideo.decoded, false, 'invalid AVC is never reported as recovered');
+        for (const name of ['raw', 'av', 'video', 'tail', 'fragmented']) assert.equal(results[name].decoded, true, name);
+        for (const [pixel, expected] of results.cleanControl.slidePixels.map((pixel, i) => [pixel, [[36, 53, 74], [158, 36, 55], [89, 103, 121]][i]])) {
+          expected.forEach((value, i) => assert(Math.abs(value - pixel[i]) <= 4)); assert.equal(pixel[3], 255);
+        }
+      } finally { fs.writeFileSync(path.join(output, 'media-native.json'), JSON.stringify(results, null, 2)); await probe.close(); }
+      console.log('Native media result:', results.differential ? 'original muted failure → prepared pixels/times recovered' : 'EXPLICIT GAP: ' + results.gap);
+    });
+
+    await test('media prepared load preserves original file identity, settings, lesson and screenshots', async () => {
+      await seed();
+      assert.equal(await page.locator('#video-only').isChecked(), true);
+      const source = path.join(output, 'media-av.mp4');
+      // This group also runs independently of the native-only filter.
+      if (!fs.existsSync(source)) {
+        const result = spawnSync(ffmpeg, ['-y', '-v', 'error', '-i', fixture, '-f', 'lavfi', '-i', 'sine=duration=5.8', '-c:v', 'copy', '-c:a', 'aac', '-use_editlist', '0', '-shortest', source], {encoding: 'utf8'});
+        assert.equal(result.status, 0, result.stderr);
+        const bytes = fs.readFileSync(source); let at = 0;
+        while ((at = bytes.indexOf(Buffer.from('tkhd'), at)) >= 0) { bytes.writeUInt16BE(0, at + 4 + 34); at += 4; }
+        fs.writeFileSync(source, bytes);
+      }
+      await load(source); await settled();
+      const before = await stored(), stat = fs.statSync(source), originalKey = 'file:' + JSON.stringify([path.basename(source), stat.size, Math.trunc(stat.mtimeMs)]);
+      assert.equal(before.lessons[0].source.sourceKey, originalKey);
+      assert.equal(await page.evaluate(() => mediaContext.audioOmitted), true);
+      await page.locator('#shot').click(); await count(1); const saved = await stored();
+      await page.locator('#release-cache').click(); await idle(); await load(source); await settled();
+      assert.equal((await stored()).activeId, before.activeId); assert.deepEqual((await stored()).assets, saved.assets);
+      await page.locator('#video-only').uncheck(); await page.evaluate(async () => { await mediaRecoverySave; }); await page.reload(); await idle();
+      assert.equal(await page.locator('#video-only').isChecked(), false); await load(source);
+      assert.equal(await page.evaluate(() => mediaContext.audioOmitted), false); assert.equal((await stored()).activeId, before.activeId);
+    });
+
+    await test('media loopback transport statuses, body hangs, cancellation and encoded lengths clean caches', async () => {
+      await seed({lessons: [lesson('transport-old')], pages: [{lessonId: 'transport-old', sourceKey: fileKey, image: 1}]});
+      const before = await stored();
+      const results = await page.evaluate(async origin => {
+        const results = [];
+        for (const [kind, cancel] of [['403'], ['html'], ['empty'], ['range-bad'], ['range-ok'], ['encoded'], ['interrupted'], ['header-stall'], ['body-stall'], ['header-stall', true], ['body-stall', true]]) {
+          const controller = new AbortController(); let timer;
+          if (cancel) timer = setTimeout(() => controller.abort(), 10);
+          try { const file = await fetchVideo(origin + '/media-transport/' + kind, controller.signal, {timeoutMs: 80}); results.push({kind, size: file.size}); }
+          catch (error) { results.push({kind, cancel: !!cancel, code: error.code, name: error.name, phase: error.phase}); }
+          finally { clearTimeout(timer); await releaseSource(); }
+          if (videoCache || objectURL || sourceReady || video.getAttribute('src')) throw Error('transport leaked its owner');
+        }
+        return results;
+      }, origin);
+      assert.deepEqual(results.slice(0, 4).map(result => result.code), ['HTTP_STATUS', 'NOT_VIDEO', 'EMPTY_MEDIA', 'INCOMPLETE_RESPONSE']);
+      assert.deepEqual(results.slice(4, 6).map(result => result.size), [2, 2]);
+      assert.equal(results[6].code, 'FETCH_FAILED');
+      assert.deepEqual(results.slice(7, 9).map(result => result.code), ['MEDIA_TIMEOUT', 'MEDIA_TIMEOUT']);
+      assert.ok(results.slice(9).every(result => result.name === 'AbortError'));
+      assert.deepEqual(await stored(), before);
+      fs.writeFileSync(path.join(output, 'media-transport.json'), JSON.stringify(results, null, 2));
+    });
+
+    await test('media late prepare and loadeddata cancellation cannot bind or remove prior screenshots', async () => {
+      await seed({lessons: [lesson('media-old')], pages: [{lessonId: 'media-old', sourceKey: fileKey}]});
+      const before = await stored();
+      for (const late of ['prepare', 'loadeddata']) {
+        await page.evaluate(late => {
+          window.oldPrepare = PPTMP4.prepare; window.oldAwaitVideo = awaitVideo;
+          window.mediaEntered = false;
+          const delay = () => new Promise(resolve => { window.mediaEntered = true; window.mediaRelease = resolve; });
+          if (late === 'prepare') PPTMP4.prepare = async () => { await delay(); return {mode: 'original', blob: new Blob(['late'])}; };
+          else awaitVideo = async () => { await delay(); };
+        }, late);
+        await page.locator('#file').setInputFiles(fixture); await page.waitForFunction(() => window.mediaEntered);
+        await page.locator('#stop').click(); await page.evaluate(() => mediaRelease()); await idle();
+        assert.equal(await page.evaluate(() => sourceReady), false); assert.equal(await page.evaluate(() => objectURL), null);
+        assert.deepEqual(await stored(), before);
+        await page.evaluate(() => { PPTMP4.prepare = oldPrepare; awaitVideo = oldAwaitVideo; delete window.mediaRelease; });
+      }
+    });
+
+
+    await test('media remote preparation owns cache URLs and rejects local failures without rebinding', async () => {
+      await seed({lessons: [lesson('media-keep')], pages: [{lessonId: 'media-keep', sourceKey: fileKey}]});
+      const before = await stored();
+      const source = path.join(output, 'media-av.mp4'); assert(fs.existsSync(source), 'native fixture group precedes remote acceptance');
+      const url = origin + '/' + path.relative(root, source).split(path.sep).join('/');
+      await page.evaluate(() => {
+        chrome.permissions = {contains: async () => true, request: async () => true};
+        window.mediaResources = {created: [], revoked: [], removed: []};
+        const create = PPTDiskCache.create, createURL = URL.createObjectURL, revokeURL = URL.revokeObjectURL;
+        URL.createObjectURL = blob => { const url = createURL(blob); mediaResources.created.push(url); return url; };
+        URL.revokeObjectURL = url => { mediaResources.revoked.push({url, detached: !video.getAttribute('src')}); revokeURL(url); };
+        PPTDiskCache.create = async kind => { const cache = await create(kind), remove = cache.remove; if (kind === 'video') cache.remove = async () => { mediaResources.removed.push({detached: !video.getAttribute('src'), revoked: mediaResources.revoked.some(item => item.url === mediaResources.owner)}); await remove(); }; return cache; };
+        window.restoreMediaResources = () => { PPTDiskCache.create = create; URL.createObjectURL = createURL; URL.revokeObjectURL = revokeURL; };
+      });
+      try {
+        assert.equal(await page.evaluate(url => loadRemote(url, {permissionGranted: true}), url), true);
+        assert.equal(await page.evaluate(() => mediaContext.audioOmitted), true);
+        const remote = await page.evaluate(() => { mediaResources.owner = objectURL; return {key: activeLesson.source.sourceKey, url: activeLesson.source.url, id: activeLesson.id, context: mediaContext}; });
+        assert.equal(remote.key, 'url:' + url); assert.equal(remote.url, url);
+        const samples = await page.evaluate(async () => {
+          const result = []; for (const time of [.1, 4, 7.9]) { const f = await new PPTScanner(video, frame, mediaContext).seek(time, new AbortController().signal); result.push({sourceTime: f.sourceTime, nativeTime: video.currentTime}); } return result;
+        });
+        assert.deepEqual(samples, [.1, 4, 7.9].map(time => ({sourceTime: time, nativeTime: time})));
+        await page.evaluate(() => releaseSource()); await idle();
+        const resources = await page.evaluate(() => mediaResources);
+        assert.equal(resources.created.filter(url => url === resources.owner).length, 1); assert.deepEqual(resources.revoked.filter(item => item.url === resources.owner), [{url: resources.owner, detached: true}]);
+        assert.deepEqual(resources.removed, [{detached: true, revoked: true}]);
+        assert.equal(await page.evaluate(() => videoCache), null);
+        assert.deepEqual((await stored()).assets, before.assets); assert.equal((await stored()).pages.length, 1);
+        // A local read rejection has no native retry, does not lose stored pages, and is not missing-index.
+        await page.evaluate(() => { window.savedMediaPrepare = PPTMP4.prepare; PPTMP4.prepare = async () => { throw Object.assign(Error('controlled disk failure'), {code: 'LOCAL_READ_FAILED', phase: 'local-read'}); }; });
+        const saved = await stored();
+        await page.locator('#file').setInputFiles(source); await page.waitForFunction(() => !busy());
+        assert.equal(await page.evaluate(() => sourceReady), false); assert.equal(await page.evaluate(() => objectURL), null);
+        assert.deepEqual(await stored(), saved); assert.doesNotMatch(await page.locator('#status').textContent(), /刷新|moov|索引/);
+        await page.evaluate(() => { PPTMP4.prepare = savedMediaPrepare; });
+      } finally { await page.evaluate(() => { if (window.savedMediaPrepare) PPTMP4.prepare = savedMediaPrepare; restoreMediaResources(); }); }
+    });
+
+    await test('media invalid video initialization never binds while valid black frames remain usable', async () => {
+      await seed({lessons: [lesson('media-video-keep')], pages: [{lessonId: 'media-video-keep', sourceKey: fileKey}]});
+      const before = await stored();
+      await page.locator('#video-only').uncheck(); await page.evaluate(() => mediaRecoverySave);
+      await page.locator('#file').setInputFiles(path.join(output, 'media-bad-video.mp4')); await page.waitForFunction(() => !busy());
+      assert.equal(await page.evaluate(() => sourceReady), false); assert.equal(await page.evaluate(() => objectURL), null);
+      assert.deepEqual(await stored(), before); assert.match(await page.locator('#status').textContent(), /视频画面|格式|解码/);
+      const black = path.join(output, 'media-black.mp4');
+      const blackArgs = ['-y', '-v', 'error', '-f', 'lavfi', '-i', 'color=c=black:s=640x360:r=20:d=1', '-an', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', black];
+      const generated = spawnSync(ffmpeg, blackArgs, {encoding: 'utf8'});
+      fs.writeFileSync(path.join(output, 'media-black-ffmpeg.json'), JSON.stringify({command: [ffmpeg, ...blackArgs], stdout: generated.stdout, stderr: generated.stderr, exit: generated.status}, null, 2));
+      assert.equal(generated.status, 0, generated.stderr); await load(black);
+      assert.equal(await page.evaluate(() => sourceReady && video.videoWidth === 640 && video.videoHeight === 360), true);
+    });
 
     for (const transport of ['fetch', 'xhr']) await test(`acquisition boundary course opening stays absent through ${transport}, selection, binding and reload`, async () => {
       const base = origin + '/study-capture-courses/42/preview-detail/a';
@@ -1944,7 +2185,8 @@ function zipEntries(bytes) {
     fs.writeFileSync(path.join(output, 'results.json'), JSON.stringify({passed, error: error.stack, errors, blocked, output}, null, 2));
     console.error(error); console.error('Evidence: ' + output); process.exitCode = 1;
   } finally {
+    if (page && !page.isClosed()) await page.evaluate(async () => { if (typeof task !== 'undefined') task?.abort(); if (typeof releaseSource === 'function') await releaseSource(); }).catch(() => {});
     if (context) await context.close(); if (browser) await browser.close();
-    if (server?.listening) await new Promise(resolve => server.close(resolve));
+    if (server?.listening) { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
   }
 })();

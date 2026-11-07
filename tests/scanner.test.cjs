@@ -426,3 +426,45 @@ test('invalid duration, step, and bounds reject before seeking or writing', asyn
     assert.deepEqual(sought, []);
   }
 });
+
+
+test('native seek shares source-aware diagnostics, cleans listeners and retains the 30s deadline', async () => {
+  for (const mode of ['error', 'timeout', 'abort', 'setter']) {
+    const listeners = new Set(), timers = new Set(); let timeout, milliseconds, cleared = 0;
+    const v = Object.assign(new EventTarget(), {readyState: 0, seeking: true, error: {code: 3}});
+    const add = v.addEventListener.bind(v), remove = v.removeEventListener.bind(v);
+    v.addEventListener = (type, fn, opts) => { listeners.add(fn); add(type, fn, opts); };
+    v.removeEventListener = (type, fn) => { listeners.delete(fn); remove(type, fn); };
+    Object.defineProperty(v, 'currentTime', {get: () => 0, set() { if (mode === 'setter') throw Error('setter failed'); }});
+    const Seek = vm.runInNewContext(fs.readFileSync(require.resolve('../scanner.js'), 'utf8') + '\nPPTScanner', {
+      PPTCore: require('../media.js'), DOMException,
+      setTimeout(fn, ms) { timeout = fn; milliseconds = ms; timers.add(fn); return fn; },
+      clearTimeout(fn) { timers.delete(fn); cleared++; },
+    });
+    const controller = new AbortController(), pending = new Seek(v, () => assert.fail('must not capture'), {local: true, audioOmitted: true}).seek(7.5, controller.signal);
+    if (mode === 'error') v.dispatchEvent(new Event('error'));
+    if (mode === 'timeout') timeout();
+    if (mode === 'abort') controller.abort();
+    await assert.rejects(pending, error => {
+      if (mode === 'abort') return error.name === 'AbortError';
+      assert.equal(error.phase, 'seek'); assert.equal(error.time, 7.5);
+      assert.doesNotMatch(error.message, /刷新|服务器|网络/); return true;
+    });
+    assert.equal(milliseconds, 30000); assert.equal(listeners.size, 0); assert.equal(timers.size, 0); assert(cleared > 0);
+  }
+});
+
+test('legacy two-argument scanner infers local Blob media context', () => {
+  const scanner = new Scanner({src: 'blob:http://127.0.0.1/local'}, () => {});
+  assert.equal(scanner.mediaContext.local, true);
+});
+
+
+test('seek at the same time still decodes when loadeddata came only from audio', async () => {
+  let sought = 0;
+  const v = Object.assign(new EventTarget(), {readyState: 2, seeking: false, getVideoPlaybackQuality: () => ({totalVideoFrames: 0})});
+  Object.defineProperty(v, 'currentTime', {get: () => 0, set() { sought++; queueMicrotask(() => v.dispatchEvent(new Event('seeked'))); }});
+  const Seek = vm.runInNewContext(fs.readFileSync(require.resolve('../scanner.js'), 'utf8') + '\nPPTScanner', {PPTCore: require('../media.js'), DOMException, setTimeout, clearTimeout});
+  await new Seek(v, () => {}).seek(0);
+  assert.equal(sought, 1);
+});

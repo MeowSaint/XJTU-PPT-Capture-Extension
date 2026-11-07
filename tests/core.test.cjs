@@ -199,3 +199,141 @@ test('closed-tab badge callback errors and promise rejections do not lose cache 
   await flush();
   assert.equal(storage['media-42'], undefined);
 });
+
+
+test('media errors retain stage and native uncertainty with source-aware guidance', () => {
+  for (const phase of ['load', 'seek']) for (const local of [false, true]) {
+    const error = core.mediaError({code: 3}, {phase, local, audioOmitted: true, time: 12.5});
+    assert.equal(error.code, 'MEDIA_DECODE_FAILED'); assert.equal(error.phase, phase);
+    assert.equal(error.nativeCode, 3); assert.equal(error.time, 12.5);
+    assert.match(error.message, /12\.5/); assert.match(error.message, /已忽略音轨/);
+    assert.doesNotMatch(error.message, /音频损坏|视频损坏|刷新课程/);
+    assert.match(core.mediaError({code: 4}, {phase, local}).message, /不支持|格式/);
+  }
+  for (const code of [2, 'MEDIA_TIMEOUT']) {
+    const local = core.mediaError({code}, {local: true, phase: 'seek', time: 4});
+    assert.doesNotMatch(local.message, /刷新|服务器|网络|过期/);
+    assert.match(local.message, /本地|磁盘|文件/);
+  }
+});
+
+function mediaHarness(extra = {}) {
+  const source = fs.readFileSync(require.resolve('../capture.js'), 'utf8');
+  const nodes = new Map();
+  const video = Object.assign(new EventTarget(), {readyState: 0, error: null, duration: 8, videoWidth: 640, videoHeight: 360, currentTime: 0, getVideoPlaybackQuality: () => ({totalVideoFrames: 1, droppedVideoFrames: 0})});
+  const sandbox = {PPTCore: core, DOMException, AbortController, Blob, URL, setTimeout, clearTimeout, video,
+    status: () => {}, $: id => { if (!nodes.has(id)) nodes.set(id, {}); return nodes.get(id); },
+    PPTScanner: class { async seek(time, signal) { signal?.throwIfAborted(); video.currentTime = time; } },
+    videoCache: null, mediaContext: {}, mediaRecovery: {omitAudio: true},
+    PPTDiskCache: {create: async () => { const chunks = []; return {write: async chunk => { chunks.push(chunk); }, finish: async () => new Blob(chunks), remove: async () => {}}; }}, ...extra};
+  vm.createContext(sandbox);
+  vm.runInContext(source.slice(source.indexOf('async function awaitVideo('), source.indexOf('async function inspectPlaylist(')), sandbox);
+  return sandbox;
+}
+test('fetchVideo validates status, complete ranges and comparable body lengths', async () => {
+  for (const [response, code] of [
+    [new Response('x', {status: 403}), 'HTTP_STATUS'],
+    [new Response('<html>', {headers: {'content-type': 'text/html'}}), 'NOT_VIDEO'],
+    [new Response(''), 'EMPTY_MEDIA'],
+    [new Response('xx', {status: 206, headers: {'content-range': 'bytes 1-2/3'}}), 'INCOMPLETE_RESPONSE'],
+    [new Response('xx', {status: 206}), 'INCOMPLETE_RESPONSE'],
+    [new Response('xx', {headers: {'content-length': '3'}}), 'INCOMPLETE_RESPONSE'],
+    [new Response('xx', {status: 206, headers: {'content-range': 'bytes 0-2/3'}}), 'INCOMPLETE_RESPONSE'],
+  ]) {
+    const h = mediaHarness({fetch: async () => response});
+    await assert.rejects(h.fetchVideo('http://127.0.0.1/a.mp4'), error => error.code === code && error.phase === 'fetch');
+  }
+  for (const headers of [{'content-range': 'bytes 0-1/2', 'content-length': '2'}, {'content-encoding': 'gzip', 'content-length': '999'}]) {
+    const h = mediaHarness({fetch: async () => new Response('xx', {status: headers['content-range'] ? 206 : 200, headers})});
+    assert.equal((await h.fetchVideo('http://127.0.0.1/a.mp4')).size, 2);
+  }
+});
+test('fetchVideo deadlines and cancellation settle stalled headers/read without a lifetime limit', async () => {
+  for (const body of [false, true]) for (const cancel of [false, true]) {
+    let aborted = false, readCancelled = false;
+    const h = mediaHarness({fetch: async (_url, {signal}) => {
+      signal.addEventListener('abort', () => { aborted = true; });
+      if (!body) return new Promise(() => {});
+      return new Response(new ReadableStream({pull() {}, cancel() { readCancelled = true; }}));
+    }});
+    const controller = new AbortController(), pending = h.fetchVideo('http://127.0.0.1/a.mp4', controller.signal, {timeoutMs: 15});
+    if (cancel) setTimeout(() => controller.abort(), 2);
+    await assert.rejects(pending, error => cancel ? error.name === 'AbortError' : error.code === 'MEDIA_TIMEOUT');
+    assert.equal(require('node:events').getEventListeners(controller.signal, 'abort').length, 0);
+    assert.equal(aborted, true); if (body) assert.equal(readCancelled, true);
+  }
+  let writes = 0;
+  const h = mediaHarness({fetch: async () => new Response(new ReadableStream({async pull(controller) {
+    await new Promise(resolve => setTimeout(resolve, 8));
+    if (++writes <= 4) controller.enqueue(new Uint8Array([1])); else controller.close();
+  }}))});
+  assert.equal((await h.fetchVideo('http://127.0.0.1/a.mp4', undefined, {timeoutMs: 20})).size, 4);
+  assert.equal(writes, 5, 'each progressing read gets a new deadline');
+});
+test('awaitVideo rejects late loadeddata on abort and guards duration only for omitted audio', async () => {
+  const h = mediaHarness(), controller = new AbortController();
+  const pending = h.awaitVideo(controller.signal); controller.abort(); h.video.readyState = 2;
+  h.video.dispatchEvent(new Event('loadeddata')); await assert.rejects(pending, {name: 'AbortError'});
+  assert.equal(require('node:events').getEventListeners(controller.signal, 'abort').length, 0);
+  assert.equal(require('node:events').getEventListeners(h.video, 'loadeddata').length, 0);
+  assert.equal(require('node:events').getEventListeners(h.video, 'error').length, 0);
+  h.video.duration = 9;
+  h.mediaContext = {audioOmitted: true, inspection: {videoDuration: 8, movieTimescale: 1000}};
+  await assert.rejects(h.awaitVideo(), error => error.code === 'MEDIA_DURATION_MISMATCH');
+  h.mediaContext.audioOmitted = false; await h.awaitVideo();
+});
+
+test('native loadeddata without a decoded video track cannot become ready', async () => {
+  const h = mediaHarness(); h.video.readyState = 2; h.video.videoWidth = h.video.videoHeight = 0;
+  await assert.rejects(h.awaitVideo(), error => error.code === 'MEDIA_NO_VIDEO' && error.phase === 'load');
+});
+
+
+test('preparation retains the original Blob for disabled, unsupported and video-only paths', async () => {
+  const file = new Blob(['0123456789']);
+  for (const status of ['disabled', 'unsupported', 'video-only']) {
+    let prepares = 0;
+    const h = mediaHarness({mediaRecovery: {omitAudio: status !== 'disabled'}, PPTMP4: {prepare: async input => {
+      prepares++; return {mode: 'original', blob: input, inspection: {status, code: 'CONTROL'}};
+    }}});
+    assert.equal(await h.prepareMedia(file), file); assert.equal(h.mediaContext.audioOmitted, false);
+    assert.equal(prepares, status === 'disabled' ? 0 : 1);
+  }
+});
+test('local parser reads reject by actual source, enforce per-read deadlines, and ignore late outcomes', async () => {
+  for (const stalled of [false, true]) {
+    const file = new Blob(['0123456789']), original = file.slice.bind(file); let release;
+    file.slice = (...args) => { const part = original(...args); part.arrayBuffer = stalled ? () => new Promise(resolve => { release = resolve; }) : async () => { throw Error('disk offline'); }; return part; };
+    const h = mediaHarness({PPTMP4: require('../mp4-recovery.js')});
+    await assert.rejects(h.prepareMedia(file, undefined, {timeoutMs: 10}), error => {
+      assert.equal(error.code, 'LOCAL_READ_FAILED'); assert.equal(error.phase, 'local-read');
+      assert.doesNotMatch(error.message, /moov|索引|刷新/); return true;
+    });
+    if (release) release(new ArrayBuffer(8));
+    assert.equal(h.mediaContext.audioOmitted, false);
+  }
+  let release;
+  const h = mediaHarness({PPTMP4: {prepare: () => new Promise(resolve => { release = resolve; })}}), controller = new AbortController();
+  const pending = h.prepareMedia(new Blob(['0123456789']), controller.signal);
+  await Promise.resolve(); controller.abort(); await assert.rejects(pending, {name: 'AbortError'});
+  release({mode: 'audio-omitted', blob: new Blob(['late']), inspection: {status: 'eligible'}}); await Promise.resolve();
+  assert.equal(h.mediaContext.audioOmitted, false);
+});
+
+
+test('screenshot time seeks use the same cancellable native diagnostics', async () => {
+  const source = fs.readFileSync(require.resolve('../capture.js'), 'utf8'); let message = '', seeks = 0;
+  const h = {AbortController, sourceReady: true, stream: null, loadedIdentity: {sourceKey: 'original'}, mediaContext: {local: true}, task: null,
+    busy: () => false, controls: () => {}, status: text => { message = text; }, timecode: String, $: () => ({open: false}),
+    PPTLibrary: {key: value => value.sourceKey}, video: {duration: 8, currentTime: 0, pause() {}, seekable: {length: 1, start: () => 0, end: () => 8}},
+    PPTScanner: class { async seek(time, signal) { seeks++; assert.equal(signal.aborted, false); throw core.mediaError({code: 2}, {phase: 'seek', local: true, time}); }}};
+  vm.createContext(h); vm.runInContext(source.slice(source.search(/(?:async )?function seekPage\(/), source.indexOf('function updatePreview(')), h);
+  await h.seekPage({sourceKey: 'original', sourceTime: 4});
+  assert.equal(seeks, 1); assert.match(message, /跳转本地/); assert.match(message, /4/); assert.doesNotMatch(message, /刷新|服务器/); assert.equal(h.task, null);
+});
+
+
+test('metadata-only video cannot become ready without an actual decoded frame', async () => {
+  const h = mediaHarness(); h.video.readyState = 2; h.video.getVideoPlaybackQuality = () => ({totalVideoFrames: 0, droppedVideoFrames: 0});
+  await assert.rejects(h.awaitVideo(), error => error.code === 'MEDIA_NO_VIDEO' && error.phase === 'load');
+});

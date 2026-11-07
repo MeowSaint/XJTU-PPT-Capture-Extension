@@ -18,15 +18,17 @@ let videoCache = null, previewURL = null, previewLoadingId = null, previewRevisi
 let allPages = [], lessons = [], activeLesson = null, savedBatches = [], lessonSave = Promise.resolve(), scanId = '';
 let savedPDFOptions = {layout: 'single', timestamps: false, bookmarks: false};
 let captureLimits = {maxPages: 5000}, limitsSave = Promise.resolve(), lastAcquisitionFailure = '';
+let mediaRecovery = {omitAudio: true}, mediaRecoverySave = Promise.resolve(), mediaContext = {};
 const manualStorageGuard = {committed: 0, checked: false};
 const dbReady = PPTPageStore.open({blocked: () => status('请先关掉其他已打开的截取工具页，再刷新本页。')}).then(async database => {
   db = database;
-  const {pdf, limits} = await new Promise((resolve, reject) => {
+  const {pdf, limits, recovery} = await new Promise((resolve, reject) => {
     const tx = db.transaction('settings'), settings = tx.objectStore('settings');
-    const pdf = settings.get('exportPDF'), limits = settings.get('captureLimits');
-    tx.oncomplete = () => resolve({pdf: pdf.result, limits: limits.result}); tx.onerror = tx.onabort = () => reject(tx.error || Error('提取设置读取失败'));
+    const pdf = settings.get('exportPDF'), limits = settings.get('captureLimits'), recovery = settings.get('mediaRecovery');
+    tx.oncomplete = () => resolve({pdf: pdf.result, limits: limits.result, recovery: recovery.result}); tx.onerror = tx.onabort = () => reject(tx.error || Error('提取设置读取失败'));
   });
   captureLimits = {maxPages: PPTLibrary.pageLimit(limits?.maxPages)}; $('page-limit').value = captureLimits.maxPages;
+  mediaRecovery = {omitAudio: recovery?.omitAudio !== false}; $('video-only').checked = mediaRecovery.omitAudio;
   applyPDFOptions(pdf); savedPDFOptions = pdfOptions();
   await PPTPageStore.prune(db);
   const saved = await PPTLibrary.restore(db);
@@ -39,6 +41,16 @@ const dbReady = PPTPageStore.open({blocked: () => status('请先关掉其他已�
   ready = true; render(); renderLibrary(); controls();
 });
 dbReady.then(() => status('已恢复保存的课次和任务。选择课次后重新加载原视频，即可继续提取或复核。')).catch(e => status('本地存储不可用：' + e.message));
+$('video-only').onchange = () => {
+  const next = {omitAudio: $('video-only').checked}; mediaRecovery = next;
+  mediaRecoverySave = mediaRecoverySave.catch(() => {}).then(async () => {
+    await dbReady;
+    const tx = db.transaction('settings', 'readwrite'); tx.objectStore('settings').put(next, 'mediaRecovery');
+    await new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onerror = tx.onabort = () => reject(tx.error); });
+  });
+  mediaRecoverySave.catch(error => status('媒体设置保存失败：' + error.message));
+  if (sourceReady) status('媒体设置已更新，重新加载视频后生效。');
+};
 function namingInfo() { return PPTCourse.normalize({name: $('course-name').value, date: $('course-date').value, start: $('course-start').value}); }
 function scanSettings() { return {step: Number($('mode').value), threshold: Math.max(0.2, Math.min(10, Number($('diff').value) || 1.2)), dedupe: $('dedupe').checked, stable: Number($('stable').value) || 1.5}; }
 function syncAllPages() {
@@ -82,8 +94,8 @@ function sameMediaSource(a, b) {
   if (!a || !b) return false;
   return PPTBatch.trackKey(a) === PPTBatch.trackKey(b);
 }
-async function bindLesson(source, detectedCourse = sourceCourse) {
-  await dbReady; await lessonSave;
+async function bindLesson(source, detectedCourse = sourceCourse, signal) {
+  await dbReady; await lessonSave; signal?.throwIfAborted();
   const key = PPTLibrary.key(source);
   let lesson = lessons.find(item => item.source && PPTLibrary.key(item.source) === key);
   const detected = source.batchJobId ? activeBatchJob?.course || {} : detectedCourse;
@@ -99,7 +111,8 @@ async function bindLesson(source, detectedCourse = sourceCourse) {
     await PPTLibrary.put(db, next); Object.assign(lesson, next);
     if (changedChannel && activeBatchJob) activeBatchJob.cropConfirmed = false;
   }
-  await PPTLibrary.activate(db, lesson.id); syncAllPages(); forgetUndo(); activeLesson = lesson; applyLesson();
+  signal?.throwIfAborted();
+  await PPTLibrary.activate(db, lesson.id); signal?.throwIfAborted(); syncAllPages(); forgetUndo(); activeLesson = lesson; applyLesson();
   render(); renderLibrary(); draw();
 }
 async function switchLesson(id) {
@@ -141,7 +154,7 @@ function renderLibrary() {
   for (const range of activeLesson?.suspects || []) {
     const row = document.createElement('div'), seek = document.createElement('button'), scan = document.createElement('button');
     row.className = 'suspect-range'; seek.textContent = `${timecode(range.start)} – ${timecode(range.end)}`; seek.title = '跳转到视频中回看';
-    seek.disabled = busy() || !sourceReady; seek.onclick = async () => { if (busy() || !sourceReady) return; try { await new PPTScanner(video, frame).seek(range.time ?? range.start); } catch (e) { status('回看失败：' + e.message); } };
+    seek.disabled = busy() || !sourceReady; seek.onclick = async () => { if (busy() || !sourceReady) return; try { await new PPTScanner(video, frame, mediaContext).seek(range.time ?? range.start); } catch (e) { status('回看失败：' + e.message); } };
     scan.textContent = '细查此段'; scan.disabled = busy() || !sourceReady; scan.onclick = () => { if (!busy()) fastScan({range}); };
     const dismiss = document.createElement('button'); dismiss.className = 'suspect-dismiss'; dismiss.textContent = '已确认';
     dismiss.disabled = busy(); dismiss.onclick = () => dismissSuspect(range);
@@ -607,7 +620,7 @@ function updateSelection() {
   });
   revealCards(changed, {y: 0, duration: 140});
 }
-function seekPage(page) {
+async function seekPage(page) {
   if (busy()) return;
   let message = '';
   if (!sourceReady || stream || !loadedIdentity || !page.sourceKey || PPTLibrary.key(page) !== PPTLibrary.key(loadedIdentity)) message = '视频与截图来源不一致，请重新加载对应的视频再回看。';
@@ -617,8 +630,10 @@ function seekPage(page) {
     for (let i = 0; i < video.seekable.length; i++) if (page.sourceTime >= video.seekable.start(i) && page.sourceTime <= video.seekable.end(i)) seekable = true;
     if (!seekable) message = '这个位置还没加载好，稍等一下再回看。';
     else {
-      try { video.pause(); video.currentTime = page.sourceTime; message = `已定位到 ${timecode(page.sourceTime)}。`; }
-      catch (e) { message = '视频定位失败：' + e.message; }
+      task = new AbortController(); const controller = task; controls();
+      try { video.pause(); await new PPTScanner(video, () => {}, mediaContext).seek(page.sourceTime, controller.signal); message = `已定位到 ${timecode(page.sourceTime)}。`; }
+      catch (e) { message = e.name === 'AbortError' ? '视频回看已停止。' : '视频定位失败：' + e.message; }
+      finally { task = null; controls(); }
     }
   }
   status(message); if ($('lightbox').open) $('lightbox-status').textContent = message;
@@ -695,7 +710,7 @@ document.addEventListener('keydown', event => {
 });
 function controls() {
   const active = busy();
-  for (const id of ['load-url', 'url', 'file', 'share', 'sources', 'course', 'discover', 'mode', 'diff', 'dedupe', 'stable', 'page-limit', 'full', 'course-name', 'course-date', 'course-start', 'pdf-layout', 'pdf-timestamps', 'pdf-bookmarks']) $(id).disabled = active;
+  for (const id of ['load-url', 'url', 'file', 'share', 'sources', 'course', 'discover', 'mode', 'diff', 'dedupe', 'stable', 'page-limit', 'video-only', 'full', 'course-name', 'course-date', 'course-start', 'pdf-layout', 'pdf-timestamps', 'pdf-bookmarks']) $(id).disabled = active;
   $('load').disabled = active || !$('sources').value;
   $('full').disabled = active || !sourceReady;
   $('crop-select').disabled = active || !sourceReady;
@@ -1064,7 +1079,7 @@ async function releaseSource() {
   window.PPTWorkspace?.cancelPreflight();
   if (stream) { stream.getTracks().forEach(track => { track.onended = null; track.stop(); }); stream = null; }
   hls?.destroy(); hls = null; video.pause(); video.srcObject = null; video.removeAttribute('src'); video.load();
-  if (objectURL) URL.revokeObjectURL(objectURL); objectURL = null; sourceReady = false; loadedIdentity = null;
+  if (objectURL) URL.revokeObjectURL(objectURL); objectURL = null; sourceReady = false; loadedIdentity = null; mediaContext = {}; $('media-status').textContent = '';
   crop = {...(activeLesson?.crop || {x: 0, y: 0, w: 1, h: 1})}; ignoreRect = normalizedIgnore(activeLesson?.ignoreRect); candidate = null; candidateSince = 0; last = null; controls(); draw();
   referrerOrigins.clear(); referrerPage = '';
   referrerWrites = referrerWrites.catch(() => {}).then(() => window.chrome?.declarativeNetRequest?.updateSessionRules({removeRuleIds: [referrerRule]})).catch(() => {});
@@ -1075,7 +1090,7 @@ async function releaseSource() {
 }
 async function releaseFailedSource(error) {
   try { await releaseSource(); return error; }
-  catch (cleanup) { return Error(`${error.message}；清理失败：${cleanup.message}`, {cause: error}); }
+  catch (cleanup) { return Object.assign(Error(`${error.message}；清理失败：${cleanup.message}`, {cause: error}), {...error, name: error.name, code: error.code}); }
 }
 $('release-cache').onclick = async () => {
   if (busy() || !(sourceReady || objectURL || hls || stream || videoCache)) return;
@@ -1103,34 +1118,107 @@ async function setCourseReferrer(origins, page = coursePage) {
 }
 async function awaitVideo(signal) {
   signal?.throwIfAborted();
-  if (video.readyState >= 2) return;
-  await new Promise((resolve, reject) => {
+  if (video.readyState < 2) await new Promise((resolve, reject) => {
     const cleanup = () => { clearTimeout(timer); video.removeEventListener('loadeddata', done); video.removeEventListener('error', fail); signal?.removeEventListener('abort', abort); };
-    const done = () => { cleanup(); resolve(); };
-    const fail = () => { cleanup(); reject(Error('浏览器无法解码视频，或地址已失效；请刷新课程页重新捕获或导入本地 MP4')); };
+    const done = () => { if (video.readyState >= 2) { cleanup(); resolve(); } };
+    const fail = () => { cleanup(); reject(PPTCore.mediaError(video.error, mediaContext)); };
     const abort = () => { cleanup(); reject(new DOMException('已停止', 'AbortError')); };
-    const timer = setTimeout(() => { cleanup(); reject(Error('加载视频超时，请检查网络或导入本地视频')); }, 45000);
+    const timer = setTimeout(() => { cleanup(); reject(PPTCore.mediaError({code: 'MEDIA_TIMEOUT'}, mediaContext)); }, 45000);
     video.addEventListener('loadeddata', done); video.addEventListener('error', fail); signal?.addEventListener('abort', abort, {once: true});
   });
+  signal?.throwIfAborted();
+  if (!(video.videoWidth > 0 && video.videoHeight > 0)) throw mediaFailure('MEDIA_NO_VIDEO', 'load', '媒体没有可用的解码视频画面；可能只有音轨，或视频初始化不受支持。请换用含有效视频轨的文件。');
+  if (mediaContext.audioOmitted) {
+    const inspection = mediaContext.inspection, tolerance = Math.max(1 / inspection.movieTimescale, 0.001);
+    if (!Number.isFinite(video.duration) || Math.abs(video.duration - inspection.videoDuration) > tolerance) {
+      throw mediaFailure('MEDIA_DURATION_MISMATCH', 'load', '忽略音轨后的原生时长与视频轨索引不一致，已停止加载；请关闭“仅使用视频轨”后重新加载，或换用同课次其他视频。');
+    }
+  }
+  const decoded = () => {
+    const quality = video.getVideoPlaybackQuality?.();
+    return !!(quality && quality.totalVideoFrames > quality.droppedVideoFrames || video.webkitDecodedFrameCount > (video.webkitDroppedFrameCount || 0));
+  };
+  if (!decoded()) {
+    // loadeddata can come from audio before any video is decoded, even with track dimensions.
+    const start = video.currentTime, time = Number.isFinite(video.duration) && video.duration > 0 ? Math.min(0.1, video.duration / 2) : 0.1;
+    const scanner = new PPTScanner(video, () => {}, mediaContext);
+    await scanner.seek(time, signal); signal?.throwIfAborted();
+    if (!decoded()) throw Object.assign(mediaFailure('MEDIA_NO_VIDEO', 'load', '浏览器尚未解码出可用的视频画面，只有轨道尺寸信息。请检查文件或使用受支持的编码。'), {time});
+    await scanner.seek(start, signal); signal?.throwIfAborted();
+  }
+}
+function mediaFailure(code, phase, message, cause) { return Object.assign(Error(message, cause ? {cause} : undefined), {code, phase}); }
+// The deadline is per operation. A slow but progressing movie has no lifetime limit.
+function mediaWait(start, {signal, timeoutMs = 0, phase = 'local-read', local = true, onLate} = {}) {
+  return new Promise((resolve, reject) => {
+    let settled = false, timer;
+    const cleanup = () => { clearTimeout(timer); signal?.removeEventListener('abort', abort); };
+    const finish = (value, error) => { if (settled) return; settled = true; cleanup(); error ? reject(value) : resolve(value); };
+    const abort = () => finish(new DOMException('已停止', 'AbortError'), true);
+    signal?.addEventListener('abort', abort, {once: true});
+    if (signal?.aborted) { abort(); return; }
+    if (timeoutMs > 0) timer = setTimeout(() => finish(PPTCore.mediaError({code: 'MEDIA_TIMEOUT'}, {phase, local}), true), timeoutMs);
+    Promise.resolve().then(start).then(value => {
+      if (settled) { if (onLate) Promise.resolve().then(() => onLate(value)).catch(() => {}); }
+      else finish(value, false);
+    }, error => finish(error, true));
+  });
+}
+async function prepareMedia(file, signal, {timeoutMs = 30000} = {}) {
+  signal?.throwIfAborted();
+  mediaContext = {local: true, audioOmitted: false};
+  if (!mediaRecovery.omitAudio) { $('media-status').textContent = '未启用音轨忽略，使用原文件。'; return file; }
+  status('正在检查本地媒体并准备视频轨…');
+  // The parser still receives real Blob slices for its zero-copy rewrite, but each read has an idle deadline.
+  const input = {size: file.size, type: file.type, slice(...args) {
+    const part = file.slice(...args), read = part.arrayBuffer.bind(part);
+    part.arrayBuffer = () => mediaWait(read, {signal, timeoutMs}); return part;
+  }};
+  let prepared;
+  try { prepared = await mediaWait(() => PPTMP4.prepare(input, {signal}), {signal}); }
+  catch (error) {
+    if (error.name === 'AbortError') throw error;
+    if (error.code === 'LOCAL_READ_FAILED') throw mediaFailure('LOCAL_READ_FAILED', 'local-read', error.cause?.code === 'MEDIA_TIMEOUT' ? '本地文件或缓存读取超时，请检查磁盘或重新下载后导入。' : '本地文件或缓存读取失败，请检查文件与磁盘；已保存截图不受影响。', error);
+    throw error;
+  }
+  signal?.throwIfAborted();
+  const inspection = prepared.inspection;
+  if (prepared.mode === 'reject') throw mediaFailure(inspection.code, 'prepare', inspection.status === 'missing-index'
+    ? 'MP4 缺少 moov 索引，无法确定视频时间和位置。请换用同课次其他通道或用外部工具处理原文件。'
+    : 'MP4 容器结构非法，无法安全读取。请换用同课次其他通道或用外部工具检查原文件。');
+  mediaContext = {local: true, audioOmitted: prepared.mode === 'audio-omitted', inspection};
+  $('media-status').textContent = mediaContext.audioOmitted ? '已忽略音轨，仅用于画面提取；不代表检测到音轨损坏。'
+    : inspection.status === 'video-only' ? '原文件仅有视频轨，无需改写。' : `不支持自动忽略音轨：${inspection.code}；使用原文件加载一次。`;
+  return mediaContext.audioOmitted ? prepared.blob : file;
 }
 function originPattern(url) { const u = new URL(url); return `${u.protocol}//${u.host}/*`; }
-async function fetchVideo(url, signal) {
+async function fetchVideo(url, signal, {timeoutMs = 30000} = {}) {
   status('正在缓存视频到本地磁盘，完成后即可快速提取…');
   videoCache = await PPTDiskCache.create('video');
   signal?.throwIfAborted();
-  const response = await fetch(url, {credentials: 'include', signal});
-  if (!response.ok || /text\/html|application\/json/i.test(response.headers.get('content-type') || '')) {
-    await response.body?.cancel();
-    throw Error(!response.ok ? `视频服务器返回 HTTP ${response.status}，请刷新课程页获取新地址，或下载视频后导入` : '地址返回登录页或接口数据，不是视频文件');
-  }
-  if (!response.body) throw Error('视频服务器没有返回可读取的内容');
-  const total = Number(response.headers.get('content-length')) || 0, reader = response.body.getReader();
-  let received = 0, lastUpdate = 0, complete = false;
+  const controller = new AbortController(), abort = () => controller.abort(signal.reason);
+  signal?.addEventListener('abort', abort, {once: true});
+  let response, reader, complete = false;
   try {
+    response = await mediaWait(() => fetch(url, {credentials: 'include', signal: controller.signal}), {signal, timeoutMs, phase: 'fetch', local: false, onLate: value => value.body?.cancel()});
+    signal?.throwIfAborted();
+    if (![200, 206].includes(response.status)) throw mediaFailure('HTTP_STATUS', 'fetch', `视频服务器返回 HTTP ${response.status}：${[401, 403].includes(response.status) ? '请确认登录状态或重新获取地址' : [404, 410].includes(response.status) ? '资源当前不可用，请换用可用地址' : '无法获取完整文件，请检查地址响应'}；此状态不能证明视频损坏。`);
+    if (/text\/html|application\/json/i.test(response.headers.get('content-type') || '')) throw mediaFailure('NOT_VIDEO', 'fetch', '地址返回登录页或接口数据，不是视频文件。');
+    if (!response.body) throw mediaFailure('EMPTY_MEDIA', 'fetch', '视频服务器没有返回可读取的内容。');
+    const encoded = !!response.headers.get('content-encoding'), length = response.headers.get('content-length');
+    const total = !encoded && length !== null && /^\d+$/.test(length) ? Number(length) : null;
+    let rangeTotal = null;
+    if (response.status === 206) {
+      const match = /^bytes 0-(\d+)\/(\d+)$/.exec(response.headers.get('content-range') || '');
+      if (!match || !Number.isSafeInteger(Number(match[2])) || Number(match[2]) <= 0 || Number(match[1]) !== Number(match[2]) - 1) throw mediaFailure('INCOMPLETE_RESPONSE', 'fetch', '服务器仅返回部分视频，未获得完整文件；请重新下载或换用完整地址。');
+      rangeTotal = Number(match[2]);
+    }
+    reader = response.body.getReader();
+    let received = 0, lastUpdate = 0;
     while (true) {
+      const {value, done} = await mediaWait(() => reader.read(), {signal, timeoutMs, phase: 'fetch', local: false}); if (done) break;
       signal?.throwIfAborted();
-      const {value, done} = await reader.read(); if (done) break;
-      signal?.throwIfAborted();
+      if (!value?.byteLength) continue;
       await videoCache.write(value); received += value.byteLength;
       if (Date.now() - lastUpdate > 250) {
         lastUpdate = Date.now(); $('progress').value = total ? received / total : 0;
@@ -1138,12 +1226,18 @@ async function fetchVideo(url, signal) {
       }
     }
     signal?.throwIfAborted();
-    if (!received) throw Error('视频文件为空');
-    const file = await videoCache.finish(/webm/i.test(url) ? 'video/webm' : 'video/mp4');
+    if (!received) throw mediaFailure('EMPTY_MEDIA', 'fetch', '视频文件为空。');
+    if ((total !== null && received !== total) || (rangeTotal !== null && received !== rangeTotal)) throw mediaFailure('INCOMPLETE_RESPONSE', 'fetch', '接收长度与完整视频响应不一致，文件可能被截断；请重新下载或换用完整地址。');
+    const file = await videoCache.finish(/webm/i.test(url) ? 'video/webm' : 'video/mp4'); signal?.throwIfAborted();
     complete = true; return file;
+  } catch (error) {
+    if (signal?.aborted) throw new DOMException('已停止', 'AbortError');
+    if (error.phase) throw error;
+    throw mediaFailure('FETCH_FAILED', 'fetch', '视频传输中断：' + error.message, error);
   } finally {
-    if (!complete) await reader.cancel().catch(() => {});
-    reader.releaseLock();
+    signal?.removeEventListener('abort', abort);
+    if (!complete) { controller.abort(); if (reader) await reader.cancel().catch(() => {}); else await response?.body?.cancel().catch(() => {}); }
+    reader?.releaseLock();
   }
 }
 async function inspectPlaylist(url, signal, visited = new Set(), depth = 0, origins = new Set()) {
@@ -1192,6 +1286,7 @@ async function loadRemote(raw, options = {}) {
     controller.signal.throwIfAborted(); invalidateUndo(); await releaseSource(); task = controller; activeBatchJob = batchJob; controls();
     await setCourseReferrer([originPattern(info.url), ...pendingOrigins]);
     sourceName = options.sourceName || info.name; $('progress').value = 0;
+    const identity = {sourceName, coursePage, batchJobId: batchJob?.id || '', sourceKey: 'url:' + info.url};
     if (info.kind === 'm3u8') {
       pendingOrigins = []; status('正在检查 HLS 播放列表与分片域名…');
       await inspectPlaylist(info.url, controller.signal);
@@ -1200,21 +1295,23 @@ async function loadRemote(raw, options = {}) {
       if (!window.Hls?.isSupported()) throw Error('当前浏览器不支持 HLS 解码，请导入本地 MP4');
       hls = new Hls({enableWorker: false, maxBufferLength: 8, maxMaxBufferLength: 15, backBufferLength: 0, xhrSetup: xhr => { xhr.withCredentials = true; }});
       hls.on(Hls.Events.ERROR, (_, data) => { if (data.fatal) { (task || controller).abort(Error('HLS 加载失败：' + data.details + '，请检查分片域名权限或导入本地 MP4')); } });
+      mediaContext = {local: false, audioOmitted: false};
       hls.loadSource(info.url); hls.attachMedia(video); await awaitVideo(controller.signal);
     } else {
       // A Blob URL gives an origin-clean canvas even if the CDN omits CORS headers.
-      const blob = await fetchVideo(info.url, controller.signal);
+      const original = await fetchVideo(info.url, controller.signal);
+      const blob = await prepareMedia(original, controller.signal);
       controller.signal.throwIfAborted(); objectURL = URL.createObjectURL(blob); video.src = objectURL; await awaitVideo(controller.signal);
     }
     if (!(video.duration > 0) || !Number.isFinite(video.duration)) throw Error('视频没有可用的完整时长，无法快速扫描');
-    sourceReady = true; loadedIdentity = {sourceName, coursePage, batchJobId: batchJob?.id || '', sourceKey: 'url:' + info.url};
+    controller.signal.throwIfAborted(); loadedIdentity = identity;
     const source = {kind: 'remote', url: info.url, ...loadedIdentity, page: coursePage, duration: video.duration};
     const candidates = candidatesPage === coursePage ? sourceCandidates : [];
     const candidate = candidates.find(item => item.url === info.url);
     const retained = !candidate && lessons.find(item => item.source && PPTLibrary.key(item.source) === PPTLibrary.key(source));
     const detected = retained ? retained.course : PPTCourse.forMedia(info.url, candidates, sourceCourse);
-    await bindLesson(source, detected);
-    await applyBatchCrop(batchJob);
+    await bindLesson(source, detected, controller.signal);
+    await applyBatchCrop(batchJob); controller.signal.throwIfAborted(); sourceReady = true;
     video.pause(); frame(0); draw(); $('progress').value = 0;
     status(`已加载 ${sourceName} · ${timecode(video.duration)} · ${video.videoWidth} × ${video.videoHeight}。可框选 PPT 或直接开始快速提取。`);
     pendingOrigins = []; loaded = true;
@@ -1230,15 +1327,18 @@ $('load').onclick = () => { const source = sources.find(x => x.url === $('source
 $('load-url').onclick = () => loadRemote($('url').value.trim());
 $('file').onchange = async () => {
   const file = $('file').files[0]; if (!file || busy()) return;
-  invalidateUndo(); activeBatchJob = null; task = new AbortController(); controls();
+  const sourceKey = 'file:' + JSON.stringify([file.name, file.size, file.lastModified]);
+  const identity = {sourceName: file.name, sourceKey, fileName: file.name, size: file.size, lastModified: file.lastModified};
+  invalidateUndo(); activeBatchJob = null; task = new AbortController(); const controller = task; controls();
   try {
-    await releaseSource(); task.signal.throwIfAborted(); sourceName = file.name;
-    const sourceKey = 'file:' + JSON.stringify([file.name, file.size, file.lastModified]);
+    await dbReady; await namingSave; controller.signal.throwIfAborted();
+    await releaseSource(); controller.signal.throwIfAborted(); sourceName = identity.sourceName;
     if (activeLesson?.source?.sourceKey === sourceKey) { coursePage = activeLesson.source.page || ''; sourceCourse = {...activeLesson.course}; sourceCoursePage = coursePage; }
-    objectURL = URL.createObjectURL(file); video.src = objectURL; await awaitVideo(task.signal);
+    const blob = await prepareMedia(file, controller.signal);
+    controller.signal.throwIfAborted(); objectURL = URL.createObjectURL(blob); video.src = objectURL; await awaitVideo(controller.signal);
     if (!(video.duration > 0) || !Number.isFinite(video.duration)) throw Error('本地视频时长无效');
-    sourceReady = true; loadedIdentity = {sourceName, coursePage, batchJobId: '', sourceKey};
-    await bindLesson({kind: 'file', ...loadedIdentity, page: coursePage, duration: video.duration}); frame(0); draw(); $('progress').value = 0;
+    controller.signal.throwIfAborted(); loadedIdentity = {...identity, coursePage, batchJobId: ''};
+    await bindLesson({kind: 'file', ...loadedIdentity, page: coursePage, duration: video.duration}, sourceCourse, controller.signal); controller.signal.throwIfAborted(); sourceReady = true; frame(0); draw(); $('progress').value = 0;
     status(`已加载 ${file.name} · ${timecode(video.duration)}。开始提取即可快速扫描。`);
   } catch (e) { const reason = await releaseFailedSource(e); status(reason.name === 'AbortError' ? '加载已停止。' : '加载失败：' + reason.message); }
   finally { task = null; $('file').value = ''; controls(); }
@@ -1254,7 +1354,9 @@ function downloadBlob(blob, name, cache) {
   }, 60000);
 }
 window.addEventListener('pagehide', () => {
-  stopBatchDiscovery();
+  stopBatchDiscovery(); task?.abort();
+  video.pause(); video.srcObject = null; video.removeAttribute('src'); video.load();
+  if (objectURL) URL.revokeObjectURL(objectURL); objectURL = null;
   for (const url of downloadURLs) URL.revokeObjectURL(url);
   if (previewURL) URL.revokeObjectURL(previewURL);
   for (const [image, state] of thumbnailStates) releaseThumbnail(image, state);
@@ -1440,7 +1542,7 @@ async function fastScan({restart = false, range = null} = {}) {
   const started = performance.now();
   try {
     await limitsSave; await persistLesson(); await checkCaptureStorage(context.storageGuard);
-    const scanner = new PPTScanner(video, frame);
+    const scanner = new PPTScanner(video, frame, mediaContext);
     const result = await scanner.scan({step: range ? 0.5 : settings.step, threshold: settings.threshold, dedupe: range ? true : settings.dedupe, start, end, baselineTime, signal: controller.signal, save: f => save(f, context),
       compare: (a, b, threshold) => PPTCore.similar(a, b, threshold, context.mask),
       isDuplicate: (sig, threshold) => hasSimilar(sig, threshold, context, context.crop),

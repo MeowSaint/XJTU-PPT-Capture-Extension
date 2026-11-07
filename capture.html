@@ -186,6 +186,8 @@
             <h2>确认画面</h2>
             <p id="ledger-source" class="source-context">等待加载视频</p>
           </div>
+          <p id="media-status" class="note" aria-live="polite"></p>
+          <label class="check"><input id="video-only" type="checkbox" checked> 仅使用视频轨（支持的 MP4，重新加载后生效）</label>
           <div class="media-canvas">
             <div id="preview">
               <video id="video" muted controls playsinline preload="metadata"></video>
@@ -355,6 +357,7 @@
   </dialog>
   <script src="vendor/hls.min.js"></script>
   <script src="media.js"></script>
+  <script src="mp4-recovery.js"></script>
   <script src="course.js"></script>
   <script src="batch.js"></script>
   <script src="pdf.js"></script>

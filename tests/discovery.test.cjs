@@ -228,7 +228,7 @@ async function selectedVMBinding(reply, url) {
     reviewBusy: false, exportBusy: false, pageWrites: 0, batchRunning: false, pendingURL: '', pendingOrigins: [],
     lastAcquisitionFailure: '', sourceName: '', sourceReady: false, loadedIdentity: null, objectURL: null,
     $: id => nodes[id], controls: noop, status: noop, invalidateUndo: noop, releaseSource: async () => {}, setCourseReferrer: async () => {},
-    fetchVideo: async () => new Blob(['synthetic video']), awaitVideo: async () => {}, applyBatchCrop: async () => {},
+    fetchVideo: async () => new Blob(['synthetic video']), prepareMedia: async file => file, awaitVideo: async () => {}, applyBatchCrop: async () => {},
     video: {duration: 6, videoWidth: 640, videoHeight: 360, pause: noop}, frame: noop, draw: noop, timecode: String,
     originPattern: raw => new URL(raw).origin + '/*', namingInfo: () => reply.course, scanSettings: () => ({step: .5}),
     syncAllPages: noop, forgetUndo: noop, applyLesson: noop, render: noop, renderLibrary: noop,

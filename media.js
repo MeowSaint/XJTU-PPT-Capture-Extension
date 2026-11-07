@@ -124,7 +124,22 @@
   function isLocalMessage(event, target) {
     return event.source === target && event.origin === messageOrigin(target);
   }
-  const api = {mediaInfo, extractUrls, ignoreMask, frameDistance, similar, sampleTimes, postLocalMessage, isLocalMessage};
+  function mediaError(mediaError, {phase = 'load', local = false, audioOmitted = false, time = null} = {}) {
+    const nativeCode = typeof mediaError?.code === 'number' ? mediaError.code : null;
+    const code = typeof mediaError?.code === 'string' ? mediaError.code : ({1: 'MEDIA_ABORTED', 2: 'MEDIA_NETWORK_FAILED', 3: 'MEDIA_DECODE_FAILED', 4: 'MEDIA_UNSUPPORTED'}[nativeCode] || 'MEDIA_LOAD_FAILED');
+    const source = local ? '本地文件或缓存' : '视频地址';
+    let detail;
+    if (code === 'MEDIA_TIMEOUT') detail = local ? '读取或解码等待超时，请检查本地文件与磁盘，或重新下载后导入。' : '等待视频响应超时，请检查网络或重新获取视频地址。';
+    else if (nativeCode === 3) detail = audioOmitted ? '忽略音轨后，视频或容器仍无法解码；可能存在损坏数据或不受支持的编码，尚不能确定具体故障原因。' : '浏览器解码失败；仅凭此错误无法确定是哪条轨道或哪段数据有问题。请尝试重新下载或换用浏览器支持的文件。';
+    else if (nativeCode === 4) detail = '浏览器不支持此格式，或媒体数据无效。请确认文件完整并使用受支持的编码。';
+    else if (nativeCode === 2) detail = local ? '本地读取失败，请检查文件与磁盘，或重新下载后导入。' : '媒体网络读取失败，请检查连接与地址是否仍有效。';
+    else if (nativeCode === 1) detail = '媒体加载已中止。';
+    else detail = local ? '无法加载或读取本地媒体，请检查文件是否完整。' : '无法加载视频，请检查地址响应与格式。';
+    const position = Number.isFinite(time) ? `（${time} 秒）` : '';
+    const error = Error(`${phase === 'seek' ? '跳转' : '加载'}${source}${position}：${detail}${audioOmitted ? '本次已忽略音轨，此处理不代表已确诊原文件的故障原因。' : ''}`);
+    return Object.assign(error, {code, phase, nativeCode, time: Number.isFinite(time) ? time : null});
+  }
+  const api = {mediaError, mediaInfo, extractUrls, ignoreMask, frameDistance, similar, sampleTimes, postLocalMessage, isLocalMessage};
   root.PPTCore = api;
   if (typeof module !== 'undefined') module.exports = api;
 })(globalThis);
