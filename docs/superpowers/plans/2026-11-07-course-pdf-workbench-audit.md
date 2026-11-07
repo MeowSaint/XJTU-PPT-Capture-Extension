@@ -126,4 +126,10 @@ Task3正确冻结包 cc8a935..a9c2b9c，11提交/175,477B；fresh bb1baa93-d5a2-
 
 ## 最终审查与产物
 
-状态：待完成。需记录整体审查结论、实际截图/合成 PDF、34 成员 3.1.2 安装包的 CRC/源字节/SHA-256，以及实际测试环境与未验证项。
+状态：完成本地实现、整分支审查与真实安装包验证；尚未发布远程版本。
+
+- 整体最高可用模型独立审查 ee70d102-57e8-431e-966e-f78b4c095286（codex/gpt-6.1-sol/max），冻结原main ae75c719e5ec4660363b5e29098a22b8de466940..e94f02d1aa0bb116d1baa5bea3fd56a45aea40f1，22提交/27文件/410,126B/4150行。Spec Compliance PASS、Quality APPROVED、C0/I0/M0，无需最终修复波次，无停放发现。父代理完整读156行报告；审查者仅读一次完整包，加4个具体小范围生产/消费补读和7张指定视觉证据，不执行Git/测试/浏览器/网络/委派或修改源码，已停止。
+- 2026-11-07本地实际执行npm run release，随后独立Python逐成员检查。打包前已核验物理worktree/tmp/last-release/finalZIP解析路径、无symlink、根目录旧ZIP为空，未移动原仓库/旧worktree的发布产物。新ppt-capture.zip为1,271,902 bytes、34个精确有序Deflate成员；全部CRC正确，成员内容逐字节等于当前源文件，manifest/package/rootlock/UI/README版本3.1.2和motion加载顺序正确。SHA-256：8c32ffbe2e935f9df968e27397383f41dbde1c2b6931c0fab87b9d739358de6f。证据：[preflight](../../../.test-output/v3.1.2/release-preflight.json)、[完整校验](../../../.test-output/v3.1.2/release-verification.json)。这项才补齐旧17-test临时payload没有证明的新CSS实际安装包字节。
+- 合成目录示例：[single](../../../.test-output/v3.1.2/task3/course-single.pdf) / [handout](../../../.test-output/v3.1.2/task3/course-handout.pdf)，前述4页/3张SHA未变；实际UI与全部7页渲染保留在结果目录外，不跟随SDD工作区清理。界面截图是本地合成数据，不是用户真实课程。
+- 测试来源采用前述九类精确矩阵，未宣称九套在最后SHA重跑。环境与未验证项保持：本地Node26/Chrome156/macarm64/Poppler26.11；最小Node20/Chrome114、其他OS、真实课程、原生授权面板和PDF侧栏未人工验收。ASR/上下文/词库仍明确暂缓，未上传音频或调用云API。线上3.1.1未被本地构建改动。
+- 全部11条Rulings及代价已逐字复制到[保留记录](../../../.test-output/v3.1.2/rulings-preserved.md)，没有新增/遗漏；清理前将把本plan-owned工作区报告/brief/progress/verifier等可恢复记录写入Git，不纳入可重新生成的大型review packets，然后仅删除经过物理路径与plan-path标识核验的本SDD目录，保留其他计划、产品worktree、原仓库和所有交付物。
