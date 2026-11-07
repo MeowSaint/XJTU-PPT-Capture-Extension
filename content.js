@@ -19,9 +19,10 @@
     if (page === location.href) return;
     invalidate(); found.clear(); last = ''; hookCourse = {}; lastCourse = ''; page = location.href; since = performance.now();
   }
+  function onNavigation() { if (page !== location.href) probeCurrentPageApi(); }
   window.addEventListener('pagehide', invalidate);
-  window.addEventListener('popstate', checkPage);
-  window.addEventListener('hashchange', checkPage);
+  window.addEventListener('popstate', onNavigation);
+  window.addEventListener('hashchange', onNavigation);
   function pageRoute(href = location.href) {
     try {
       const url = new URL(href);
@@ -35,7 +36,7 @@
     checkPage();
     if (probe?.page === location.href) return probe.promise;
     const current = {page: location.href, controller: new AbortController()}; probe = current;
-    current.promise = runPageProbe(current.page, current.controller.signal);
+    current.promise = runPageProbe(current.page, current.controller.signal).finally(() => { if (probe === current) probe = null; });
     return current.promise;
   }
   async function runPageProbe(currentPage, signal) {

@@ -145,18 +145,18 @@ test('unavailable and skipped entries stay visible; persistence errors propagate
   await assert.rejects(batch.discover({page, readJSON: async () => rows(1), onProgress: async () => { throw Error('disk full'); }}), /disk full/);
 });
 
-function contentHarness(fetchImpl) {
-  let listener; const events = {}, location = {href: page};
+function contentHarness(fetchImpl, {hasConsent = async () => true} = {}) {
+  let listener; const events = {}, location = {href: page}, ticks = [], messages = [];
   const context = vm.createContext({URL, AbortController, DOMException, structuredClone, setTimeout, clearTimeout, queueMicrotask,
-    setInterval() {}, performance: {now: () => 0, getEntriesByType: () => []}, location,
+    setInterval(fn) { ticks.push(fn); }, performance: {now: () => 0, getEntriesByType: () => []}, location,
     document: {baseURI: page, querySelectorAll: () => []}, fetch: fetchImpl,
-    PPTCore: {mediaInfo: () => null, extractUrls: () => [], postLocalMessage() {}, isLocalMessage: () => false},
-    PPTState: {hasConsent: async () => true},
-    chrome: {runtime: {id: 'synthetic', sendMessage: async () => {}, onMessage: {addListener: fn => { listener = fn; }}}}});
+    PPTCore: {mediaInfo: url => url ? {url} : null, extractUrls: payload => payload.urls || [], postLocalMessage() {}, isLocalMessage: () => false},
+    PPTState: {hasConsent},
+    chrome: {runtime: {id: 'synthetic', sendMessage: async message => { messages.push(message); }, onMessage: {addListener: fn => { listener = fn; }}}}});
   context.window = context; context.top = context; context.addEventListener = (name, fn) => { events[name] = fn; };
   vm.runInContext(fs.readFileSync(require.resolve('../batch.js'), 'utf8'), context);
   vm.runInContext(fs.readFileSync(require.resolve('../content.js'), 'utf8'), context);
-  return {send: message => new Promise(resolve => listener(message, {}, resolve)), events, location};
+  return {send: message => new Promise(resolve => listener(message, {}, resolve)), events, location, tick: () => ticks.forEach(fn => fn()), messages};
 }
 
 test('content discovery starts immediately, joins request IDs, cancels fetch and rejects stale requests', async () => {
@@ -189,6 +189,69 @@ test('last detail completion racing cancel retains data without declaring a canc
   }});
   assert.equal(result.jobs.length, 1); assert.equal(result.complete, false);
 });
+
+for (const initial of ['consent rejection', 'HTTP failure', 'incomplete response']) {
+  test(`settled automatic probe permits explicit same-page retry after ${initial}`, async () => {
+    let consent = initial !== 'consent rejection', recovered = false, calls = 0;
+    const url = 'http://127.0.0.1/2-recovered.mp4';
+    const h = contentHarness(async () => {
+      calls++;
+      return recovered ? response({urls: [url]}) : response({}, initial === 'HTTP failure' ? 403 : 200);
+    }, {hasConsent: async () => consent});
+    await new Promise(setImmediate); // Let the failed/empty startup probe settle before retrying.
+    const initialCalls = initial === 'consent rejection' ? 0 : 1;
+    assert.equal(calls, initialCalls);
+    consent = true; recovered = true;
+    const reply = await h.send({type: 'PPT_DISCOVER'});
+    assert.equal(calls, initialCalls + 1, 'a settled probe must not cache the fallback forever');
+    assert.deepEqual([...reply.urls], [url]);
+  });
+}
+
+test('old probe completion cannot clear a newer active same-page single flight', async () => {
+  const consentHold = deferred(), currentHold = deferred(); let consentCalls = 0, calls = 0;
+  const h = contentHarness(async () => { calls++; return currentHold.promise; },
+    {hasConsent: () => ++consentCalls === 1 ? consentHold.promise : Promise.resolve(true)});
+  let first, joined;
+  try {
+    h.location.href = page.replace('/42/', '/43/');
+    first = h.send({type: 'PPT_DISCOVER'});
+    await until(() => calls === 1);
+    consentHold.resolve(true); await new Promise(setImmediate); // Old aborted probe finishes while the new one is active.
+    joined = h.send({type: 'PPT_DISCOVER'}); await new Promise(setImmediate);
+    assert.equal(calls, 1, 'old completion must leave the current probe registered');
+    currentHold.resolve(response({urls: ['http://127.0.0.1/2-current.mp4']}));
+    const replies = await Promise.all([first, joined]);
+    for (const reply of replies) assert.deepEqual([...reply.urls], ['http://127.0.0.1/2-current.mp4']);
+  } finally {
+    consentHold.resolve(true); currentHold.resolve(response({})); h.events.pagehide();
+    await Promise.all([first, joined]);
+  }
+});
+
+for (const navigation of ['popstate', 'hashchange']) {
+  test(`${navigation} navigation automatically probes the new route on the report tick`, async () => {
+    const hold = deferred(), calls = [], media = id => `http://127.0.0.1/2-${id}.mp4`;
+    const h = contentHarness(async (path, {signal}) => {
+      calls.push({path, signal});
+      return path.endsWith('/43') ? hold.promise : response({urls: [media(path.endsWith('/42') ? '42' : '44')]});
+    });
+    try {
+      await new Promise(setImmediate); assert.equal(calls.length, 1);
+      h.location.href = navigation === 'hashchange' ? 'http://127.0.0.1/#/study-capture-courses/43/preview-detail' : page.replace('/42/', '/43/');
+      h.events[navigation](); h.tick(); await new Promise(setImmediate);
+      assert.equal(calls.length, 2, 'the navigation event must not consume automatic fallback detection');
+      assert(calls[1].path.endsWith('/43'));
+      h.tick(); await new Promise(setImmediate); assert.equal(calls.length, 2, 'report ticks must coalesce with the active route probe');
+      h.location.href = h.location.href.replace('/43/', '/44/'); h.events[navigation](); h.tick();
+      await new Promise(setImmediate);
+      assert.equal(calls[1].signal.aborted, true); assert.equal(calls.length, 3); assert(calls[2].path.endsWith('/44'));
+      hold.resolve(response({urls: [media('43')]})); await new Promise(setImmediate);
+      const published = h.messages.filter(message => message.type === 'PPT_MEDIA').flatMap(message => [...message.urls]);
+      assert(published.includes(media('44'))); assert(!published.includes(media('43')), 'old route completion cannot publish media');
+    } finally { hold.resolve(response({})); h.events.pagehide(); }
+  });
+}
 
 test('automatic API probing coalesces same-page requests and aborts on pagehide', async () => {
   const hold = deferred(); let calls = 0, cancelled = 0;

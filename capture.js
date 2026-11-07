@@ -1601,14 +1601,17 @@ async function discoverBatch(tabId = Number($('course').value), automatic = fals
   } catch (error) {
     if (!session.current()) return;
     if (session.requestId) discoveryMessage(session, {type: 'PPT_BATCH_CANCEL', requestId: session.requestId}, false).catch(() => {});
+    let recoverySaveError;
     if (session.lastResult) {
       const partial = structuredClone(session.lastResult); partial.complete = false;
       for (const job of partial.jobs) if (job.discovery?.state === 'pending') job.discovery = {state: 'error', code: session.stopRequested ? 'CANCELLED' : 'MESSAGE', message: error.message, attempts: 0};
       partial.failures = [...(partial.failures || []).filter(item => !item.jobId), ...partial.jobs.filter(job => job.discovery?.state === 'error').map(job => ({jobId: job.id, scheduleId: job.scheduleId, ...job.discovery}))];
       partial.progress = {phase: session.stopRequested ? 'cancelled' : 'error', total: partial.jobs.length, resolved: partial.jobs.filter(job => job.discovery?.state !== 'pending').length};
-      await applyDiscovery(session, partial).catch(saveError => { $('batch-status').textContent = '目录保存失败：' + saveError.message; });
+      await applyDiscovery(session, partial).catch(saveError => { recoverySaveError = saveError; });
     }
-    $('batch-status').textContent = (session.stopRequested ? '课程读取已停止，已保留已知课次。' : '批量读取失败：' + error.message) + ' ' + discoverySummary(batchJobs, savedBatches.find(item => item.page === batchPage)?.discovery);
+    const outcome = session.stopRequested ? '课程读取已停止' : '批量读取失败：' + error.message;
+    const persistence = recoverySaveError ? `；目录保存失败：${recoverySaveError.message}。${session.stopRequested ? '取消' : '错误'}状态未保存，仅保留上次成功保存的课次快照。` : session.stopRequested ? '，已保留已知课次。' : '';
+    $('batch-status').textContent = outcome + persistence + ' ' + discoverySummary(batchJobs, savedBatches.find(item => item.page === batchPage)?.discovery);
   } finally {
     if (batchDiscovery === session) { batchDiscovery = null; controls(); }
   }

@@ -428,6 +428,54 @@ function zipEntries(bytes) {
       assert.deepEqual((await stored()).batches.find(item => item.page === base), snapshot);
     });
 
+    for (const mode of ['Stop', 'message failure']) {
+      await test(`discovery recovery persistence failure remains visible after ${mode}`, async () => {
+        const base = origin + '/study-capture-courses/42/preview-detail';
+        await seed({lessons: [lesson('recovery-save-failure')]});
+        await page.evaluate(base => {
+          coursePage = base; $('course').replaceChildren(new Option('Synthetic course', '1')); window.recoveryPolls = 0;
+          chrome.tabs = {sendMessage: async (_tab, message) => {
+            if (message.type === 'PPT_BATCH_DISCOVER') return {ok: true, pending: true, requestId: 'recovery'};
+            if (message.type === 'PPT_BATCH_CANCEL') return {ok: true};
+            if (++recoveryPolls === 1) return {ok: true, pending: true, requestId: 'recovery', result: {page: base,
+              jobs: [{id: 'pending-row', course: {name: 'Synthetic course'}, state: 'pending', selected: false, discovery: {state: 'pending', code: '', message: '', attempts: 0}}],
+              total: 1, eligible: 1, complete: false, failures: [], progress: {phase: 'details', total: 1, resolved: 0}}};
+            return new Promise(resolve => { window.releaseRecoveryStatus = resolve; });
+          }};
+          window.directoryRun = discoverBatch(1);
+        }, base);
+        await page.waitForFunction(() => !!window.releaseRecoveryStatus);
+        const before = (await stored()).batches;
+        await page.evaluate(base => {
+          const put = IDBObjectStore.prototype.put; window.recoverySaveAttempts = 0;
+          IDBObjectStore.prototype.put = function (value, key) {
+            if (this.name === 'settings' && key === 'batch:' + base && ['cancelled', 'error'].includes(value.discovery?.progress?.phase)) {
+              recoverySaveAttempts++; throw new DOMException('synthetic disk full', 'QuotaExceededError');
+            }
+            return put.call(this, value, key);
+          };
+          window.restoreRecoveryPut = () => { IDBObjectStore.prototype.put = put; };
+        }, base);
+        try {
+          if (mode === 'Stop') await page.locator('#stop').click();
+          else await page.evaluate(() => releaseRecoveryStatus({ok: false, error: 'synthetic message unavailable'}));
+          await page.evaluate(() => directoryRun);
+        } finally { await page.evaluate(() => restoreRecoveryPut()); }
+        const finalStatus = await page.locator('#batch-status').textContent();
+        assert.match(finalStatus, /目录保存失败.*synthetic disk full/);
+        assert.match(finalStatus, /状态未保存.*上次成功保存/);
+        assert(!finalStatus.includes('已保留已知课次'), 'failed recovery must not claim its state update was retained');
+        if (mode !== 'Stop') assert.match(finalStatus, /synthetic message unavailable/);
+        assert.equal(await page.evaluate(() => recoverySaveAttempts), 1);
+        assert.deepEqual((await stored()).batches, before, 'aborted recovery leaves the last durable pending snapshot intact');
+        assert.equal(await page.evaluate(() => batchJobs[0].discovery.state), 'pending');
+        assert.equal(await page.evaluate(() => batchDiscovery), null);
+        if (mode === 'Stop') await page.evaluate(() => releaseRecoveryStatus({ok: true, requestId: 'recovery', pending: false}));
+        await page.reload(); await idle();
+        assert.equal((await stored()).batches[0].jobs[0].discovery.state, 'pending');
+      });
+    }
+
     await test('suspect confirmation removes exactly one record write-first, retries failures and survives reload without video', async () => {
       const suspects = [{start: 1, end: 3, time: 1}, {start: 1, end: 3, time: 1}, {start: 2, end: 4}, {start: 4, end: 5}];
       await seed({lessons: [lesson('dismiss', {suspects}), lesson('untouched', {suspects: [{start: 1, end: 8}]})]});
