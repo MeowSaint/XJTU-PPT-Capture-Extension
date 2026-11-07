@@ -3,6 +3,59 @@ const assert = require('node:assert/strict');
 const library = require('../library.js');
 const batch = require('../batch.js');
 
+function integrityLesson(id, extra = {}) {
+  const source = {batchJobId: id, page: 'https://school.invalid/?courseId=42', sourceKey: 'url:https://cdn.invalid/2-' + id + '.mp4?access_token=secret'};
+  return {id, source, task: {state: 'done', duration: 10, checkpoint: 9.95, coverage: {
+    version: 1, sourceKey: library.key(source), trackKey: batch.trackKey(source), duration: 10, ranges: [{start: 0, end: 9.95}], reachedEnd: true,
+  }}, ...extra};
+}
+
+test('integrity separates 26 directory entries, scan evidence, empty pages and knowledge review', () => {
+  const lessons = Array.from({length: 26}, (_, n) => integrityLesson(n === 25 ? 'unfinished' : n === 24 ? 'legacy' : 'job-' + n));
+  lessons[25].task.coverage.ranges = [{start: 0, end: 4}]; lessons[25].task.coverage.reachedEnd = false;
+  delete lessons[24].task.coverage;
+  lessons[0].suspects = [{start: 9, end: 9.95, time: 9}];
+  const jobs = lessons.map(item => ({id: item.id, selected: item.id !== 'job-1', discovery: {state: 'ready'}}));
+  const report = library.integrity({batch: {jobs, discovery: {complete: true, total: 26, eligible: 26}}, lessons,
+    pages: lessons.filter(item => item.id !== 'job-2').map((item, n) => ({id: n + 1, lessonId: item.id, order: 1024, sourceTime: 1}))});
+  assert.equal(report.version, 1); assert.equal(report.directory.total, 26); assert.equal(report.directory.state, 'complete');
+  assert.equal(report.lessons.find(x => x.jobId === 'unfinished').scan.reachedEnd, false);
+  assert.equal(report.lessons.find(x => x.jobId === 'legacy').scan.verified, false);
+  assert.equal(report.lessons.find(x => x.jobId === 'job-2').savedPages, 0);
+  assert.equal(report.lessons.find(x => x.jobId === 'job-1').excluded, true);
+  assert.equal(report.lessons[0].scan.reachedEnd, true); assert.equal(report.summary.suspectRanges, 1);
+  assert(report.lessons.every(item => item.knowledge.state === 'unreviewed')); assert.equal(report.complete, false);
+});
+
+test('integrity never invents prefix coverage, merges tracks, or promotes legacy discovery', () => {
+  const item = integrityLesson('one'); item.task.coverage.ranges = [{start: 4, end: 9.95}];
+  let report = library.integrity({lessons: [item], pages: []});
+  assert.equal(report.lessons[0].scan.reachedEnd, false); assert.equal(report.directory.state, 'unknown');
+  item.task.coverage.ranges = [{start: 0, end: 9.95}]; item.task.coverage.trackKey = 'different-track';
+  report = library.integrity({batch: {jobs: [{id: 'one', state: 'done'}]}, lessons: [item], pages: []});
+  assert.equal(report.lessons[0].scan.verified, false); assert.equal(report.lessons[0].discovery.state, 'unknown');
+  report = library.integrity({batch: {jobs: [], discovery: {complete: false, total: 26, failures: [{code: 'TIMEOUT'}]}}, lessons: [], pages: []});
+  assert.equal(report.directory.state, 'incomplete'); assert.equal(report.summary.directoryFailures, 1); assert.equal(report.complete, false);
+});
+
+test('integrity freezes export page order and projects every identity without signed URLs or credentials', () => {
+  const item = integrityLesson('safe');
+  const secret = 'https://cdn.invalid/private?access_token=hidden&signature=signed';
+  item.task.coverage.sourceKey = library.key(item.source);
+  item.task.coverage.trackKey = batch.trackKey(item.source);
+  item.lessonKey = secret; item.knowledge = {state: 'unreviewed', notes: secret};
+  const pages = [{id: 2, lessonId: 'safe', order: 20, sourceTime: 8, sourceKey: secret}, {id: 1, lessonId: 'safe', order: 10, sourceTime: 2, token: secret}];
+  const report = library.integrity({batch: {jobs: [{id: 'safe', discovery: {state: 'error', message: secret, code: 'TIMEOUT'}}], discovery: {complete: false, failures: [{code: 'NETWORK', message: secret}]}}, lessons: [item], pages, exportedAt: '2026-11-08T00:00:00.000Z', format: 'pdf'});
+  assert.deepEqual(report.pageIds, [1, 2]); assert.deepEqual(report.export.lessons[0].pages, [{id: 1, sourceTime: 2}, {id: 2, sourceTime: 8}]);
+  pages[1].sourceTime = 99; item.task.coverage.ranges[0].end = 1;
+  assert.equal(report.export.lessons[0].pages[0].sourceTime, 2); assert.equal(report.lessons[0].scan.coverage.ranges[0].end, 9.95);
+  const encoded = JSON.stringify(report);
+  for (const forbidden of ['https:', 'access_token', 'hidden', 'signature=', 'secret', 'signed']) assert.equal(encoded.includes(forbidden), false, forbidden);
+  const malicious = integrityLesson(secret); malicious.id = secret;
+  const projected = JSON.stringify(library.integrity({batch: {jobs: [{id: secret, discovery: {state: 'ready'}}]}, lessons: [malicious], pages: [{id: secret, lessonId: secret, sourceTime: 1}]}));
+  assert.equal(projected.includes('https:'), false); assert.equal(projected.includes('access_token='), false);
+});
+
 test('page limits preserve every valid integer and reject invalid saved values', () => {
   for (let value = 100; value <= 20000; value++) assert.equal(library.pageLimit(value), value);
   for (const value of [undefined, null, '', '1388', {}, [], true, NaN, Infinity, -1, 0, 99, 100.5, 1388.1, 20001]) {

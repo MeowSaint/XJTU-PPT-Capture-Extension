@@ -6,7 +6,7 @@ const {spawnSync} = require('node:child_process');
 const {dependency, browserOptions} = require('./runtime.cjs');
 const {chromium} = dependency('playwright'), sharp = dependency('sharp');
 const {PDFDocument, PDFName} = dependency('pdf-lib');
-const root = path.resolve(__dirname, '..'), scratch = path.join(root, '.test-output', 'v3.1.2');
+const root = path.resolve(__dirname, '..'), scratch = process.env.PPT_TEST_OUTPUT || path.join(root, '.test-output', 'v3.1.2');
 fs.mkdirSync(scratch, {recursive: true});
 const output = fs.mkdtempSync(path.join(scratch, 'library-'));
 const fixture = path.join(output, 'library-video.mp4'), moving = path.join(output, 'library-moving.mp4'), continuity = path.join(output, 'library-continuity.mp4');
@@ -1042,6 +1042,7 @@ function zipEntries(bytes) {
       await page.waitForFunction(() => !busy() && document.querySelector('#status').textContent.includes('局部细查完成'));
       const success = await stored(), reviewed = success.lessons.find(lesson => lesson.id === 'review');
       assert.deepEqual(reviewed.suspects, [ranges[1]]); assert.deepEqual(reviewed.task, task);
+      assert.equal(await page.evaluate(() => PPTLibrary.integrity({lessons, pages: allPages}).lessons[0].scan.reachedEnd), false, 'local rescan cannot certify a legacy full task');
       assert.equal(await page.locator('#mode').inputValue(), '8', 'range scan does not overwrite lesson settings');
       const seeks = await page.evaluate(() => window.rangeSeeks); assert(seeks.every(time => time >= 2 && time <= 2.9));
       assert(seeks.includes(2.5) && seeks.includes(2.9), 'local scan forces half-second samples and its exact end');
@@ -1055,6 +1056,102 @@ function zipEntries(bytes) {
       await page.waitForFunction(() => !busy() && document.querySelector('#status').textContent.includes('Injected local rescan failure'));
       const failed = await stored(); assert.deepEqual(failed.lessons.find(lesson => lesson.id === 'review').suspects, [ranges[1]]);
       assert.deepEqual(failed.pages, success.pages); assert.deepEqual(failed.lessons.find(lesson => lesson.id === 'review').task, task);
+    });
+
+    await test('integrity coverage uses committed checkpoints, never invents legacy prefix, and restarts mismatched tracks', async () => {
+      const legacy = {id: 'old-checkpoint', state: 'paused', checkpoint: 2, baselineTime: .25, duration: 4, settings: {...settings, step: .5, dedupe: false}, crop: full};
+      await seed({lessons: [lesson('coverage', {task: legacy, settings: legacy.settings})]}); await load(); await boundedScanner(4);
+      try {
+        await page.evaluate(() => fastScan());
+        let evidence = await scanEvidence();
+        assert.equal(evidence.task.coverage.ranges[0].start, 2); assert.equal(evidence.task.coverage.reachedEnd, true);
+        assert.equal(await page.evaluate(() => PPTLibrary.integrity({lessons, pages: allPages}).lessons[0].scan.reachedEnd), false);
+        await page.evaluate(async () => { activeLesson.task.coverage.trackKey = 'wrong-track'; activeLesson.task.state = 'paused'; await persistLesson(); });
+        await page.evaluate(() => fastScan()); evidence = await scanEvidence();
+        assert.notEqual(evidence.task.id, legacy.id); assert.equal(evidence.task.coverage.ranges[0].start, 0);
+        assert.equal(await page.evaluate(() => PPTLibrary.integrity({lessons, pages: allPages}).lessons[0].scan.reachedEnd), true);
+      } finally { await page.evaluate(() => restoreBoundedScanner()); }
+      await seed({lessons: [lesson('failed-coverage')]}); await load(); await boundedScanner(4);
+      try {
+        await page.evaluate(() => {
+          const put = IDBObjectStore.prototype.put; let failed = false;
+          IDBObjectStore.prototype.put = function(value, key) {
+            if (!failed && this.name === 'settings' && key === 'lesson:' + activeLesson.id && value.task?.checkpoint >= 1) {
+              failed = true; throw Error('Injected coverage checkpoint failure');
+            }
+            return put.apply(this, arguments);
+          };
+          window.restoreCoveragePut = () => { IDBObjectStore.prototype.put = put; };
+        });
+        await page.evaluate(() => fastScan());
+        const evidence = await scanEvidence(), live = await page.evaluate(() => structuredClone(activeLesson.task));
+        assert.equal(evidence.task.coverage.ranges.at(-1).end, .5); assert.equal(evidence.task.checkpoint, .5);
+        assert.equal(evidence.task.coverage.reachedEnd, false); assert.deepEqual(live, evidence.task);
+        assert.match(evidence.status, /Injected coverage checkpoint failure/);
+      } finally { await page.evaluate(() => { window.restoreCoveragePut?.(); restoreBoundedScanner(); }); }
+    });
+
+    await test('integrity report buttons isolate A and B, export freezes after pending saves and retains only successful receipts', async () => {
+      const base = origin + '/study-capture-courses/42/preview-detail/a', other = base.replace('/42/', '/99/');
+      const a = lesson('report-a', {page: base}), b = lesson('report-b', {page: other, course: {...course, name: '课程B'}});
+      await seed({lessons: [a, b], activeId: a.id, batches: [{page: other, jobs: [{id: 'b-job', course: b.course, discovery: {state: 'ready'}}], discovery: {complete: true, total: 1}}], pages: [
+        {id: 801, lessonId: a.id, order: 2048, sourceTime: 2}, {id: 802, lessonId: a.id, order: 1024, sourceTime: 1}, {id: 803, lessonId: b.id},
+      ]});
+      const readReport = async button => {
+        const [download] = await Promise.all([page.waitForEvent('download'), page.locator(button).click()]);
+        const target = path.join(output, button.slice(1) + '.json'); await download.saveAs(target); await idle();
+        return JSON.parse(fs.readFileSync(target, 'utf8'));
+      };
+      const current = await readReport('#course-report'); assert.deepEqual(current.lessons.map(item => item.lessonId), [a.id]);
+      await page.locator('#batch-panel').evaluate(panel => { panel.open = true; });
+      const batchReport = await readReport('#batch-course-report');
+      assert(batchReport.lessons.some(item => item.lessonId === b.id)); assert(!batchReport.lessons.some(item => item.lessonId === a.id));
+      await page.evaluate(() => {
+        const put = IDBObjectStore.prototype.put; let held = true;
+        IDBObjectStore.prototype.put = function(value, key) {
+          const request = put.apply(this, arguments);
+          if (this.name === 'settings' && (key === 'exportNaming' || key === 'lesson:' + activeLesson.id)) {
+            const keepAlive = () => { if (held) this.get('exportNaming').onsuccess = keepAlive; };
+            this.get('exportNaming').onsuccess = keepAlive;
+          }
+          return request;
+        };
+        window.releaseReportNaming = () => { held = false; IDBObjectStore.prototype.put = put; };
+        const create = PPTDiskCache.create; window.reportCacheStarted = false;
+        PPTDiskCache.create = async (...args) => { window.reportCacheStarted = true; return create(...args); };
+        window.restoreReportCache = () => { PPTDiskCache.create = create; };
+        $('course-name').value = '保存后的课程A'; namingManual = true; persistNaming(); persistLesson();
+        const writer = writeCoursePDF;
+        writeCoursePDF = async (entries, options) => {
+          window.frozenEntryIds = entries.flatMap(entry => entry.pages.map(page => page.id));
+          allPages.find(page => page.id === 801).order = 1; allPages.find(page => page.id === 801).sourceTime = 99;
+          return writer(entries, options);
+        };
+        window.restoreReportWriter = () => { writeCoursePDF = writer; };
+        window.pendingReportExport = exportCoursePDF();
+      });
+      assert.equal(await page.evaluate(() => window.reportCacheStarted), false);
+      try {
+        const [download] = await Promise.all([page.waitForEvent('download'), page.evaluate(() => releaseReportNaming())]);
+        await download.saveAs(path.join(output, 'frozen-course.pdf')); await page.evaluate(() => pendingReportExport); await idle();
+        const key = await page.evaluate(() => currentCourseKey());
+        const receipt = await page.evaluate(async key => {
+          const tx = db.transaction('settings'), read = tx.objectStore('settings').get('courseExport:' + key);
+          await new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onabort = tx.onerror = () => reject(tx.error); }); return read.result.lastExport;
+        }, key);
+        assert.deepEqual(receipt.pageIds, [802, 801]); assert.deepEqual(await page.evaluate(() => frozenEntryIds), receipt.pageIds);
+        assert.deepEqual(receipt.export.lessons[0].pages.map(p => p.sourceTime), [1, 2]); assert.equal(receipt.export.format, 'pdf');
+        assert.match(await page.locator('#status').textContent(), /未确认到尾部.*目录.*待复核/);
+        const before = structuredClone(receipt); let downloads = 0; const onDownload = () => downloads++; page.on('download', onDownload);
+        await page.evaluate(async () => { writeCoursePDF = async () => { throw Error('Injected integrity export failure'); }; await exportCoursePDF(); });
+        page.off('download', onDownload); assert.equal(downloads, 0);
+        const after = await page.evaluate(async key => {
+          const tx = db.transaction('settings'), read = tx.objectStore('settings').get('courseExport:' + key);
+          await new Promise(resolve => { tx.oncomplete = resolve; }); return read.result.lastExport;
+        }, key);
+        assert.deepEqual(after, before); assert.match(await page.locator('#status').textContent(), /Injected integrity export failure/);
+        const fresh = await readReport('#course-report'); assert.deepEqual(fresh.lastExport, before);
+      } finally { await page.evaluate(() => { window.releaseReportNaming?.(); window.restoreReportCache?.(); window.restoreReportWriter?.(); }); }
     });
 
     await test('course ZIP contains ordered independent Chinese-named PDFs, skips empty/other courses and restores batch state', async () => {
@@ -1074,7 +1171,7 @@ function zipEntries(bytes) {
         {id: 5, lessonId: 'late', order: 1024, image: 2}, {id: 6, lessonId: 'other', order: 1024, image: 0},
       ]});
       await count(1); assert.equal(await page.locator('#batch-jobs .batch-job').count(), 3);
-      assert.match(await page.locator('[data-job-id="done-job"] .batch-state').textContent(), /已完成 · 2 页/);
+      assert.match(await page.locator('[data-job-id="done-job"] .batch-state').textContent(), /尾部待核对 · 2 页/);
       assert.match(await page.locator('[data-job-id="interrupted-job"] .batch-state').textContent(), /已停止/);
       assert.equal(await page.locator('[data-job-id="interrupted-job"] input').isChecked(), true);
       assert.equal(await page.locator('[data-job-id="failed-job"] .batch-state').getAttribute('title'), '保留的错误');
@@ -1106,7 +1203,16 @@ function zipEntries(bytes) {
       }
       assert.match(await page.locator('#status').textContent(), /2 节 PDF.*共 3 页/);
       assert.match(await page.locator('#status').textContent(), /跳过 3 个空课次/, 'one empty lesson and two persisted batch jobs have no screenshots');
-      assert.match(await page.locator('#status').textContent(), /1 节尚未完成整节扫描/);
+      assert.match(await page.locator('#status').textContent(), /未确认到尾部 5 节/);
+      assert.match(await page.locator('#status').textContent(), /其中 1 节尚未完成本次扫描。旧任务尾部待核对 1 节。/);
+      const readReceipt = () => page.evaluate(async () => {
+        const tx = db.transaction('settings'), read = tx.objectStore('settings').get('courseExport:' + currentCourseKey());
+        await new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onabort = tx.onerror = () => reject(tx.error); }); return read.result?.lastExport;
+      });
+      const zipReceipt = await readReceipt(); assert.equal(zipReceipt.export.format, 'zip'); assert.deepEqual(zipReceipt.pageIds, [8, 3, 5]);
+      const zipWriter = await page.evaluate(() => { window.savedZIPWriter = writeCourseZIP; writeCourseZIP = async () => { throw Error('Injected ZIP receipt failure'); }; return true; });
+      try { await page.evaluate(() => exportCourseZIP()); assert.deepEqual(await readReceipt(), zipReceipt); assert.match(await page.locator('#status').textContent(), /Injected ZIP receipt failure/); }
+      finally { if (zipWriter) await page.evaluate(() => { writeCourseZIP = window.savedZIPWriter; }); }
       const [merged] = await Promise.all([page.waitForEvent('download'), page.locator('#course-pdf').click()]);
       assert.equal(merged.suggestedFilename(), course.name + '-整课.pdf');
       const mergedPath = path.join(output, merged.suggestedFilename()); await merged.saveAs(mergedPath); await idle();
@@ -1121,7 +1227,7 @@ function zipEntries(bytes) {
         const embedded = pdf.getPage(index).node.Resources().lookup(PDFName.of('XObject')).lookup(PDFName.of('Im0'));
         assert.deepEqual(Buffer.from(embedded.contents), Buffer.from(images[image].split(',')[1], 'base64'));
       }
-      assert.match(await page.locator('#status').textContent(), /含 2 节，共 3 页.*跳过 3 个空课次.*1 节尚未完成整节扫描/);
+      assert.match(await page.locator('#status').textContent(), /含 2 节，共 3 页.*跳过 3 个空课次.*未确认到尾部 5 节/);
     });
     await test('library estimates stream legacy assets and use committed size metadata for new pages', async () => {
       await seed({lessons: [lesson('sizes'), lesson('empty-size')], activeId: 'empty-size', pages: [

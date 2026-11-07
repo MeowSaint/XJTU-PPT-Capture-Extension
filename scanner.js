@@ -68,6 +68,6 @@ class PPTScanner {
       progress({ratio: (i + 1) / times.length, time, duration, saved, unstable});
     }
     signal.throwIfAborted();
-    return {saved, unstable};
+    return {saved, unstable, completedTo: times.at(-1)};
   }
 }

@@ -41,6 +41,59 @@
     }
     return merged;
   }
+  function integrity({batch, lessons = [], pages = [], exportedAt = null, format = null}) {
+    // Project an explicit schema. Even legacy IDs and normalized source keys can contain signed URLs.
+    const aliases = new Map(), opaque = (kind, value) => {
+      if (!value) return null;
+      const identity = kind + ':' + String(value);
+      if (!aliases.has(identity)) aliases.set(identity, kind + '-' + (aliases.size + 1));
+      return aliases.get(identity);
+    };
+    const id = (kind, value) => Number.isSafeInteger(value) ? value : typeof value === 'string' && /^[\w-]{1,160}$/.test(value) ? value : opaque(kind, value);
+    const number = value => Number.isFinite(value) && value >= 0 ? value : null;
+    const code = value => typeof value === 'string' && /^[A-Z0-9_]{1,64}$/.test(value) ? value : '';
+    const ranges = values => (Array.isArray(values) ? values : []).filter(item => item && number(item.start) !== null && number(item.end) !== null && item.end >= item.start)
+      .map(item => ({start: item.start, end: item.end, ...(number(item.time) !== null ? {time: item.time} : {})}));
+    const discovery = value => ({state: ['ready', 'error', 'pending', 'skipped', 'unavailable'].includes(value?.state) ? value.state : 'unknown',
+      code: code(value?.code), attempts: number(value?.attempts)});
+    const jobs = batch?.jobs || [], rows = lessons.map(lesson => ({lesson, job: jobs.find(job => job.id === lesson.source?.batchJobId)}));
+    for (const job of jobs) if (!rows.some(row => row.job === job)) rows.push({lesson: null, job});
+    const result = rows.map(({lesson, job}) => {
+      const task = lesson?.task, coverage = task?.coverage, duration = number(task?.duration), source = lesson?.source || {};
+      const track = key({sourceKey: source.sourceKey || (source.url ? 'url:' + source.url : ''), sourceName: source.sourceName});
+      const validRanges = ranges(coverage?.ranges);
+      const verified = !!(coverage?.version === 1 && duration > 0 && coverage.duration === duration && coverage.sourceKey === key(source)
+        && coverage.trackKey === track && Array.isArray(coverage.ranges) && validRanges.length === coverage.ranges.length
+        && validRanges.every(range => range.end <= duration));
+      const merged = verified ? validRanges.reduce((list, range) => mergeRanges(list, range), []) : [];
+      const reachedEnd = verified && coverage.reachedEnd === true && merged[0]?.start === 0 && merged[0].end >= duration - Math.min(.05, duration / 2);
+      const retained = lesson ? pages.filter(page => page.lessonId === lesson.id).sort((a, b) => (a.order ?? a.id) - (b.order ?? b.id)) : [];
+      return {lessonId: id('lesson', lesson?.id), jobId: id('job', job?.id || source.batchJobId), excluded: job?.selected === false || job?.discovery?.state === 'skipped',
+        discovery: discovery(job?.discovery), savedPages: retained.length,
+        scan: {verified, reachedEnd, state: reachedEnd ? 'reached-end' : verified ? 'partial' : task ? 'legacy-unknown' : 'not-started',
+          taskState: ['running', 'paused', 'failed', 'done'].includes(task?.state) ? task.state : null, duration, checkpoint: number(task?.checkpoint),
+          coverage: coverage ? {version: 1, sourceKey: opaque('source', coverage.sourceKey), trackKey: opaque('track', coverage.trackKey),
+            duration: number(coverage.duration), ranges: merged, reachedEnd: verified && coverage.reachedEnd === true} : null,
+          suspects: ranges(lesson?.suspects)},
+        knowledge: {state: ['reviewed', 'partial'].includes(lesson?.knowledge?.state) ? lesson.knowledge.state : 'unreviewed'},
+        exportPages: retained.map(page => ({id: id('page', page.id), sourceTime: number(page.sourceTime)}))};
+    });
+    const metadata = batch?.discovery;
+    const failures = (metadata?.failures || []).filter(item => !item.jobId).map(item => ({code: code(item.code), status: number(item.status), attempts: number(item.attempts)}));
+    const directory = {state: metadata?.complete === true ? 'complete' : metadata?.complete === false ? 'incomplete' : 'unknown',
+      total: Number.isSafeInteger(metadata?.total) && metadata.total >= 0 ? metadata.total : null, known: jobs.length, eligible: number(metadata?.eligible), failures};
+    const summary = {notReachedEnd: result.filter(item => !item.scan.reachedEnd).length, directoryFailures: failures.length,
+      directoryUnknown: directory.state === 'unknown' ? 1 : 0, discoveryFailures: result.filter(item => item.discovery.state === 'error').length,
+      discoveryUnknown: result.filter(item => ['unknown', 'pending', 'unavailable'].includes(item.discovery.state)).length,
+      suspectRanges: result.reduce((sum, item) => sum + item.scan.suspects.length, 0), emptyLessons: result.filter(item => !item.savedPages).length,
+      excluded: result.filter(item => item.excluded).length};
+    const snapshot = result.filter(item => item.exportPages.length).map(item => ({lessonId: item.lessonId, pages: item.exportPages}));
+    return {version: 1, complete: directory.state === 'complete' && directory.total === jobs.length && result.length > 0
+        && !summary.notReachedEnd && !summary.suspectRanges && !summary.directoryFailures && !summary.discoveryFailures && !summary.discoveryUnknown,
+      directory, summary, lessons: result.map(({exportPages, ...item}) => item), pageIds: snapshot.flatMap(item => item.pages.map(page => page.id)),
+      export: {exportedAt: typeof exportedAt === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(exportedAt) ? exportedAt : null,
+        format: ['pdf', 'zip'].includes(format) ? format : null, lessons: snapshot}};
+  }
   function transaction(db, stores, action) {
     return new Promise((resolve, reject) => {
       const tx = db.transaction(stores, 'readwrite'); let result;
@@ -151,7 +204,7 @@
       return () => result;
     });
   }
-  const api = {pageLimit, key, courseKey, recover, mergeRanges, restore, put, activate, batch, remove};
+  const api = {pageLimit, key, courseKey, recover, mergeRanges, integrity, restore, put, activate, batch, remove};
   root.PPTLibrary = api;
   if (typeof module !== 'undefined') module.exports = api;
 })(globalThis);

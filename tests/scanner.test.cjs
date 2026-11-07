@@ -6,6 +6,27 @@ const vm = require('node:vm');
 const Scanner = vm.runInNewContext(fs.readFileSync(require.resolve('../scanner.js'), 'utf8') + '\nPPTScanner', {
   PPTCore: {...require('../media.js'), similar: (a, b) => a === b},
 });
+test('completedTo is the last checkpointed safe sample and waits for its commit', async () => {
+  const {scanner} = rangeFixture(4), entered = gate(), release = gate();
+  let returned = false;
+  const pending = scanner.scan(options({save: async () => {}, checkpoint: async point => {
+    if (point.time === 3.95) { entered.resolve(); await release.promise; }
+  }})).then(result => { returned = true; return result; });
+  await entered.promise; assert.equal(returned, false); release.resolve();
+  assert.deepEqual({...await pending}, {saved: 1, unstable: 0, completedTo: 3.95});
+  assert.equal((await rangeFixture().scanner.scan(options({start: 2, end: 4.1, save: async () => {}}))).completedTo, 4.1);
+});
+
+test('failed or cancelled final checkpoint never returns completedTo success', async () => {
+  for (const cancel of [false, true]) {
+    const controller = new AbortController(); let successes = 0;
+    const pending = rangeFixture(1).scanner.scan(options({signal: controller.signal, save: async () => {}, checkpoint: async point => {
+      if (point.time === .95) { if (cancel) controller.abort(Error('tail cancelled')); else throw Error('tail commit failed'); }
+    }})).then(result => { successes++; return result; });
+    await assert.rejects(pending, cancel ? /tail cancelled/ : /tail commit failed/); assert.equal(successes, 0);
+  }
+});
+
 test('default precise sampling retains a one-second A to B to A excursion', async () => {
   const {scanner} = rangeFixture(4, time => time >= 1 && time < 2 ? 'B' : 'A');
   const saved = [];
