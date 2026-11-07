@@ -56,14 +56,14 @@ function sampleEntry({audio = false, codec = audio ? 'mp4a' : 'avc1', audioVersi
   return box(codec, b, audio ? box('esds', esds) : box('avcC', Buffer.from([1, 66, 0, 30, 255, 225, 0])), ...entryExtra);
 }
 function track(o = {}) {
-  const audio = o.audio || false, count = o.samples || 1;
+  const audio = o.audio || false, count = o.samples || 1, offsets = o.chunkOffsets || [o.offset || 0];
   const dataRef = o.external ? box('url ', full(), Buffer.from('https://invalid.example/media\0')) : box('url ', full(0, 1));
   const stsz = box('stsz', full(), u32(o.variable ? 0 : 4), u32(count), ...(o.variable ? Array.from({length: count}, () => u32(4)) : []));
   const tables = [
     box('stsd', full(), u32(1), sampleEntry(o)),
     box('stts', full(), u32(1), u32(count), u32((o.mediaDuration ?? 8000) / count)),
-    box('stsc', full(), u32(1), u32(1), u32(count), u32(1)), stsz,
-    box(o.co64 ? 'co64' : 'stco', full(), u32(1), o.co64 ? u64(o.offset || 0) : u32(o.offset || 0)),
+    box('stsc', full(), u32(1), u32(1), u32(count / offsets.length), u32(1)), stsz,
+    box(o.co64 ? 'co64' : 'stco', full(), u32(offsets.length), ...offsets.map(o.co64 ? u64 : u32)),
     ...(o.tables || [])
   ];
   return box('trak', trackHeader(o), ...(o.edit ? [edit(o.edit)] : []), ...(o.trackExtra || []),
@@ -82,7 +82,7 @@ function fixture(o = {}) {
   return {bytes, blob: new Blob([bytes], {type: 'video/mp4'})};
 }
 // Record every requested byte interval; never materialize the sparse file itself.
-function observed(bytes, {size = bytes.length, regions = [], delay, failure, failureAt} = {}) {
+function observed(bytes, {size = bytes.length, regions = [], delay, failure, failureAt, afterRead} = {}) {
   const reads = [];
   const blob = {
     size, type: 'video/mp4',
@@ -96,6 +96,7 @@ function observed(bytes, {size = bytes.length, regions = [], delay, failure, fai
           const lo = Math.max(start, at), hi = Math.min(end, at + data.length);
           if (hi > lo) data.copy(out, lo - start, lo - at, hi - at);
         }
+        afterRead?.(start, end);
         return out.buffer.slice(out.byteOffset, out.byteOffset + out.byteLength);
       }};
     }
@@ -371,4 +372,125 @@ test('true read failures preserve code, phase and cause for both APIs; listeners
     const synchronous = {size: 100, slice() { throw cause; }};
     await assert.rejects(mp4[method](synchronous), e => e.cause === cause && e.code === 'LOCAL_READ_FAILED' && e.phase === 'local-read');
   }
+});
+
+function chunkFixture({chunks = 128, intervals = 2049, empty = false, shuffled = false, variable = false, singleChunk = false, co64 = false} = {}) {
+  const makeMoov = offsets => box('moov', movieHeader(),
+    track({samples: chunks, mediaDuration: chunks * 8, mediaScale: chunks, chunkOffsets: offsets, variable, co64}),
+    track({audio: true, id: 2, offset: offsets[0], co64}));
+  const slots = singleChunk ? 1 : chunks, initial = makeMoov(Array(slots).fill(0)), ranges = [], mdats = [];
+  let at = ftyp().length + initial.length;
+  for (let i = 0; i < intervals; i++) {
+    const length = i === intervals - 1 ? (chunks + 1) * 4 : empty ? 0 : 8;
+    mdats.push(box('mdat', Buffer.alloc(length, 11)));
+    ranges.push([at + 8, at + 8 + length]); at += 8 + length;
+  }
+  const offsets = Array.from({length: slots}, (_, i) => {
+    if (!shuffled) return ranges.at(-1)[0] + (singleChunk ? 0 : i * 4);
+    const range = ranges[(i * 97) % intervals]; return i % 2 ? range[1] - 4 : range[0];
+  });
+  const bytes = join([ftyp(), makeMoov(offsets), ...mdats]);
+  return {bytes, ranges, offsets, blob: new Blob([bytes], {type: 'video/mp4'})};
+}
+
+// Observe numeric range accesses in an isolated realm, including indexed range records.
+// Counting BigInt conversions alone would miss a linear search over cached endpoints.
+function instrumentedMP4() {
+  const metrics = {rangeReads: 0, conversions: 0}, timers = new Set(), proxies = new WeakMap();
+  const wrapRange = value => {
+    if (!value || typeof value !== 'object') return value;
+    if (proxies.has(value)) return proxies.get(value);
+    if (value.type !== 'mdat' && !(typeof value.start === 'bigint' && typeof value.end === 'bigint')) return value;
+    const proxy = new Proxy(value, {get(target, key, receiver) {
+      if (['payload', 'start', 'end'].includes(key)) metrics.rangeReads++;
+      return Reflect.get(target, key, receiver);
+    }});
+    proxies.set(value, proxy); return proxy;
+  };
+  const context = vm.createContext({Blob, DOMException, Uint8Array, DataView, wrapRange,
+    BigInt(value) { metrics.conversions++; return BigInt(value); },
+    setTimeout(callback, delay) {
+      const timer = setTimeout(() => { timers.delete(timer); callback(); }, delay); timers.add(timer); return timer;
+    },
+    clearTimeout(timer) { timers.delete(timer); clearTimeout(timer); }
+  });
+  vm.runInContext('const push = Array.prototype.push; Array.prototype.push = function (...values) { return Reflect.apply(push, this, values.map(wrapRange)); };', context);
+  vm.runInContext(fs.readFileSync(require.resolve('../mp4-recovery.js'), 'utf8'), context);
+  return {api: context.PPTMP4, metrics, timers, cleanup() { for (const timer of timers) clearTimeout(timer); timers.clear(); }};
+}
+
+test('many-chunk/many-mdat lookup bounds range work for empty and nonempty intervals', async t => {
+  for (const empty of [true, false]) await t.test(empty ? 'empty intervals' : 'nonempty intervals', async t => {
+    const chunks = 128, intervals = 2049, input = chunkFixture({chunks, intervals, empty}), harness = instrumentedMP4();
+    try {
+      const result = await harness.api.prepare(input.blob);
+      assert.equal(result.mode, 'audio-omitted'); assert.equal(result.inspection.status, 'eligible');
+      const bounds = 8 * intervals + 8 * chunks * (Math.ceil(Math.log2(intervals)) + 2);
+      t.diagnostic(JSON.stringify({empty, chunks, intervals, fileBytes: input.bytes.length, inspectedBytes: result.inspection.inspectedBytes, ...harness.metrics, rangeReadBound: bounds}));
+      assert.ok(harness.metrics.rangeReads <= bounds, `range reads ${harness.metrics.rangeReads} exceed ${bounds}`);
+      assert.ok(harness.metrics.conversions < 8 * (intervals + chunks), 'endpoint conversions must be reused');
+      const restored = Buffer.from(await result.blob.arrayBuffer());
+      Buffer.from('trak').copy(restored, locate(input.bytes, 'trak')[1]); assert.deepEqual(restored, input.bytes);
+      assert.equal(harness.timers.size, 0);
+    } finally { harness.cleanup(); }
+  });
+});
+
+test('indexed ranges preserve non-monotonic offsets, exact ends and invalid gaps', async () => {
+  for (const co64 of [false, true]) {
+    const {blob, bytes, offsets, ranges} = chunkFixture({chunks: 128, intervals: 129, shuffled: true, co64});
+    assert.ok(offsets.some((offset, i) => i && offset < offsets[i - 1]));
+    assert.ok(offsets.some(offset => ranges.some(([, end]) => offset + 4 === end)));
+    assert.equal((await mp4.inspect(blob)).status, 'eligible');
+    for (const bad of [ranges[0][0] - 1, ranges[0][1], ranges[0][1] - 3]) {
+      await rejected(changed(bytes, co64 ? 'co64' : 'stco', (b, at) => co64 ? b.writeBigUInt64BE(BigInt(bad), at + 16) : b.writeUInt32BE(bad, at + 16)));
+    }
+  }
+  const high = 2 ** 32 + 100, prefix = join([ftyp(), u32(1), Buffer.from('mdat'), u64(high - ftyp().length)]);
+  const media = join([box('mdat', Buffer.alloc(16)), box('mdat', Buffer.alloc(16))]);
+  const offsets = [high + 44, high + 8, high + 32, high + 20];
+  const moov = box('moov', movieHeader(), track({samples: 4, co64: true, chunkOffsets: offsets}), track({audio: true, id: 2, co64: true, offset: high + 12}));
+  const tail = join([media, moov]), watch = observed(prefix, {size: high + tail.length, regions: [[high, tail]]});
+  assert.equal((await mp4.inspect(watch.blob)).status, 'eligible');
+  assert.ok(watch.reads.every(([a, b]) => b <= prefix.length || (a >= high && b <= high + 8) || (a >= high + 24 && b <= high + 32) || a >= high + media.length));
+});
+
+test('CPU validation yields to an event-loop task before finishing', async t => {
+  const input = chunkFixture({chunks: 8192, intervals: 65}), harness = instrumentedMP4();
+  const stsc = locate(input.bytes, 'stsc')[0] - 4; let timer, atEvent = null, settled = false;
+  const watch = observed(input.bytes, {afterRead(start, end) {
+    if (start === stsc + 8 && end === stsc + input.bytes.readUInt32BE(stsc)) {
+      timer = setTimeout(() => { atEvent = {settled, rangeReads: harness.metrics.rangeReads}; }, 0);
+    }
+  }});
+  try {
+    const result = await harness.api.inspect(watch.blob); settled = true;
+    assert.equal(result.status, 'eligible');
+    assert.ok(atEvent, 'a timer armed after the final video table read must run during CPU validation');
+    assert.equal(atEvent.settled, false); assert.ok(atEvent.rangeReads > 2 * input.ranges.length);
+    assert.ok(harness.metrics.rangeReads > atEvent.rangeReads, 'range validation must continue after yielding');
+    assert.equal(harness.timers.size, 0);
+    t.diagnostic(JSON.stringify({eventRangeReads: atEvent.rangeReads, finalRangeReads: harness.metrics.rangeReads, reads: watch.reads.length}));
+  } finally { clearTimeout(timer); harness.cleanup(); }
+});
+
+test('CPU validation abort dispatches during chunk and variable-sample loops without late continuation', async t => {
+  for (const method of ['inspect', 'prepare']) for (const singleChunk of [false, true]) await t.test(`${method}: ${singleChunk ? 'variable samples' : 'chunks'}`, async t => {
+    const input = chunkFixture({chunks: 8192, intervals: 65, variable: singleChunk, singleChunk}), harness = instrumentedMP4();
+    const stsc = locate(input.bytes, 'stsc')[0] - 4, controller = new AbortController(); let timer, fired = false;
+    const watch = observed(input.bytes, {afterRead(start, end) {
+      if (start === stsc + 8 && end === stsc + input.bytes.readUInt32BE(stsc)) {
+        timer = setTimeout(() => { fired = true; controller.abort(); }, 0);
+      }
+    }});
+    try {
+      await assert.rejects(harness.api[method](watch.blob, {signal: controller.signal}), {name: 'AbortError'});
+      assert.equal(fired, true); assert.equal(watch.reads.at(-1)[0], stsc + 8);
+      assert.equal(getEventListeners(controller.signal, 'abort').length, 0); assert.equal(harness.timers.size, 0);
+      const reads = watch.reads.length, ranges = harness.metrics.rangeReads;
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(watch.reads.length, reads); assert.equal(harness.metrics.rangeReads, ranges);
+      t.diagnostic(JSON.stringify({method, singleChunk, reads, rangeReadsAtAbort: ranges, timers: harness.timers.size}));
+    } finally { clearTimeout(timer); harness.cleanup(); }
+  });
 });

@@ -2,6 +2,7 @@
 (function (root) {
   'use strict';
   const READ_LIMIT = 65536, BYTE_LIMIT = 16777216, BOX_LIMIT = 50000, DEPTH_LIMIT = 8, TRACK_LIMIT = 32;
+  const WORK_BATCH = 1024; // Scheduling cadence, not an additional admission limit.
   const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER);
   const BRANDS = new Set(['isom', 'iso2', 'iso3', 'iso4', 'iso5', 'iso6', 'iso7', 'iso8', 'iso9', 'mp41', 'mp42', 'avc1', 'M4V ', 'M4A ', 'dash']);
   const CONTAINERS = new Set(['moov', 'trak', 'mdia', 'minf', 'stbl', 'dinf', 'edts', 'udta', 'meta', 'stsd', 'dref']);
@@ -62,6 +63,29 @@
     const state = {boxes: 0, tracks: 0, flags: new Set(), recognized: false, inspectedBytes: 0};
     const read = reader(blob, signal, state), patches = [];
     const data = node => read(node.payload, node.end - node.payload);
+    let work = 0;
+    async function cooperate() {
+      checkSignal(signal);
+      await new Promise((resolve, reject) => {
+        let timer;
+        const cleanup = () => { clearTimeout(timer); signal?.removeEventListener('abort', onAbort); };
+        const onAbort = () => { cleanup(); reject(abortError()); };
+        signal?.addEventListener('abort', onAbort, {once: true});
+        try {
+          checkSignal(signal);
+          timer = setTimeout(() => { cleanup(); resolve(); }, 0);
+        } catch (error) { cleanup(); reject(error); }
+      });
+      checkSignal(signal);
+    }
+    function contains(intervals, offset, length) {
+      let low = 0, high = intervals.length;
+      while (low < high) {
+        const mid = (low + high) >>> 1;
+        if (intervals[mid].start <= offset) low = mid + 1; else high = mid;
+      }
+      return low > 0 && offset + length <= intervals[low - 1].end;
+    }
     function flags(type) {
       if (type === 'moof' || type === 'mvex') state.flags.add('FRAGMENTED_MP4');
       if (ENCRYPTION.has(type)) state.flags.add('ENCRYPTED');
@@ -80,6 +104,7 @@
         const bytes = await read(at, Math.min(READ_LIMIT, node.end - at));
         for (let i = 0; i < bytes.length; i += 4) if (BRANDS.has(text(bytes, i))) state.recognized = true;
         at += bytes.length;
+        if (bytes.length === READ_LIMIT) await cooperate();
       }
     }
     async function scan(start, end, depth, top = false) {
@@ -118,6 +143,7 @@
           if (count !== null && count !== node.children.length) malformed();
         }
         nodes.push(node); at = node.end;
+        if (++work % WORK_BATCH === 0) await cooperate();
       }
       return nodes;
     }
@@ -173,7 +199,7 @@
       if (bytes.length - prefix !== count * width) malformed();
       return {v: view(bytes), count};
     }
-    async function sampleTables(stbl, mdhd, mdats, video) {
+    async function sampleTables(stbl, mdhd, intervals, video) {
       children(stbl, ['stsd', 'stts', 'ctts', 'stss', 'stsc', 'stsz', 'stco', 'co64']);
       const sizes = await data(one(stbl, 'stsz'));
       if (sizes.length < 12 || view(sizes).getUint32(0) !== 0) malformed();
@@ -186,6 +212,7 @@
         const n = times.v.getUint32(8 + i * 8), delta = times.v.getUint32(12 + i * 8);
         if (!n || !delta) malformed();
         samples += BigInt(n); ticks += BigInt(n) * BigInt(delta);
+        if (++work % WORK_BATCH === 0) await cooperate();
       }
       if (samples !== BigInt(count)) malformed();
       if (video && ticks !== mdhd.ticks) timeline();
@@ -197,13 +224,19 @@
         const v = view(b), n = v.getUint32(4);
         if (b.length !== 8 + n * 8) malformed();
         let sum = 0n;
-        for (let i = 0; i < n; i++) { const value = v.getUint32(8 + i * 8); if (!value) malformed(); sum += BigInt(value); }
+        for (let i = 0; i < n; i++) {
+          const value = v.getUint32(8 + i * 8); if (!value) malformed(); sum += BigInt(value);
+          if (++work % WORK_BATCH === 0) await cooperate();
+        }
         if (sum !== BigInt(count)) malformed();
       }
       const stss = one(stbl, 'stss', false);
       if (stss) {
         const t = table(await data(stss), 4); let previous = 0;
-        for (let i = 0; i < t.count; i++) { const n = t.v.getUint32(8 + i * 4); if (n <= previous || n > count) malformed(); previous = n; }
+        for (let i = 0; i < t.count; i++) {
+          const n = t.v.getUint32(8 + i * 4); if (n <= previous || n > count) malformed(); previous = n;
+          if (++work % WORK_BATCH === 0) await cooperate();
+        }
       }
       const stco = one(stbl, 'stco', false), co64 = one(stbl, 'co64', false);
       if (!!stco === !!co64) malformed();
@@ -215,6 +248,7 @@
         const first = chunks.v.getUint32(8 + i * 12), n = chunks.v.getUint32(12 + i * 12), description = chunks.v.getUint32(16 + i * 12);
         if ((i === 0 && first !== 1) || first <= previous || first > offsets.count || !n || description !== 1) malformed();
         previous = first;
+        if (++work % WORK_BATCH === 0) await cooperate();
       }
       let sample = 0, entry = 0;
       for (let i = 0; i < offsets.count; i++) {
@@ -223,10 +257,14 @@
         if (n > count - sample) malformed();
         let length = 0n;
         if (fixed) { length = BigInt(n) * BigInt(fixed); sample += n; }
-        else for (let j = 0; j < n; j++) { const size = sampleSize(sample++); if (!size) malformed(); length += BigInt(size); }
+        else for (let j = 0; j < n; j++) {
+          const size = sampleSize(sample++); if (!size) malformed(); length += BigInt(size);
+          if (++work % WORK_BATCH === 0) await cooperate();
+        }
         const offset = co64 ? offsets.v.getBigUint64(8 + i * 8) : BigInt(offsets.v.getUint32(8 + i * 4));
         if (offset > MAX_SAFE || offset + length > MAX_SAFE) malformed();
-        if (video && !mdats.some(m => offset >= BigInt(m.payload) && offset + length <= BigInt(m.end))) malformed();
+        if (video && !contains(intervals, offset, length)) malformed();
+        if (++work % WORK_BATCH === 0) await cooperate();
       }
       if (sample !== count) malformed();
     }
@@ -298,6 +336,13 @@
       result.videoDuration = Number(video.tkhd.ticks) / movie.scale;
       if (video.tkhd.ticks !== movie.ticks) timeline();
       await edits(one(video.node, 'edts', false), video.tkhd, video.mdhd, movie);
+      // Top-level traversal already validates disjoint intervals in file order.
+      // Chunk offsets may be non-monotonic, so each gets an independent binary search.
+      const intervals = [];
+      for (const node of mdats) {
+        intervals.push({start: BigInt(node.payload), end: BigInt(node.end)});
+        if (++work % WORK_BATCH === 0) await cooperate();
+      }
       for (const track of tracks) {
         const minf = one(track.mdia, 'minf'), isVideo = track === video;
         children(minf, [isVideo ? 'vmhd' : 'smhd', 'dinf', 'stbl']);
@@ -305,7 +350,7 @@
         if (mediaHeader.length !== (isVideo ? 12 : 8)) malformed();
         const stbl = one(minf, 'stbl');
         await sampleDescription(stbl, one(minf, 'dinf'), isVideo);
-        await sampleTables(stbl, track.mdhd, mdats, isVideo);
+        await sampleTables(stbl, track.mdhd, intervals, isVideo);
         if (!isVideo) {
           const edit = one(track.node, 'edts', false);
           if (edit) await edits(edit, track.tkhd, track.mdhd, movie);
