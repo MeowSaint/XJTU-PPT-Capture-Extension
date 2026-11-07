@@ -44,7 +44,7 @@
 
 ## Task 2 — 工作台与动效
 
-状态：实现与验证已交接，独立审查中，尚未通过本任务 gate。BASE `3f666a69cf01071d03a08c2773f3507ca93cb33e`；唯一实现者 11bf1c1c-e5b7-44f8-85aa-227169d3190a（codex/gpt-6.1-sol / max）已停止。源码提交 `1c67cbb886346982397e6e90c26c2016726d402c`，完整 180 行报告单独提交 `e3952346d71f1bd78cf105b2987d01a241f430bf`。父代理已读报告，核对 HEAD 和范围：13 个白名单源码/测试文件、471 行增加和 101 行删除，另加自己的报告；只留下父代理预期的审计文件未暂存。
+状态：已完成，Task 2 的初审 I1 已在第 1/5 轮修复并经全新限定复审通过，无未解决发现。以下保留初次交付及修复过程，最终源码/报告 HEAD 为 `b7021c7c9ed49c8876e732ab2174aa9ee52f6700`。初次 BASE `3f666a69cf01071d03a08c2773f3507ca93cb33e`；唯一实现者 11bf1c1c-e5b7-44f8-85aa-227169d3190a（codex/gpt-6.1-sol / max）已停止。源码提交 `1c67cbb886346982397e6e90c26c2016726d402c`，完整 180 行报告单独提交 `e3952346d71f1bd78cf105b2987d01a241f430bf`。父代理已读报告，核对 HEAD 和范围：13 个白名单源码/测试文件、471 行增加和 101 行删除，另加自己的报告；只留下父代理预期的审计文件未暂存。
 
 - 宽工作区批量入口、结果旁全部/所选/整课导出与设置、来源全名和 0 路提示、明确独立的当前/批量课程、390px 堆叠、暗色/对比/实色回退及可中断局部反馈已实现。新增 38 行 [motion.js](../../../motion.js)，原 141 个 ID 全部保留，当前 154 个 ID 唯一；业务不等待动画，裁剪维持 1:1，新增可见卡片每批至多 12 张，恢复 1000 页不批量动画。
 - 顺序完整验证为 review 17/17、features 11/11、memory 14/14、library 24/24、improvements 25/25、release 17/17（34 资源），均 exit0。前三套已覆盖最终 JS/CSS，之后只删除两个局部编号 span；后三套和最终 focused 5/5 跑在最终 HTML 上。10 个改变的 JS/CJS 语法与 diff 检查通过，不能将早先整套记录冒称最后 HTML 字节的重复运行。
@@ -53,8 +53,17 @@
 - 可选录制在 newPage 因缺少 Playwright 专用 ffmpeg-1011 可执行文件失败，未安装或绕过，临时 hook 完全撤回后正常 focused 通过。没有交付视频；动态行为有实际 retarget/live reduce/焦点/关闭/12 卡片断言，不用静态图替代时间行为证明。全部 12 个后台作业已由实现者收集，浏览器/服务按 finally 关闭。
 - 全新 36e08890-e7cf-4ca2-af7f-638a1c81a200（codex/gpt-6.1-sol / max）完成 `3f666a69..e3952346` 两提交/141,490 B 的独立审查：Spec Issues found / Quality Needs fixes，C0/I1/M0。父代理已读完整 123 行报告。审查者一次连续读完 1,767 行包、180 行实现报告和指定材料，独立看三个要求截图及说明风险后加读的最终展开批量图；未运行 Git、命令、测试、浏览器、网络或子代理，未读父代理审计，已停止。其他已检查契约合规，未把环境未知当成缺陷。
 - I1：1440×900 展开含自动课次和待裁剪课次的批量区域后，预览滚动区下方的共用停止按钮被遮住；开始批量的实际处理器保留展开状态，controls 会启用同一个屏外 Stop。取消逻辑没有被证明损坏，但运行时需要另滚预览才能找到停止，违反设计原有可见性要求。父代理独立读最终展开图，并核对设计第 38 行、CSS 第 108–118 行及 HTML 第 192–200 行，确认这是具体布局缺陷；旧几何断言只测折叠批量状态，不能用通过记录替代这一缺失场景。
-- Ruling：在有限高度和展开批量状态下，运行中停止可见优先于“预览下”的初始静态位置；允许锚定同一个已有停止控件/操作行，不复制 ID 或处理器、不改取消及保留逻辑，不靠折叠批量或测试预滚动规避 — 代价是固定工具区可能占用少量可视空间，需要桌面和窄屏命中/遮挡检查。设计据此明确优先级，原实现者将承担修复 round 1/5，随后全新 scoped re-review；本任务 gate 仍未通过。
+- Ruling：在有限高度和展开批量状态下，运行中停止可见优先于“预览下”的初始静态位置；允许锚定同一个已有停止控件/操作行，不复制 ID 或处理器、不改取消及保留逻辑，不靠折叠批量或测试预滚动规避 — 代价是固定工具区可能占用少量可视空间，需要桌面和窄屏命中/遮挡检查。设计据此明确优先级，由原实现者承担修复 round 1/5；修复及全新 scoped re-review 结果见下，未跳过此 gate。
 - 父代理额外核实发布消费者：release workflow 的 56–61 行严格匹配唯一版本 span 与 README 当前版本字段。已要求 Task 2 原样保留恰好一个 `<span class="version">3.1.1</span>`，Task 3 再统一其文本为 3.1.2；不为改版修改发布 workflow。最终独立 ZIP 校验工具也检查这两个版本标记，当前只通过语法检查，尚未验证新安装包。
+
+### Task 2 I1 修复第 1/5 轮
+
+- 原实现者在干净 `fe1798b988e67e3e5eef71faada7a7cb82c6757e` 上修复。源码 `76341d6141b2105a243ce2ee290f892a9fa678c6` 仅改变 capture.html、style.css、tests/review.cjs，97 行增加、7 行删除；同一报告只追加第 182–273 行，报告提交/当前 HEAD 为 `b7021c7c9ed49c8876e732ab2174aa9ee52f6700`。父代理已读追加内容、核对干净 HEAD/提交范围；实现者已停止，六个本轮作业均收集、fixture 按 finally 清理。
+- 真实 RED 通过实际 batch-start、localhost MP4、OPFS、loadRemote、fastScan 与 save，仅在提交一帧后用有界 scanner 等待真实 abort；不赋值 busy/running/disabled 制造状态。旧 1280×800 中已启用 Stop 的 y=820.0625..854.0625，超出 viewport800 与 capture clip780，五点命中全 false，capture.scrollTop=0、批量仍展开。失败为 `AssertionError [ERR_ASSERTION]: enabled Stop escapes its actual clipping context viewport`。
+- 同一 Start/Stop 组移到 app-shell 保留第三行，窄屏底部 sticky/nowrap，操作行高 55px。capture.js、取消/保留算法均未改变，154 个 ID 完全一致且唯一、精确 3.1.1 span 仍唯一。先 focused GREEN，再仅调整窄屏换行并重跑最终 focused 1 组/四尺寸；之后完整 review18/18 → memory14/14 → library24/24 顺序 exit0，覆盖完全相同的最终 HTML/CSS/新增测试。没有把旧 features/improvements/release 记录扩称本轮重跑。
+- 实际运行几何覆盖 1280×800、1440×900、1920×1080、390×844；Stop 分别为 `(668,756,120,34)`、`(668,856,120,34)`、`(668,1036,120,34)`、`(254,800,120,34)`，五点均命中。每轮真实点击后 immediateAbort=true、state=stopped、batchStillOpen=true，逐记录核对旧/新页全部元数据、签名、图片字节 `2→3→3`。父代理独立读过最终 [运行中 1440](../../../.test-output/v3.1.2/review-LR5goa/fix-1-expanded-running-1440x900.png) 与 [运行中 390](../../../.test-output/v3.1.2/review-LR5goa/fix-1-expanded-running-390x844.png)：同一停止按钮位于可见底部行，未见横向裁切；窄屏仍通过纵向滚动查看列表其余内容。
+- memory 维持 1000 页/节点/scroll、maxReads2、restore animations0、bounded/oldRevoked/reused/preservedScroll=true，本轮 activeURLs=allowedImages=10；它随结果区高度变化，不是固定 13。review/library 的实际脚本错误与 blocked 列表为空；memory 错误列表为空、会阻断非本地请求但不累计零尝试列表。仍是 macOS arm64 / Node26.13.0 / Chromium156.0.8078.4，不扩大为最小版本、真实学校视频或原生许可弹窗证明。
+- 正确定界包是上次已审查 `e3952346..b7021c7`，三提交 49,415 B，包含中间父代理文档裁定，不能改用 fix-start。全新 affdb2c4-496e-43c6-8b11-8fad49344d8c（codex/gpt-6.1-sol / high）仅核对 I1 和本次 diff 新破坏；完整只读 brief、包、追加报告和两张最终运行图已交接，无命令/Git/重复测试/联网/委派权限。该审查者返回 I1 ADDRESSED，Scoped Spec APPROVED / Quality APPROVED，新发现 C0/I0/M0，Out-of-Scope None；父代理读完完整 96 行报告。它一次读完 450 行修复包、限定材料与两张最终运行图，以额外的具体生产者/消费者问题核对真实 source-load/scan/save/Stop/保留链路，未执行测试、Git、命令、浏览器或联网。报告将同步源码证据与下一次浏览器 evaluation 的 abort 断言分开，不把后者夸成计时指标；原始六套与本轮覆盖源证据、十个 URL 的视口限定和权限/最低版本边界均保留。实现者和审查者已停止，Task 2 gate 完成；Task 3 可从后续干净文档提交启动。
 
 ## Task 3 — 版本与整体验证
 
