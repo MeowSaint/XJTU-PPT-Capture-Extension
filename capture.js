@@ -9,6 +9,7 @@ let draggedPageId = null, reviewBusy = false, exportBusy = false, pageWrites = 0
 let selectedPages = new Set(), selectionAnchor = null, previewPageId = null, previewReturn = null, loadedIdentity = null;
 let similarReview = null;
 let batchJobs = [], batchPage = '', batchRunning = false, batchStopRequested = false, activeBatchJob = null, batchDiscoverySerial = 0;
+let batchDiscovery = null;
 const referrerRule = 16220;
 let referrerOrigins = new Set(), referrerPage = '', referrerWrites = Promise.resolve();
 let sourceCourse = {}, sourceCoursePage = '', namingPage = '', namingManual = false, namingSave = Promise.resolve(), discoverySerial = 0;
@@ -29,7 +30,7 @@ const dbReady = PPTPageStore.open({blocked: () => status('请先关掉其他已�
   if (activeLesson) applyLesson();
   else { namingManual = !!saved.naming?.manual; setNaming(saved.naming?.course || sourceCourse, saved.naming?.page || sourceCoursePage); }
   const batch = savedBatches.find(item => item.page === activeLesson?.page) || savedBatches[0];
-  if (batch) { batchPage = batch.page; batchJobs = structuredClone(batch.jobs); renderBatchJobs(); }
+  if (batch) { batchPage = batch.page; batchJobs = structuredClone(batch.jobs); renderBatchJobs(); $('batch-status').textContent = discoverySummary(batchJobs, batch.discovery); }
   ready = true; render(); renderLibrary(); controls();
 });
 dbReady.then(() => status('已恢复保存的课次和任务。选择课次后重新加载原视频，即可继续提取或复核。')).catch(e => status('本地存储不可用：' + e.message));
@@ -244,6 +245,7 @@ $('library-delete').onclick = async () => {
 };
 function retainBatch(snapshot) {
   const existing = savedBatches.findIndex(item => item.page === snapshot.page);
+  if (snapshot.discovery === undefined && savedBatches[existing]?.discovery !== undefined) snapshot.discovery = structuredClone(savedBatches[existing].discovery);
   if (existing < 0) savedBatches.push(snapshot); else savedBatches[existing] = snapshot;
 }
 function jobBatch(job = activeBatchJob) {
@@ -271,7 +273,7 @@ function syncWorkspace() {
   $('batch-course-context').textContent = '批量列表课程 · ' + (batchJobs[0]?.course?.name || (batchPage ? '未命名课程' : '尚未读取'));
   const selectedJobs = batchJobs.filter(job => PPTBatch.automatic(job) && job.selected && job.state !== 'done').length;
   const manualJobs = batchJobs.filter(job => job.requiresCrop && !PPTBatch.automatic(job) && job.state !== 'done').length;
-  $('batch-count').textContent = batchJobs.length ? `共 ${batchJobs.length} 节 · 已选自动 ${selectedJobs} 节${manualJobs ? ` · 待框选 ${manualJobs} 节` : ''}` : '未读取';
+  $('batch-count').textContent = batchJobs.length ? `共 ${batchJobs.length} 节 · 已选自动 ${selectedJobs} 节${manualJobs ? ` · 待框选 ${manualJobs} 节` : ''} · ${discoverySummary(batchJobs, savedBatches.find(item => item.page === batchPage)?.discovery)}` : '未读取';
   const options = pdfOptions();
   $('export-options-summary').textContent = [options.layout === 'handout' ? 'A4 讲义 · 每页两张' : '原始页面 · 每页一张', options.timestamps ? '视频时间' : '', options.bookmarks ? '页码书签' : ''].filter(Boolean).join(' · ');
 }
@@ -394,7 +396,7 @@ function timecode(seconds) {
   const s = Math.max(0, Math.floor(seconds));
   return `${Math.floor(s / 3600).toString().padStart(2, '0')}:${Math.floor(s / 60 % 60).toString().padStart(2, '0')}:${(s % 60).toString().padStart(2, '0')}`; /* taste-skill-ignore */
 }
-function busy() { return !studyAccepted || !!task || !!realtimeTimer || realtimeBusy || batchRunning || reviewBusy || exportBusy || pageWrites > 0; }
+function busy() { return !studyAccepted || !!task || !!realtimeTimer || realtimeBusy || batchRunning || !!batchDiscovery || reviewBusy || exportBusy || pageWrites > 0; }
 function namingSnapshot() { return {course: namingInfo(), page: namingPage, manual: namingManual}; }
 function restoreNaming(snapshot) { namingManual = snapshot.manual; setNaming(snapshot.course, snapshot.page); }
 function forgetUndo() {
@@ -691,7 +693,7 @@ function controls() {
   $('course-pdf').disabled = $('course-zip').disabled;
   $('batch-course-pdf').disabled = $('batch-course-zip').disabled;
   document.querySelectorAll('#suspect-ranges button').forEach(button => { button.disabled = active || (!button.classList.contains('suspect-dismiss') && !sourceReady); });
-  $('stop').disabled = !task && !realtimeTimer && !batchRunning;
+  $('stop').disabled = !task && !realtimeTimer && !batchRunning && !batchDiscovery;
   $('shot').disabled = active || !sourceReady || !ready;
   $('clear').disabled = active || !ready || !pages.length;
   $('pdf').disabled = active || !pages.length; $('export-zip').disabled = active || !pages.length;
@@ -708,6 +710,8 @@ function controls() {
   $('end').disabled = !stream || active;
   $('release-cache').disabled = active || !(sourceReady || objectURL || hls || stream || videoCache);
   $('batch-discover').disabled = active;
+  $('batch-discover').textContent = batchDiscovery ? '正在读取课次…' : '读取课程课次';
+  $('batch-retry').disabled = active || !batchJobs.some(job => job.discovery?.state === 'error');
   $('batch-select').disabled = active || !batchJobs.length;
   $('batch-start').disabled = active || !batchJobs.some(job => PPTBatch.automatic(job) && job.selected && job.state !== 'done');
   document.querySelectorAll('#batch-jobs input').forEach(input => {
@@ -1185,6 +1189,7 @@ function downloadBlob(blob, name, cache) {
   }, 60000);
 }
 window.addEventListener('pagehide', () => {
+  stopBatchDiscovery();
   for (const url of downloadURLs) URL.revokeObjectURL(url);
   if (previewURL) URL.revokeObjectURL(previewURL);
   for (const [image, state] of thumbnailStates) releaseThumbnail(image, state);
@@ -1443,9 +1448,11 @@ function renderBatchJobs() {
     choose.type = 'checkbox'; choose.checked = !!job.selected; choose.disabled = batchRunning || job.state === 'done' || !PPTBatch.automatic(job);
     choose.onchange = () => { job.selected = choose.checked; persistBatch().catch(e => status('批量选择保存失败：' + e.message)); controls(); };
     const size = job.size ? ` · ${(job.size / 1024 ** 2).toFixed(0)} MB` : '';
-    title.textContent = `${job.course.date || '未知日期'} ${String(job.course.start || '').slice(0, 5)} · ${job.sourceName}${size}${job.requiresCrop ? ' · 仅有 0 路视频' : ''}`;
-    state.className = `batch-state ${job.state}`; state.textContent = `${labels[job.state] || job.state} · ${count} 页`;
-    if (job.error) state.title = job.error;
+    title.textContent = `${job.course?.date || '未知日期'} ${String(job.course?.start || '').slice(0, 5)} · ${job.sourceName || job.captureCode || job.id}${size}${job.requiresCrop ? ' · 仅有 0 路视频' : ''}`;
+    const acquisition = job.discovery, acquisitionLabels = {pending: '读取中', ready: '读取成功', error: '读取失败', unavailable: '确认无可用视频', skipped: '未开课/不可读取'};
+    state.className = `batch-state ${acquisition?.state === 'error' ? 'failed' : job.state}`;
+    state.textContent = `${labels[job.state] || job.state} · ${count} 页${acquisition ? ` · ${acquisitionLabels[acquisition.state]}${acquisition.code ? ` [${acquisition.code}]` : ''}${acquisition.message ? `：${acquisition.message}` : ''}${acquisition.attempts ? `（尝试 ${acquisition.attempts} 次）` : ''}` : ''}`;
+    if (job.error) { state.title = job.error; state.textContent += ' · ' + job.error; }
     download.textContent = '下载本节 PDF'; download.disabled = batchRunning || !count;
     download.onclick = async () => {
       if (busy()) return;
@@ -1455,7 +1462,7 @@ function renderBatchJobs() {
       finally { exportBusy = false; controls(); }
     };
     row.append(choose, title, state);
-    if (job.requiresCrop) {
+    if (job.requiresCrop && (!job.discovery || job.discovery.state === 'ready')) {
       const manual = document.createElement('span'), select = document.createElement('select'), prepare = document.createElement('button');
       manual.className = 'batch-manual';
       for (const item of job.options) { const option = document.createElement('option'); option.value = item.url; option.textContent = item.sourceName; select.append(option); }
@@ -1493,42 +1500,117 @@ function renderBatchJobs() {
   $('batch-count').textContent = batchJobs.length ? `共 ${batchJobs.length} 节，自动 ${selected} 节${manual ? `，需框选 ${manual} 节` : ''}` : '未读取';
   controls();
 }
-async function discoverBatch(tabId = Number($('course').value), automatic = false) {
+function discoverySummary(jobs, metadata) {
+  const count = name => jobs.filter(job => job.discovery?.state === name).length;
+  const integrity = metadata?.complete === true ? '目录已列举完整' : metadata?.complete === false ? '目录不完整' : '目录完整性未知';
+  const resolved = jobs.filter(job => job.discovery && job.discovery.state !== 'pending').length;
+  return `已知 ${metadata?.total ?? jobs.length} 节 · 已处理 ${resolved} 节 · 读取成功 ${count('ready')} · 失败 ${count('error')} · 无视频 ${count('unavailable')} · 跳过 ${count('skipped')} · ${integrity}`;
+}
+function discoveryMessage(session, message, cancellable = true) {
+  const signal = cancellable ? session.controller.signal : null;
+  return new Promise((resolve, reject) => {
+    let timer;
+    const cleanup = () => { clearTimeout(timer); signal?.removeEventListener('abort', abort); };
+    const abort = () => { cleanup(); reject(new DOMException('课程读取已停止', 'AbortError')); };
+    if (signal?.aborted) return abort();
+    signal?.addEventListener('abort', abort, {once: true});
+    timer = setTimeout(() => { cleanup(); reject(Error('课程消息等待超过 10000ms，请重试')); }, 10000);
+    Promise.resolve().then(() => chrome.tabs.sendMessage(session.tabId, message, {frameId: 0})).then(reply => {
+      if (message.type === 'PPT_BATCH_DISCOVER' && reply?.requestId && (session.stopRequested || !session.current())) {
+        discoveryMessage(session, {type: 'PPT_BATCH_CANCEL', requestId: reply.requestId}, false).catch(() => {});
+      }
+      cleanup(); resolve(reply);
+    }, error => { cleanup(); reject(error); });
+  });
+}
+function discoveryPollWait(signal) {
+  return new Promise((resolve, reject) => {
+    const abort = () => { clearTimeout(timer); signal.removeEventListener('abort', abort); reject(new DOMException('课程读取已停止', 'AbortError')); };
+    const timer = setTimeout(() => { signal.removeEventListener('abort', abort); resolve(); }, 1000);
+    signal.addEventListener('abort', abort, {once: true}); if (signal.aborted) abort();
+  });
+}
+function stopBatchDiscovery() {
+  const session = batchDiscovery;
+  if (!session) return;
+  session.stopRequested = true; session.controller.abort();
+  if (session.requestId) discoveryMessage(session, {type: 'PPT_BATCH_CANCEL', requestId: session.requestId}, false).catch(() => {});
+  $('batch-status').textContent = '课程读取已停止，正在保留已知课次。';
+}
+function mergeDiscoveredJobs(result) {
+  const previous = savedBatches.find(item => item.page === result.page)?.jobs || (batchPage === result.page ? batchJobs : []);
+  const jobs = result.jobs.map(job => {
+    const existing = previous.find(old => old.id === job.id);
+    if (job.discovery && job.discovery.state !== 'ready') return {...existing, ...job, state: existing?.state || job.state || 'pending', selected: existing?.selected ?? job.selected ?? false};
+    if (job.requiresCrop && existing) {
+      const option = (job.options || []).find(item => sameMediaSource(existing, item));
+      if (option) job = {...job, ...option};
+    }
+    const unchanged = sameMediaSource(existing, job), lesson = batchLesson(job, result.page), count = lesson ? allPages.filter(page => page.lessonId === lesson.id).length : 0;
+    const done = (lesson?.task?.state === 'done' && sameMediaSource(lesson.source, job)) || (unchanged && existing?.state === 'done');
+    const next = {...existing, ...job, ...(existing?.cropOverride ? {cropOverride: structuredClone(existing.cropOverride)} : {}),
+      manualPrepared: !!existing?.manualPrepared, cropRejected: !!existing?.cropRejected || (!!existing?.cropOverride && !unchanged), cropConfirmed: unchanged && !!existing?.cropConfirmed};
+    return {...next, selected: done || !PPTBatch.automatic(next) ? false : job.discovery ? job.selected ?? true : existing?.selected ?? true,
+      state: done ? 'done' : count ? 'partial' : unchanged && ['failed', 'stopped', 'manual'].includes(existing?.state) ? existing.state : PPTBatch.automatic(next) ? 'pending' : 'needs-crop', error: unchanged ? existing?.error || '' : ''};
+  });
+  for (const old of previous) if (!jobs.some(job => job.id === old.id)) jobs.push(old);
+  return jobs;
+}
+async function applyDiscovery(session, result) {
+  if (!session.current() || result.page !== session.page || !Array.isArray(result.jobs)) return false;
+  const jobs = mergeDiscoveredJobs(result), listing = session.retryOnly ? session.previousDiscovery : result;
+  const discovery = {complete: listing?.complete, total: listing?.total ?? result.total, eligible: listing?.eligible ?? result.eligible,
+    courseId: listing?.courseId ?? result.courseId, courseName: listing?.courseName ?? result.courseName,
+    progress: result.progress, failures: [...(session.retryOnly ? session.previousDiscovery?.failures?.filter(item => !item.jobId) || [] : []), ...(result.failures || [])]};
+  await PPTLibrary.batch(db, result.page, jobs, discovery);
+  retainBatch(structuredClone({page: result.page, jobs, discovery}));
+  if (!session.current()) return false;
+  batchPage = result.page; batchJobs = jobs; session.lastResult = result;
+  if (activeBatchJob && loadedIdentity?.coursePage === batchPage) activeBatchJob = batchJobs.find(job => job.id === activeBatchJob.id && sameMediaSource(job, loadedIdentity)) || activeBatchJob;
+  renderBatchJobs();
+  const reason = discovery.failures?.filter(item => !item.jobId).map(item => item.message).join('；');
+  $('batch-status').textContent = discoverySummary(jobs, discovery) + (reason ? ' · ' + reason : '');
+  return true;
+}
+async function discoverBatch(tabId = Number($('course').value), automatic = false, retryOnly = false) {
   if (busy() || !tabId) return;
-  const serial = ++batchDiscoverySerial;
-  let current = () => serial === batchDiscoverySerial && !busy();
+  const serial = ++batchDiscoverySerial, selected = $('course').value, lessonId = activeLesson?.id;
+  const session = {tabId, page: coursePage, retryOnly, previousDiscovery: structuredClone(savedBatches.find(item => item.page === coursePage)?.discovery), controller: new AbortController(), requestId: '', stopRequested: false};
+  session.current = () => batchDiscovery === session && serial === batchDiscoverySerial && $('course').value === selected && activeLesson?.id === lessonId && coursePage === session.page;
+  batchDiscovery = session; controls();
   $('batch-panel').open = true; $('batch-status').textContent = automatic ? '检测到课程列表页，正在读取全部课次…' : '正在读取课程列表和录像信息…';
   try {
-    await dbReady; if (!current()) return;
-    const selected = $('course').value, lessonId = activeLesson?.id, page = coursePage;
-    current = () => serial === batchDiscoverySerial && !busy() && $('course').value === selected && activeLesson?.id === lessonId && coursePage === page;
-    const result = await chrome.tabs.sendMessage(tabId, {type: 'PPT_BATCH_DISCOVER'}, {frameId: 0});
-    if (!current()) return;
-    if (!result?.ok) throw Error(result?.error || '课程页没有返回批量数据');
-    const previous = savedBatches.find(item => item.page === result.page)?.jobs || (batchPage === result.page ? batchJobs : []);
-    const jobs = result.jobs.map(job => {
-      const existing = previous.find(old => old.id === job.id);
-      if (job.requiresCrop && existing) {
-        const options = job.options || [], option = options.find(item => sameMediaSource(existing, item));
-        if (option) job = {...job, ...option};
-      }
-      const unchanged = sameMediaSource(existing, job), lesson = batchLesson(job, result.page), count = lesson ? allPages.filter(page => page.lessonId === lesson.id).length : 0;
-      const done = (lesson?.task?.state === 'done' && sameMediaSource(lesson.source, job)) || (unchanged && existing?.state === 'done');
-      const next = {...job, ...(existing?.cropOverride ? {cropOverride: structuredClone(existing.cropOverride)} : {}),
-        manualPrepared: !!existing?.manualPrepared, cropRejected: !!existing?.cropRejected || (!!existing?.cropOverride && !unchanged), cropConfirmed: unchanged && !!existing?.cropConfirmed};
-      return {...next, selected: done || !PPTBatch.automatic(next) ? false : existing?.selected ?? true,
-        state: done ? 'done' : count ? 'partial' : unchanged && ['failed', 'stopped', 'manual'].includes(existing?.state) ? existing.state : PPTBatch.automatic(next) ? 'pending' : 'needs-crop', error: unchanged ? existing?.error || '' : ''};
-    });
-    await PPTLibrary.batch(db, result.page, jobs); retainBatch(structuredClone({page: result.page, jobs}));
-    if (!current()) return;
-    batchPage = result.page; batchJobs = jobs;
-    if (activeBatchJob && loadedIdentity?.coursePage === batchPage) activeBatchJob = batchJobs.find(job => job.id === activeBatchJob.id && sameMediaSource(job, loadedIdentity)) || activeBatchJob;
-    renderBatchJobs();
-    const skipped = result.total - result.eligible, missing = result.failures?.length || 0, manual = batchJobs.filter(job => job.requiresCrop && !PPTBatch.automatic(job) && job.state !== 'done').length;
-    $('batch-status').textContent = `读取完成：${result.total} 个课次，找到 ${batchJobs.length} 个视频${skipped ? `，跳过 ${skipped} 个未完成/转码中课次` : ''}${missing ? `，${missing} 个录像缺少可用视频` : ''}${manual ? `。其中 ${manual} 节只有 0 路视频，请逐节选择并框选 PPT 区域` : ''}。`;
+    await dbReady; if (!session.current()) return;
+    const previous = structuredClone(savedBatches.find(item => item.page === session.page)?.jobs || (batchPage === session.page ? batchJobs : []));
+    let reply = await discoveryMessage(session, {type: 'PPT_BATCH_DISCOVER', previous, retryOnly});
+    if (!session.current()) return;
+    if (!reply?.ok) throw Error(reply?.error || '课程页没有返回批量数据');
+    // Compatibility with already-injected content scripts that return one terminal snapshot.
+    if (!reply.pending && Array.isArray(reply.jobs)) { await applyDiscovery(session, reply); return; }
+    if (!reply.requestId) throw Error('课程页没有返回读取请求编号');
+    session.requestId = reply.requestId;
+    while (session.current()) {
+      await discoveryPollWait(session.controller.signal);
+      reply = await discoveryMessage(session, {type: 'PPT_BATCH_STATUS', requestId: session.requestId});
+      if (!session.current()) return;
+      if (!reply?.ok || reply.requestId !== session.requestId) throw Error(reply?.error?.message || reply?.error || '课程读取请求已失效');
+      if (reply.result && !await applyDiscovery(session, reply.result)) throw Error('课程页面已切换，忽略过期读取结果');
+      if (reply.error) throw Error(reply.error.message || reply.error);
+      if (!reply.pending) break;
+    }
   } catch (error) {
-    if (!current()) return;
-    renderBatchJobs(); $('batch-status').textContent = '批量读取失败：' + error.message;
+    if (!session.current()) return;
+    if (session.requestId) discoveryMessage(session, {type: 'PPT_BATCH_CANCEL', requestId: session.requestId}, false).catch(() => {});
+    if (session.lastResult) {
+      const partial = structuredClone(session.lastResult); partial.complete = false;
+      for (const job of partial.jobs) if (job.discovery?.state === 'pending') job.discovery = {state: 'error', code: session.stopRequested ? 'CANCELLED' : 'MESSAGE', message: error.message, attempts: 0};
+      partial.failures = [...(partial.failures || []).filter(item => !item.jobId), ...partial.jobs.filter(job => job.discovery?.state === 'error').map(job => ({jobId: job.id, scheduleId: job.scheduleId, ...job.discovery}))];
+      partial.progress = {phase: session.stopRequested ? 'cancelled' : 'error', total: partial.jobs.length, resolved: partial.jobs.filter(job => job.discovery?.state !== 'pending').length};
+      await applyDiscovery(session, partial).catch(saveError => { $('batch-status').textContent = '目录保存失败：' + saveError.message; });
+    }
+    $('batch-status').textContent = (session.stopRequested ? '课程读取已停止，已保留已知课次。' : '批量读取失败：' + error.message) + ' ' + discoverySummary(batchJobs, savedBatches.find(item => item.page === batchPage)?.discovery);
+  } finally {
+    if (batchDiscovery === session) { batchDiscovery = null; controls(); }
   }
 }
 async function prepareManualBatchJob(job, permission) {
@@ -1597,6 +1679,7 @@ async function runBatch(permission) {
   }
 }
 $('batch-discover').onclick = () => discoverBatch();
+$('batch-retry').onclick = () => discoverBatch(Number($('course').value), false, true);
 $('batch-select').onclick = () => {
   const selectable = batchJobs.filter(job => PPTBatch.automatic(job) && job.state !== 'done'), choose = selectable.some(job => !job.selected);
   selectable.forEach(job => { job.selected = choose; }); persistBatch().catch(e => status('批量选择保存失败：' + e.message)); renderBatchJobs();
@@ -1637,6 +1720,7 @@ $('run').onclick = () => {
   else fastScan();
 };
 $('stop').onclick = () => {
+  if (batchDiscovery) { stopBatchDiscovery(); return; }
   if (batchRunning) batchStopRequested = true;
   task?.abort(); stopRealtime();
   if (!task) status(batchRunning ? '正在停止批量任务，已完成的截图会保留。' : '已停止实时截取，截图已保留。');

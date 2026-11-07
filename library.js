@@ -46,20 +46,29 @@
       try { result = action(tx); } catch (error) { tx.abort(); reject(error); }
     });
   }
+  function saveBatch(settings, snapshot) {
+    const name = 'batch:' + snapshot.page;
+    if (snapshot.discovery !== undefined) { settings.put(snapshot, name); return; }
+    const read = settings.get(name);
+    read.onsuccess = () => {
+      if (read.result?.discovery !== undefined) snapshot.discovery = structuredClone(read.result.discovery);
+      settings.put(snapshot, name);
+    };
+  }
   function put(db, lesson, relatedBatch = null) {
     const snapshot = structuredClone(lesson), batchSnapshot = relatedBatch && structuredClone(relatedBatch);
     return transaction(db, ['settings'], tx => {
       const settings = tx.objectStore('settings');
       settings.put(snapshot, 'lesson:' + snapshot.id);
-      if (batchSnapshot) settings.put(batchSnapshot, 'batch:' + batchSnapshot.page);
+      if (batchSnapshot) saveBatch(settings, batchSnapshot);
     });
   }
   function activate(db, id) {
     return transaction(db, ['settings'], tx => { tx.objectStore('settings').put(id, 'activeLesson'); });
   }
-  function batch(db, page, jobs) {
-    const snapshot = structuredClone({page, jobs});
-    return transaction(db, ['settings'], tx => { tx.objectStore('settings').put(snapshot, 'batch:' + page); });
+  function batch(db, page, jobs, discovery = undefined) {
+    const snapshot = structuredClone({page, jobs, ...(discovery === undefined ? {} : {discovery})});
+    return transaction(db, ['settings'], tx => { saveBatch(tx.objectStore('settings'), snapshot); });
   }
   function restore(db) {
     return transaction(db, ['pages', 'settings'], tx => {

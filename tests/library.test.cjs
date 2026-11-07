@@ -55,7 +55,7 @@ test('lesson writes remain compatible and optional batch snapshots share one set
     const writes = [], transactions = []; let tx;
     const db = {transaction(stores, mode) {
       transactions.push({stores, mode});
-      return tx = {objectStore(name) { assert.equal(name, 'settings'); return {put(value, key) { writes.push({value, key}); }}; }};
+      return tx = {objectStore(name) { assert.equal(name, 'settings'); return {get() { return {set onsuccess(fn) { fn(); }}; }, put(value, key) { writes.push({value, key}); }}; }};
     }};
     const lesson = {id: 'one', crop: {x: .1}}, batch = {page: 'local-course', jobs: [{id: 'job', cropConfirmed: true}]};
     const pending = withBatch ? library.put(db, lesson, batch) : library.put(db, lesson);
@@ -74,10 +74,32 @@ test('a related batch write exception aborts the lesson transaction and rejects'
   const failure = Error('batch write failed');
   const db = {transaction() {
     transactions++;
-    return {abort() { aborted = true; }, objectStore() { return {put(_value, key) { if (key.startsWith('batch:')) throw failure; }}; }};
+    return {abort() { aborted = true; }, objectStore() { return {get() { return {set onsuccess(fn) { fn(); }}; }, put(_value, key) { if (key.startsWith('batch:')) throw failure; }}; }};
   }};
   await assert.rejects(library.put(db, {id: 'one'}, {page: 'local-course', jobs: []}), error => error === failure);
   assert.equal(aborted, true); assert.equal(transactions, 1);
+});
+
+test('discovery metadata survives explicit batch, legacy batch and related lesson writes', async () => {
+  const saved = new Map(); let tx;
+  const db = {transaction() {
+    tx = {objectStore() { return {
+      get(key) { return {result: saved.get(key), set onsuccess(fn) { fn(); }}; },
+      put(value, key) { saved.set(key, structuredClone(value)); }
+    }; }};
+    return tx;
+  }};
+  const commit = async promise => { tx.oncomplete(); await promise; };
+  const discovery = {complete: false, total: 26, progress: {resolved: 26}, failures: [{code: 'TIMEOUT'}]};
+  await commit(library.batch(db, 'course', [{id: 'one'}], discovery));
+  discovery.total = 0;
+  await commit(library.batch(db, 'course', [{id: 'one', selected: false}]));
+  await commit(library.put(db, {id: 'lesson'}, {page: 'course', jobs: [{id: 'one', state: 'done'}]}));
+  assert.equal(saved.get('batch:course').discovery.total, 26);
+  assert.equal(saved.get('batch:course').discovery.complete, false);
+  assert.equal(saved.get('batch:course').jobs[0].state, 'done');
+  await commit(library.batch(db, 'old', []));
+  assert.equal(Object.hasOwn(saved.get('batch:old'), 'discovery'), false, 'legacy snapshot stays unknown');
 });
 
 test('suspect ranges merge overlapping intervals, ignore invalid bounds and keep chronological order', () => {

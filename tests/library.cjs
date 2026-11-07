@@ -280,6 +280,154 @@ function zipEntries(bytes) {
       assert.equal(await page.locator('#batch-panel').evaluate(panel => panel.getBoundingClientRect().width > 850), true);
     });
 
+    await test('discovery polling retains 26 rows, shows failures, retries and restores metadata', async () => {
+      const base = origin + '/study-capture-courses/42/preview-detail';
+      await seed({lessons: [lesson('directory')]});
+      await page.evaluate(base => {
+        coursePage = base; $('course').replaceChildren(new Option('Synthetic course', '1'));
+        window.directoryMessages = []; window.directoryFinish = false; window.directoryPolls = [];
+        const jobs = Array.from({length: 26}, (_, index) => ({id: 'c' + index, captureCode: 'c' + index,
+          course: {name: 'Synthetic course', date: '2026-11-07'}, state: 'pending', selected: true,
+          ...(index < 21 ? {url: location.origin + '/2-' + index + '.mp4', sourceName: '2-' + index + '.mp4'} : {}),
+          discovery: index < 21 ? {state: 'ready', code: '', message: '', attempts: 1} : {state: 'error', code: index === 25 ? 'TIMEOUT' : 'HTTP', message: index === 25 ? 'body timeout' : 'HTTP 503', attempts: 3}}));
+        window.directorySnapshot = {page: base, jobs, total: 26, eligible: 26, complete: false, failures: []};
+        chrome.tabs = {sendMessage: async (_tab, message) => {
+          directoryMessages.push(structuredClone(message));
+          if (message.type === 'PPT_BATCH_DISCOVER') {
+            window.directoryRetry = message.retryOnly;
+            return {ok: true, pending: true, requestId: message.retryOnly ? 'retry' : 'initial'};
+          }
+          if (message.type === 'PPT_BATCH_STATUS') {
+            directoryPolls.push(Date.now());
+            const result = structuredClone(directorySnapshot);
+            if (directoryRetry) for (const job of result.jobs.filter(job => job.discovery.state === 'error')) {
+              job.url = location.origin + '/2-' + job.id + '.mp4'; job.sourceName = '2-' + job.id + '.mp4'; job.discovery = {state: 'ready', code: '', message: '', attempts: 1};
+            }
+            result.complete = directoryRetry || directoryFinish;
+            return {ok: true, requestId: message.requestId, pending: !directoryRetry && !directoryFinish, result};
+          }
+          return {ok: true, requestId: message.requestId};
+        }};
+        window.directoryRun = discoverBatch(1);
+      }, base);
+      await page.waitForFunction(() => batchJobs.length === 26);
+      assert.equal(await page.locator('#batch-start').isDisabled(), true, 'running discovery owns busy guard');
+      assert.equal(await page.locator('#stop').isDisabled(), false);
+      assert.equal(await page.locator('#batch-jobs .batch-job').count(), 26);
+      assert.match(await page.locator('#batch-status').textContent(), /读取成功 21.*失败 5/);
+      assert.match(await page.locator('[data-job-id="c25"] .batch-state').textContent(), /TIMEOUT.*body timeout.*3 次/);
+      assert.equal(await page.locator('[data-job-id="c25"] input').isDisabled(), true);
+      await page.screenshot({path: path.join(output, 'discovery-progress.png')});
+      await page.waitForFunction(() => directoryPolls.length >= 2);
+      assert.equal(await page.evaluate(() => directoryPolls[1] - directoryPolls[0] >= 900), true);
+      await page.evaluate(() => { directoryFinish = true; }); await page.evaluate(() => directoryRun);
+      assert.equal(await page.locator('#batch-start').isDisabled(), false);
+      assert.equal(await page.locator('#batch-retry').isDisabled(), false);
+      await page.locator('#batch-retry').click(); await page.waitForFunction(() => !batchDiscovery && batchJobs.every(job => job.discovery.state === 'ready'));
+      assert.equal(await page.evaluate(() => directoryMessages.find(message => message.retryOnly)?.previous.length), 26);
+      assert.equal(await page.locator('#batch-retry').isDisabled(), true);
+      await page.evaluate(async () => {
+        const snapshot = savedBatches.find(item => item.page === batchPage);
+        await PPTLibrary.batch(db, batchPage, batchJobs);
+        await PPTLibrary.put(db, activeLesson, {page: batchPage, jobs: batchJobs});
+        retainBatch({page: batchPage, jobs: batchJobs});
+        if (!snapshot.discovery.complete || !savedBatches.find(item => item.page === batchPage).discovery.complete) throw Error('metadata lost');
+      });
+      await page.reload(); await page.waitForFunction(() => ready);
+      assert.equal((await stored()).batches.find(item => item.page === base).discovery.complete, true);
+      assert.match(await page.locator('#batch-status').textContent(), /读取成功 26.*目录已列举完整/);
+      assert.equal(await page.evaluate(() => sourceReady || video.hasAttribute('src')), false);
+      await page.evaluate(async base => {
+        coursePage = base; $('course').replaceChildren(new Option('Synthetic course', '1'));
+        const snapshot = savedBatches.find(item => item.page === base);
+        snapshot.discovery = {...snapshot.discovery, complete: false, total: 40, eligible: 35, failures: [{code: 'PAGINATION_LIMIT', message: 'partial listing'}]};
+        await PPTLibrary.batch(db, base, batchJobs, snapshot.discovery);
+        chrome.tabs = {sendMessage: async () => ({ok: true, page: base, jobs: structuredClone(batchJobs), total: 26, eligible: 26, complete: true})};
+        await discoverBatch(1, false, true);
+      }, base);
+      const retriedPartial = (await stored()).batches.find(item => item.page === base).discovery;
+      assert.equal(retriedPartial.complete, false); assert.equal(retriedPartial.total, 40); assert.equal(retriedPartial.eligible, 35);
+      assert.equal(retriedPartial.failures[0].code, 'PAGINATION_LIMIT');
+      assert.match(await page.locator('#batch-status').textContent(), /已知 40.*目录不完整/);
+    });
+
+    await test('discovery Stop settles promptly, ignores late results and bounds stalled messages', async () => {
+      const base = origin + '/study-capture-courses/42/preview-detail';
+      await seed({lessons: [lesson('cancel-directory')]});
+      await page.evaluate(base => {
+        coursePage = base; $('course').replaceChildren(new Option('Synthetic course', '1'));
+        window.directoryCancelled = []; window.releaseDirectoryStatus = null;
+        chrome.tabs = {sendMessage: async (_tab, message) => {
+          if (message.type === 'PPT_BATCH_DISCOVER') return {ok: true, pending: true, requestId: 'stop'};
+          if (message.type === 'PPT_BATCH_CANCEL') { directoryCancelled.push(message.requestId); return {ok: true}; }
+          return new Promise(resolve => { window.releaseDirectoryStatus = resolve; });
+        }};
+        window.directoryRun = discoverBatch(1);
+      }, base);
+      await page.waitForFunction(() => !!window.releaseDirectoryStatus);
+      const stopped = Date.now(); await page.locator('#stop').click(); await page.waitForFunction(() => !batchDiscovery);
+      assert(Date.now() - stopped < 1500, 'Stop does not wait for the hung status response');
+      assert.equal(await page.evaluate(() => directoryCancelled.includes('stop')), true);
+      await page.evaluate(base => { releaseDirectoryStatus({ok: true, pending: false, requestId: 'stop', result: {page: base, jobs: [{id: 'late'}]}}); }, base);
+      assert.equal((await stored()).batches.length, 0, 'late result cannot write stale rows');
+      await page.evaluate(() => {
+        window.originalDirectoryTimeout = window.setTimeout; window.directoryDeadline = [];
+        window.setTimeout = (fn, delay, ...args) => { directoryDeadline.push(delay); return originalDirectoryTimeout(fn, delay === 10000 ? 20 : delay, ...args); };
+        chrome.tabs.sendMessage = () => new Promise(() => {});
+        window.directoryRun = discoverBatch(1);
+      });
+      await page.waitForFunction(() => !batchDiscovery);
+      assert.match(await page.locator('#batch-status').textContent(), /10000ms/);
+      assert.equal(await page.evaluate(() => directoryDeadline.includes(10000)), true);
+      await page.evaluate(() => { window.setTimeout = originalDirectoryTimeout; });
+      for (const mismatch of ['request', 'page', 'tab']) {
+        await page.evaluate(({base, mismatch}) => {
+          coursePage = base; $('course').value = '1';
+          chrome.tabs.sendMessage = async (_tab, message) => {
+            if (message.type === 'PPT_BATCH_DISCOVER') return {ok: true, requestId: 'expected', pending: true};
+            if (message.type === 'PPT_BATCH_CANCEL') return {ok: true};
+            if (mismatch === 'tab') $('course').replaceChildren(new Option('Other course', '2'));
+            return {ok: true, requestId: mismatch === 'request' ? 'wrong' : 'expected', pending: false,
+              result: {page: mismatch === 'page' ? base + '/other' : base, jobs: [{id: 'stale'}], complete: true}};
+          };
+          window.directoryRun = discoverBatch(1);
+        }, {base, mismatch});
+        await page.evaluate(() => directoryRun);
+        assert.equal((await stored()).batches.length, 0, mismatch + ' mismatch must not write');
+      }
+    });
+
+    await test('stopped discovery persists partial rows, selection, sources and failure metadata', async () => {
+      const base = origin + '/study-capture-courses/42/preview-detail';
+      const retained = {id: 'retained', captureCode: 'retained', url: origin + '/2-retained.mp4', sourceName: '2-retained.mp4', course: {name: 'Synthetic course'},
+        state: 'stopped', selected: true, history: ['retained'], cropOverride: {manual: true}, discovery: {state: 'ready', code: '', message: '', attempts: 1}};
+      await seed({lessons: [lesson('partial-directory')], batches: [{page: base, jobs: [retained]}]});
+      await page.evaluate(base => {
+        coursePage = base; $('course').replaceChildren(new Option('Synthetic course', '1')); window.partialPolls = 0; window.releasePartial = null;
+        chrome.tabs = {sendMessage: async (_tab, message) => {
+          if (message.type === 'PPT_BATCH_DISCOVER') {
+            window.partialJobs = [...message.previous.map(job => ({...job, discovery: {state: 'pending', code: '', message: '', attempts: 0}})),
+              {id: 'new-row', captureCode: 'new-row', course: {name: 'Synthetic course'}, selected: false, state: 'pending', discovery: {state: 'pending', code: '', message: '', attempts: 0}}];
+            return {ok: true, pending: true, requestId: 'partial'};
+          }
+          if (message.type === 'PPT_BATCH_CANCEL') return {ok: true};
+          if (++partialPolls === 1) return {ok: true, pending: true, requestId: 'partial', result: {page: base, jobs: structuredClone(partialJobs), total: 2, eligible: 2, complete: false, failures: []}};
+          return new Promise(resolve => { window.releasePartial = resolve; });
+        }};
+        window.directoryRun = discoverBatch(1);
+      }, base);
+      await page.waitForFunction(() => !!window.releasePartial); await page.locator('#stop').click(); await page.evaluate(() => directoryRun);
+      const snapshot = (await stored()).batches.find(item => item.page === base), first = snapshot.jobs.find(job => job.id === retained.id);
+      assert.equal(snapshot.jobs.length, 2); assert.equal(snapshot.discovery.complete, false);
+      assert.equal(snapshot.discovery.progress.phase, 'cancelled'); assert.equal(snapshot.discovery.failures.length, 2);
+      assert(snapshot.discovery.failures.every(item => item.code === 'CANCELLED'));
+      assert.equal(first.selected, true); assert.equal(first.url, retained.url); assert.equal(first.state, 'stopped');
+      assert.deepEqual(first.cropOverride, retained.cropOverride); assert.deepEqual(first.history, retained.history);
+      assert.equal(await page.locator('#batch-start').isDisabled(), true); assert.equal(await page.locator('#batch-retry').isDisabled(), false);
+      await page.evaluate(base => releasePartial({ok: true, requestId: 'partial', pending: false, result: {page: base, jobs: [], complete: true}}), base);
+      assert.deepEqual((await stored()).batches.find(item => item.page === base), snapshot);
+    });
+
     await test('suspect confirmation removes exactly one record write-first, retries failures and survives reload without video', async () => {
       const suspects = [{start: 1, end: 3, time: 1}, {start: 1, end: 3, time: 1}, {start: 2, end: 4}, {start: 4, end: 5}];
       await seed({lessons: [lesson('dismiss', {suspects}), lesson('untouched', {suspects: [{start: 1, end: 8}]})]});
@@ -661,6 +809,7 @@ function zipEntries(bytes) {
       await page.locator('#library-close').click(); await page.locator('#undo').click(); await count(2);
       await page.reload(); await count(2); assert(!(await stored()).lessons.some(lesson => lesson.id === 'manage-inactive'));
       await page.evaluate(async ({base, jobs}) => {
+        coursePage = base;
         chrome.tabs = {sendMessage: async () => ({ok: true, page: base, jobs, total: jobs.length, eligible: jobs.length})};
         await discoverBatch(1);
       }, {base, jobs});
@@ -841,6 +990,7 @@ function zipEntries(bytes) {
         const original = structuredClone(batchJobs.filter(job => ['target', 'stopped', 'failed'].includes(job.id)).map(job => job.cropOverride));
         const discovered = batchJobs.map(job => ({...job, url: job.url.replace('token=old', 'token=new'),
           options: job.options.map(item => ({...item, url: item.url.replace('token=old', 'token=new')})), cropConfirmed: false, cropOverride: undefined, state: 'needs-crop'}));
+        coursePage = batchPage;
         chrome.tabs = {sendMessage: async () => ({ok: true, page: batchPage, jobs: discovered})};
         chrome.permissions = {request: async () => true};
         await discoverBatch(1);
@@ -921,6 +1071,7 @@ function zipEntries(bytes) {
         await choose('owner-1'); await page.locator('#resume-load').click(); await page.waitForFunction(() => sourceReady && !busy());
         assert.equal(await page.evaluate(async a => {
           const active = activeBatchJob, jobs = structuredClone(batchJobs);
+          coursePage = a;
           chrome.tabs = {sendMessage: async () => ({ok: true, page: a, jobs, total: jobs.length, eligible: jobs.length})};
           await discoverBatch(1);
           return activeBatchJob === active;

@@ -6,14 +6,22 @@
   const found = new Set();
   let last = '', page = location.href, since = 0;
   let hookCourse = {}, lastCourse = '';
-  async function api(path) {
+  let probe = null, discovery = null, requestSerial = 0;
+  async function api(path, {signal} = {}) {
     if (!globalThis.PPTState || !await PPTState.hasConsent()) throw Error('请先在截取工具中同意课程资料使用约定');
-    const response = await fetch(path, {credentials: 'include', headers: {'accept': 'application/json'}});
-    if (!response.ok) throw Error(`课程接口返回 HTTP ${response.status}`);
-    const type = response.headers.get('content-type') || '';
-    if (!/json/i.test(type)) throw Error('课程接口没有返回 JSON，请确认登录状态');
-    return response.json();
+    return PPTBatch.requestJSON(path, {signal});
   }
+  function invalidate() {
+    probe?.controller.abort(); probe = null;
+    discovery?.controller.abort(); discovery = null;
+  }
+  function checkPage() {
+    if (page === location.href) return;
+    invalidate(); found.clear(); last = ''; hookCourse = {}; lastCourse = ''; page = location.href; since = performance.now();
+  }
+  window.addEventListener('pagehide', invalidate);
+  window.addEventListener('popstate', checkPage);
+  window.addEventListener('hashchange', checkPage);
   function pageRoute(href = location.href) {
     try {
       const url = new URL(href);
@@ -23,17 +31,23 @@
       return {courseId, captureCode};
     } catch { return {courseId: '', captureCode: ''}; }
   }
-  async function probeCurrentPageApi() {
-    const currentPage = location.href;
+  function probeCurrentPageApi() {
+    checkPage();
+    if (probe?.page === location.href) return probe.promise;
+    const current = {page: location.href, controller: new AbortController()}; probe = current;
+    current.promise = runPageProbe(current.page, current.controller.signal);
+    return current.promise;
+  }
+  async function runPageProbe(currentPage, signal) {
     const {courseId, captureCode} = pageRoute(currentPage);
     if (!courseId) return;
     const base = `/api/v1/rms-service/study-capture-courses/${encodeURIComponent(courseId)}`;
     try {
       let courseData = null, latest = null, captureData = null;
       if (captureCode) {
-        captureData = await api(`${base}/captures/${encodeURIComponent(captureCode)}`);
+        captureData = await api(`${base}/captures/${encodeURIComponent(captureCode)}`, {signal});
       } else {
-        courseData = await api(base);
+        courseData = await api(base, {signal});
         const detail = courseData?.data?.data ?? courseData?.data ?? courseData;
         const list = [
           ...(globalThis.PPTBatch ? PPTBatch.schedules(courseData) : []),
@@ -48,9 +62,9 @@
           || detail?.latest_capture?.capture_code || detail?.latest_capture?.captureCode || detail?.latest_capture?.code
           || detail?.latestCapture?.capture_code || detail?.latestCapture?.captureCode || detail?.latestCapture?.code
           || latest?.capture_code || latest?.captureCode || latest?.code || '';
-        if (resolvedCode) captureData = await api(`${base}/captures/${encodeURIComponent(resolvedCode)}`).catch(() => null);
+        if (resolvedCode) captureData = await api(`${base}/captures/${encodeURIComponent(resolvedCode)}`, {signal}).catch(() => null);
       }
-      if (location.href !== currentPage) return;
+      if (location.href !== currentPage || signal.aborted) return;
       for (const payload of [courseData, latest, captureData].filter(Boolean)) {
         if (core.extractUrls) core.extractUrls(payload, currentPage).forEach(url => add(url));
         if (globalThis.PPTCourse) {
@@ -74,35 +88,25 @@
       }
     } catch { /* Ignore non-JSON or unavailable API fallback responses. */ }
   }
-  async function batchDiscover() {
+  function startDiscovery(message) {
+    checkPage();
     if (window !== window.top || !globalThis.PPTBatch) throw Error('批量读取只能在课程列表主页面运行');
-    const courseId = PPTBatch.courseId(location.href);
-    if (!courseId) throw Error('请回到这门课的录像列表页，再读取课次');
-    const base = `/api/frontend/study-capture-courses/${encodeURIComponent(courseId)}`;
-    const scheduleData = await api(`${base}/schedules?in_course_preview=false`), all = PPTBatch.schedules(scheduleData);
-    const available = all.filter(PPTBatch.eligible).sort((a, b) => String(a.start_time || a.startTime || '').localeCompare(String(b.start_time || b.startTime || '')));
-    const courseName = all.find(item => item.course?.name)?.course?.name || metadata().name || '';
-    const jobs = [], failures = [];
-    let cursor = 0;
-    async function worker() {
-      while (cursor < available.length) {
-        const schedule = available[cursor++], code = schedule.capture_code || schedule.captureCode;
-        try {
-          const capture = await api(`${base}/captures/${encodeURIComponent(code)}?in_course_preview=false`);
-          const item = PPTBatch.job(schedule, capture, courseName);
-          if (item) jobs.push(item); else failures.push({scheduleId: schedule.id, reason: '没有找到可用的 2 路或 0 路视频'});
-        } catch (error) { failures.push({scheduleId: schedule.id, reason: error.message}); }
-      }
-    }
-    await Promise.all(Array.from({length: Math.min(4, available.length)}, worker));
-    jobs.sort((a, b) => String(a.startTime).localeCompare(String(b.startTime)));
-    return {courseId, courseName, total: all.length, eligible: available.length, jobs, failures, page: location.href};
+    if (!PPTBatch.courseId(page)) throw Error('请回到这门课的录像列表页，再读取课次');
+    if (discovery?.pending && discovery.page === page) return discovery;
+    const current = {requestId: `discovery-${Date.now()}-${++requestSerial}`, page, pending: true, controller: new AbortController(), progress: null, result: null};
+    discovery = current;
+    PPTBatch.discover({page, readJSON: api, signal: current.controller.signal, previous: message.previous || [], retryOnly: !!message.retryOnly,
+      onProgress: result => { if (discovery === current && location.href === current.page) { current.result = result; current.progress = result.progress; } }
+    }).then(result => {
+      if (discovery === current && location.href === current.page) current.result = result;
+    }, error => { current.error = {code: error.code || 'DISCOVERY', message: error.message}; }).finally(() => { current.pending = false; });
+    return current;
   }
   function metadata() { return globalThis.PPTCourse ? (window === window.top ? {...hookCourse, ...PPTCourse.fromDocument(document)} : {...hookCourse}) : {}; }
   function add(raw) { const info = core.mediaInfo(raw, document.baseURI || location.href); if (info) found.add(info.url); }
   function report() {
     if (!chrome.runtime?.id) return;
-    if (page !== location.href) { found.clear(); last = ''; hookCourse = {}; lastCourse = ''; page = location.href; since = performance.now(); probeCurrentPageApi(); }
+    if (page !== location.href) { checkPage(); probeCurrentPageApi(); }
     document.querySelectorAll('video,source,a[href]').forEach(el => { add(el.currentSrc); add(el.src || el.href); });
     performance.getEntriesByType('resource').filter(entry => entry.startTime >= since).forEach(entry => add(entry.name));
     const urls = [...found].slice(-150), text = JSON.stringify(urls);
@@ -124,9 +128,19 @@
     if (window === window.top && event.data.page === location.href && globalThis.PPTCourse) hookCourse = {...hookCourse, ...PPTCourse.normalize(event.data.course)};
   });
   chrome.runtime.onMessage.addListener((message, sender, respond) => {
-    if (message.type === 'PPT_BATCH_DISCOVER') {
-      batchDiscover().then(result => respond({ok: true, ...result}), error => respond({ok: false, error: error.message}));
-      return true;
+    if (message.type.startsWith('PPT_BATCH_')) {
+      checkPage();
+      try {
+        if (message.type === 'PPT_BATCH_DISCOVER') {
+          const current = startDiscovery(message);
+          respond({ok: true, requestId: current.requestId, pending: true});
+        } else {
+          if (!discovery || discovery.page !== location.href || message.requestId !== discovery.requestId) throw Error('课程读取请求已失效');
+          if (message.type === 'PPT_BATCH_CANCEL') discovery.controller.abort();
+          respond({ok: true, requestId: discovery.requestId, pending: discovery.pending, progress: discovery.progress, result: discovery.result, ...(discovery.error ? {error: discovery.error} : {})});
+        }
+      } catch (error) { respond({ok: false, error: error.message}); }
+      return;
     }
     if (message.type === 'PPT_COURSE') {
       lastCourse = ''; report();
