@@ -24,7 +24,7 @@
 
 详情并发最多 4。所有排课都留在目录：可读取、读取失败、确认无视频、未开课/转码中分别记录。详情失败不是“没有录像”。job 新增可选 `discovery: {state, code, message, attempts}`，state 为 `pending/ready/error/unavailable/skipped`；尚无 URL 的 job 不可自动扫描。沿用原有 id（capture code 优先、schedule id 后备），不能按数组位置覆盖历史课次。
 
-新增 `PPTBatch.discover({page, readJSON, signal, previous, retryOnly, onProgress})`，返回 `{courseId, courseName, total, eligible, jobs, failures, page, complete}`。增量回调包含当前已知完整 job 目录和计数。只重试失败时不重新请求已成功详情，保留既有 URL、课次状态和裁剪；成功刷新才更新对应来源。重读部分失败时，旧课次/截图/手动设置不消失。整个目录成功列举前不得据新结果删除历史条目。
+新增 `PPTBatch.discover({page, readJSON, signal, previous, retryOnly, onProgress})`，返回 `{courseId, courseName, total, eligible, jobs, failures, page, complete}`。增量回调包含当前已知完整 job 目录和计数。只重试失败时不重新请求已成功详情，保留既有 URL、课次状态和裁剪；成功刷新才更新对应来源。该模式不重新枚举排课，shared discover仅见previous jobs，故其complete保守为false；工具页保留前次持久化目录的complete/total/eligible等列举证据，仅替换本次详情结果与失败统计，不能把此前不完整/未知目录升级为完整，也不能把已知远端总数缩成当前已见行数。重读部分失败时，旧课次/截图/手动设置不消失。整个目录成功列举前不得据新结果删除历史条目。
 
 ## 2. 可取消的内容脚本协议与界面
 

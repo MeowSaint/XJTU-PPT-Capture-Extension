@@ -40,6 +40,7 @@
 - Produces三个内容脚本消息：PPT_BATCH_DISCOVER / PPT_BATCH_STATUS / PPT_BATCH_CANCEL，消息与快照格式见 Spec §2。UI 每1000ms查询、消息10000ms期限；并发详情≤4。
 - Extends `PPTLibrary.batch(db,page,jobs,discovery=undefined) -> Promise<void>`；未提供新参数时保留现有 discovery。PPTLibrary.put 的 relatedBatch 和内存 retainBatch 同样不能丢掉它。
 - Existing job state/crop/source identity 保持；`PPTBatch.automatic(job)` 对无可用 URL 或 discovery 非 ready 的新占位返回 false，旧无 discovery 的 job 保持原兼容。
+- Controller clarification: retryOnly不重新枚举排课，helper仅见previous jobs，故其complete=false；工具页保留前次持久化列举证据complete/total/eligible，仅更新详情结果/失败统计，不能把不完整或未知目录升级完整、也不能缩小已知远端总数。增加partial目录→retryOnly仍不完整与已知完整目录→retryOnly保留完整性的用例。
 
 - [ ] **Step 1: 写失败测试**。tests/discovery.test.cjs 使用真实 batch.js/content.js 的内存夹具，固定以下断言；tests/library.cjs 增加可见错误/Stop/重试/迟到结果的端到端用例。
 
