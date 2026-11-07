@@ -81,13 +81,16 @@ async function bindLesson(source) {
   await dbReady; await lessonSave;
   const key = PPTLibrary.key(source);
   let lesson = lessons.find(item => item.source && PPTLibrary.key(item.source) === key);
+  const detected = source.batchJobId ? activeBatchJob?.course || {} : sourceCourse;
   if (!lesson) {
-    lesson = {id: crypto.randomUUID(), course: {...sourceCourse}, page: source.page || '', source, crop: {x: 0,y: 0,w: 1,h: 1}, settings: {...scanSettings(), step: 0.5}, suspects: [], created: Date.now(), namingManual: false};
-    if (!activeLesson) { lesson.course = namingInfo(); lesson.namingManual = namingManual; }
+    // A course-level form is not a manual override for a newly selected batch lesson.
+    const manual = !source.batchJobId && !activeLesson && namingManual && namingPage === (source.page || '');
+    lesson = {id: crypto.randomUUID(), course: PPTCourse.forBinding(detected, namingInfo(), {manual, sameSource: manual}), page: source.page || '', source, crop: {x: 0,y: 0,w: 1,h: 1}, settings: {...scanSettings(), step: 0.5}, suspects: [], created: Date.now(), namingManual: manual};
     await PPTLibrary.put(db, lesson); lessons.push(lesson);
   } else {
     const changedChannel = source.batchJobId && !sameMediaSource(lesson.source, source);
-    const next = {...lesson, source: {...lesson.source, ...source}, ...(changedChannel ? {crop: {x: 0,y: 0,w: 1,h: 1}, ignoreRect: null, task: null, suspects: []} : {})};
+    const course = PPTCourse.forBinding(detected, lesson.course, {manual: lesson.namingManual, sameSource: true});
+    const next = {...lesson, course, source: {...lesson.source, ...source}, ...(changedChannel ? {crop: {x: 0,y: 0,w: 1,h: 1}, ignoreRect: null, task: null, suspects: []} : {})};
     await PPTLibrary.put(db, next); Object.assign(lesson, next);
     if (changedChannel && activeBatchJob) activeBatchJob.cropConfirmed = false;
   }
@@ -263,13 +266,16 @@ function persistBatch(job = null) {
 }
 function syncWorkspace() {
   const selected = sources.find(source => source.url === $('sources').value);
-  const source = sourceReady ? `已加载 · ${sourceName}` : selected ? `待加载 · ${selected.name}` : sourceName ? `未加载 · ${sourceName}` : '等待加载视频';
+  const batchContext = batchJobs.length && batchPage === coursePage ? `${batchJobs[0]?.course?.name || '课程'} · 批量目录 ${batchJobs.length} 节` : '';
+  const detectedContext = sourceCoursePage === coursePage && Object.keys(sourceCourse).length ? lessonLabel({course: sourceCourse}) : '';
+  const source = activeBatchJob ? `${lessonLabel(activeBatchJob)} · ${activeBatchJob.sourceName || sourceName} · ${activeBatchJob.state || '已加载'}`
+    : sourceReady ? `已加载 · ${sourceName}` : batchContext || (selected ? `待加载 · ${selected.name}` : sourceName ? `未加载 · ${sourceName}` : detectedContext || '等待加载视频');
   $('ledger-source').textContent = source; $('ledger-source').title = source;
   $('preview-empty').hidden = sourceReady || !!stream;
   document.body.classList.toggle('has-pages', pages.length > 0);
   $('current-lesson').textContent = '当前整理 · ' + (activeLesson ? lessonLabel({course: namingInfo(), source: activeLesson.source}) : '尚未选择课次');
   $('export-scope').textContent = `本节全部 · ${pages.length} 页`;
-  $('current-course-context').textContent = '当前课次所属课程 · ' + (activeLesson?.course?.name || namingInfo().name || '尚未选择');
+  $('current-course-context').textContent = '当前课次所属课程 · ' + lessonLabel({course: activeLesson ? namingInfo() : sourceCoursePage === coursePage ? sourceCourse : namingInfo()});
   $('batch-course-context').textContent = '批量列表课程 · ' + (batchJobs[0]?.course?.name || (batchPage ? '未命名课程' : '尚未读取'));
   const selectedJobs = batchJobs.filter(job => PPTBatch.automatic(job) && job.selected && job.state !== 'done').length;
   const manualJobs = batchJobs.filter(job => job.requiresCrop && !PPTBatch.automatic(job) && job.state !== 'done').length;
@@ -342,11 +348,15 @@ function persistNaming() {
 function acceptCourse(info, page) {
   if (sourceCoursePage !== page) sourceCourse = {};
   sourceCoursePage = page; sourceCourse = {...sourceCourse, ...PPTCourse.normalize(info)};
+  const option = $('course').selectedOptions[0];
+  if (page === coursePage && option && sourceCourse.name) option.textContent = sourceCourse.name;
+  syncWorkspace();
   dbReady.then(() => {
     if (sourceCoursePage !== page || reviewBusy || pageWrites || exportBusy) return;
-    // Keep the naming tied to the course of the retained screenshots.
-    if (!namingManual && (!activeLesson || (!activeLesson.source && !pages.length))) {
-      setNaming(sourceCourse, page); persistNaming();
+    // A directory's latest lesson cannot rename a different retained batch lesson.
+    const sameLesson = activeLesson?.page === page && !activeLesson.source?.batchJobId && /\/preview-detail\/[^/?#]+/.test(page);
+    if (!namingManual && (!activeLesson || (!activeLesson.source && !pages.length) || sameLesson)) {
+      setNaming(PPTCourse.forBinding(sourceCourse, namingInfo()), page); persistNaming();
     }
   }).catch(() => {});
 }
@@ -1567,7 +1577,18 @@ async function applyDiscovery(session, result) {
   if (!session.current()) return false;
   batchPage = result.page; batchJobs = jobs; session.lastResult = result;
   if (activeBatchJob && loadedIdentity?.coursePage === batchPage) activeBatchJob = batchJobs.find(job => job.id === activeBatchJob.id && sameMediaSource(job, loadedIdentity)) || activeBatchJob;
-  renderBatchJobs();
+  await namingSave; await lessonSave;
+  for (const job of jobs) {
+    if (!session.current()) return false;
+    const lesson = batchLesson(job, result.page), course = PPTCourse.normalize(job.course);
+    if (!lesson || lesson.namingManual || !course.date || !course.start || JSON.stringify(lesson.course) === JSON.stringify(course)) continue;
+    const next = {...lesson, course: PPTCourse.forBinding(course, lesson.course)};
+    await PPTLibrary.put(db, next); Object.assign(lesson, next);
+    if (session.current() && lesson === activeLesson) { namingManual = false; setNaming(course, lesson.page); }
+  }
+  if (!session.current()) return false;
+  renderLibrary(); renderBatchJobs();
+  $('source-status').textContent = sourceSummary();
   const reason = discovery.failures?.filter(item => !item.jobId).map(item => item.message).join('；');
   $('batch-status').textContent = discoverySummary(jobs, discovery) + (reason ? ' · ' + reason : '');
   return true;
@@ -1819,9 +1840,14 @@ async function discover() {
     if (courseReply?.page === coursePage) acceptCourse(courseReply.course, coursePage);
     if (discovered?.page === coursePage) acceptCourse(discovered.course, coursePage);
     updateSources(true);
-    $('source-status').textContent = sources.length ? `已发现 ${sources.length} 个视频地址，选好后点击“加载选中视频”。` : '还没找到视频。请刷新课程页并播放一次，再点“刷新视频列表”。';
     if (PPTBatch.courseId(coursePage) && batchPage !== coursePage) await discoverBatch(id, true);
+    $('source-status').textContent = sourceSummary();
   } catch (e) { $('source-status').textContent = '发现视频失败：' + e.message + '。请刷新课程页，或使用手动地址 / 本地视频。'; }
+}
+function sourceSummary() {
+  const context = sourceCoursePage === coursePage && sourceCourse.name ? `${lessonLabel({course: sourceCourse})} · ` : '';
+  if (batchPage === coursePage && batchJobs.length) return `${context}批量目录 ${batchJobs.length} 节。单节视频候选 ${sources.length} 个，可在批量列表选择课次。`;
+  return context + (sources.length ? `已发现 ${sources.length} 个视频地址，选好后点击“加载选中视频”。` : '当前课次暂无单节视频候选。可刷新课程页并播放一次，再点“刷新视频列表”。');
 }
 function updateSources(reset = false) {
   window.PPTWorkspace?.refreshSources(sources, coursePage, {reset});
@@ -1831,7 +1857,7 @@ $('discover').onclick = discover; $('course').onchange = discover; $('sources').
 for (const id of ['mode', 'diff', 'dedupe', 'stable']) $(id).onchange = () => { saveLessonSettings(); controls(); };
 if (window.chrome?.storage?.onChanged) chrome.storage.onChanged.addListener((changes, area) => {
   const value = changes['media-' + $('course').value]?.newValue;
-  if (area === 'session' && value?.page === coursePage) { sources = value.items; acceptCourse(value.course, value.page); updateSources(); $('source-status').textContent = `已发现 ${sources.length} 个视频地址，选好后点击“加载选中视频”。`; }
+  if (area === 'session' && value?.page === coursePage) { sources = value.items; acceptCourse(value.course, value.page); updateSources(); $('source-status').textContent = sourceSummary(); }
 });
 $('lesson-select').onchange = () => switchLesson($('lesson-select').value);
 $('resume-load').onclick = () => {

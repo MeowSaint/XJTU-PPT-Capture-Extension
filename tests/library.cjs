@@ -167,6 +167,131 @@ function zipEntries(bytes) {
     page.on('pageerror', error => errors.push(error.message));
     await open();
 
+    await test('recording metadata first remote bind persists detected time and protects same-source manual edits on reopen', async () => {
+      const base = origin + '/study-capture-courses/42/preview-detail/a', url = origin + '/' + path.relative(root, fixture).split(path.sep).join('/');
+      const detected = {name: 'A', date: '2026-09-15', start: '16:40:00'};
+      await seed({naming: {course: {name: 'A', date: '2026-09-14', start: '00:00:00'}, page: base, manual: false}});
+      assert.equal(await page.evaluate(async ({base, url, detected}) => {
+        coursePage = base; chrome.permissions = {request: async () => true};
+        acceptCourse(detected, base); await namingSave;
+        return loadRemote(url, {permissionGranted: true});
+      }, {base, url, detected}), true);
+      await settled(); const first = (await stored()).lessons[0];
+      assert.deepEqual(first.course, detected); assert.equal(first.namingManual, false);
+      assert.deepEqual(await page.evaluate(() => namingInfo()), detected);
+      assert.match(await page.locator('#current-course-context').textContent(), /A.*2026-09-15.*16:40/);
+      await page.reload(); await idle();
+      assert.deepEqual(await page.evaluate(() => namingInfo()), detected);
+      assert.deepEqual((await stored()).lessons[0].course, detected);
+      await page.evaluate(async () => { setNaming({name: 'A', date: '2026-09-14', start: '00:00:00'}, activeLesson.page); await persistLesson(); });
+      await page.evaluate(({base, detected}) => { coursePage = base; acceptCourse(detected, base); }, {base, detected});
+      await settled(); assert.deepEqual((await stored()).lessons[0].course, detected);
+      assert.equal(await page.evaluate(() => sourceReady), false, 'refresh corrects automatic history without reloading video');
+      await page.locator('#tab-export').click(); await page.locator('#course-name').fill('A 手工名称'); await settled();
+      const manual = {...detected, name: 'A 手工名称'};
+      assert.equal(await page.evaluate(async ({base, url}) => {
+        coursePage = base; chrome.permissions = {request: async () => true};
+        acceptCourse({name: '自动名称', date: '2026-09-16', start: '09:00:00'}, base); await namingSave;
+        return loadRemote(url, {permissionGranted: true});
+      }, {base, url}), true);
+      await settled(); assert.deepEqual((await stored()).lessons[0].course, manual);
+      assert.equal((await stored()).lessons[0].namingManual, true);
+      await page.reload(); await idle(); assert.deepEqual(await page.evaluate(() => namingInfo()), manual);
+    });
+
+    await test('recording metadata batch binds job course over stale manual form and corrects automatic history only', async () => {
+      const base = origin + '/study-capture-courses/42/preview-detail', url = origin + '/' + path.relative(root, fixture).split(path.sep).join('/');
+      const detected = {name: 'A', date: '2026-09-15', start: '16:40:00'}, stale = {name: '旧手工课', date: '2026-09-14', start: '00:00:00'};
+      await seed({naming: {course: stale, page: base, manual: true}});
+      const job = {id: 'metadata-job', course: detected, url, sourceName: '2-recording.mp4', requiresCrop: false, selected: true, state: 'pending'};
+      assert.equal(await page.evaluate(async ({base, job}) => {
+        coursePage = batchPage = base; batchJobs = [job]; sourceCourse = {...job.course};
+        chrome.permissions = {request: async () => true};
+        return loadRemote(job.url, {permissionGranted: true, batchJob: job, sourceName: job.sourceName});
+      }, {base, job}), true);
+      await settled(); const first = (await stored()).lessons[0];
+      assert.deepEqual(first.course, detected); assert.equal(first.namingManual, false);
+      await page.reload(); await idle(); assert.deepEqual(await page.evaluate(() => namingInfo()), detected);
+      // Simulate a previously persisted automatic opening date, then reload the same actual source.
+      await page.evaluate(async stale => { setNaming(stale, activeLesson.page); await persistLesson(); }, stale);
+      assert.equal(await page.evaluate(async ({base, job}) => {
+        coursePage = batchPage = base; batchJobs = [job]; sourceCourse = {...job.course};
+        chrome.permissions = {request: async () => true};
+        return loadRemote(job.url, {permissionGranted: true, batchJob: job});
+      }, {base, job}), true);
+      await settled(); assert.deepEqual((await stored()).lessons[0].course, detected);
+      await page.locator('#tab-export').click(); await page.locator('#course-name').fill('保留手工课次'); await settled();
+      const manual = {...detected, name: '保留手工课次'};
+      assert.equal(await page.evaluate(async ({base, job}) => {
+        coursePage = base; chrome.permissions = {request: async () => true};
+        return loadRemote(job.url, {permissionGranted: true, batchJob: {...job, course: {...job.course, date: '2026-09-16'}}});
+      }, {base, job}), true);
+      await settled(); assert.deepEqual((await stored()).lessons[0].course, manual);
+      await page.reload(); await idle(); assert.deepEqual(await page.evaluate(() => namingInfo()), manual);
+    });
+
+    await test('recording metadata unknown times and course switches never inherit previous manual naming', async () => {
+      const base = origin + '/study-capture-courses/42/preview-detail/a', other = base.replace('/42/', '/99/');
+      const url = origin + '/' + path.relative(root, fixture).split(path.sep).join('/');
+      const old = lesson('metadata-old', {course: {...course, name: 'A 手工'}, page: base, source: {kind: 'remote', url, page: base, sourceKey: 'url:' + url}});
+      await seed({lessons: [old]});
+      assert.equal(await page.evaluate(async ({other, url}) => {
+        coursePage = other; acceptCourse({name: 'B'}, other); await namingSave;
+        chrome.permissions = {request: async () => true};
+        return loadRemote(url + '?course=B', {permissionGranted: true});
+      }, {other, url}), true);
+      await settled(); const snapshot = await stored(), current = snapshot.lessons.find(item => item.id === snapshot.activeId);
+      assert.deepEqual(current.course, {name: 'B'}); assert.equal(current.namingManual, false);
+      assert.deepEqual(await page.evaluate(() => namingInfo()), {name: 'B'});
+      assert.deepEqual(snapshot.lessons.find(item => item.id === old.id), old);
+      await page.reload(); await idle(); assert.deepEqual(await page.evaluate(() => namingInfo()), {name: 'B'});
+      assert.equal(await page.locator('#course-date').inputValue(), ''); assert.equal(await page.locator('#course-start').inputValue(), '');
+      // The recognized name updates selector text while the tab id remains its option value.
+      await page.evaluate(({other}) => {
+        $('course').replaceChildren(new Option('资源管理平台', '99')); coursePage = other;
+        acceptCourse({name: 'B'}, other);
+      }, {other}); await settled();
+      assert.equal(await page.locator('#course').inputValue(), '99');
+      assert.match(await page.locator('#course option:checked').textContent(), /B/);
+    });
+
+    await test('recording metadata directory refresh repairs automatic lessons only and explains zero single-source candidates', async () => {
+      const base = origin + '/study-capture-courses/42/preview-detail';
+      const stale = {name: 'A', date: '2026-09-14', start: '00:00:00'}, detected = {name: 'A', date: '2026-09-15', start: '16:40:00'};
+      const auto = lesson('metadata-refresh-auto', {course: stale, page: base, namingManual: false,
+        source: {kind: 'remote', page: base, batchJobId: 'refresh-auto', url: origin + '/2-auto.mp4'},
+        ignoreRect: {x: .1, y: .1, w: .2, h: .2}, task: {status: 'paused', lastSuccess: 2}, suspects: [{start: 1, end: 2}]});
+      const manual = lesson('metadata-refresh-manual', {course: {...stale, name: '我的手动名称'}, page: base,
+        source: {kind: 'remote', page: base, batchJobId: 'refresh-manual', url: origin + '/2-manual.mp4'}});
+      const jobs = [auto, manual].map(item => ({id: item.source.batchJobId, course: detected, url: item.source.url,
+        sourceName: '2-recording.mp4', selected: true, state: 'pending', discovery: {state: 'ready', attempts: 1}}));
+      await seed({lessons: [auto, manual], batches: [{page: base, jobs}], pages: [{id: 71, lessonId: auto.id}, {id: 72, lessonId: manual.id}]});
+      const before = await stored();
+      await page.evaluate(async ({base, jobs}) => {
+        coursePage = base; sources = []; $('course').replaceChildren(new Option('资源管理平台', '42'));
+        acceptCourse({name: 'A'}, base);
+        chrome.tabs = {sendMessage: async () => ({ok: true, page: base, jobs, total: 2, eligible: 2, complete: true, failures: []})};
+        await discoverBatch(42);
+      }, {base, jobs});
+      await settled(); const after = await stored();
+      assert.deepEqual(after.lessons.find(item => item.id === auto.id), {...auto, course: detected});
+      assert.deepEqual(after.lessons.find(item => item.id === manual.id), manual);
+      assert.deepEqual(after.pages, before.pages); assert.deepEqual(after.assets, before.assets);
+      assert.match(await page.locator('#source-status').textContent(), /A.*批量目录 2 节.*候选 0 个/);
+      assert.match(await page.locator('#ledger-source').textContent(), /A.*批量目录 2 节/);
+      assert.doesNotMatch(await page.locator('#source-status').textContent(), /还没找到视频/);
+      assert.equal(await page.locator('#course').inputValue(), '42');
+      assert.equal(await page.locator('#course option:checked').textContent(), 'A');
+      assert.equal(await page.evaluate(() => sourceReady || video.hasAttribute('src')), false);
+      await page.reload(); await idle();
+      assert.deepEqual((await stored()).lessons.find(item => item.id === auto.id).course, detected);
+      assert.deepEqual((await stored()).lessons.find(item => item.id === manual.id), manual);
+      const standalone = {...auto, id: 'metadata-unidentified', source: {...auto.source, batchJobId: ''}};
+      await seed({lessons: [standalone]});
+      await page.evaluate(({base, detected}) => { coursePage = base; acceptCourse(detected, base); }, {base, detected});
+      await settled(); assert.deepEqual((await stored()).lessons[0], standalone, 'directory metadata cannot identify an older standalone recording');
+    });
+
     await test('v2 migration separates lesson identities and preserves every JPEG/signature asset', async () => {
       const second = {...course, date: '2026-11-05', start: '10:00:00'};
       const specs = [

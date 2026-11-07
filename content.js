@@ -5,7 +5,7 @@
   if (window.__pptContentCollector) return;
   const found = new Set();
   let last = '', page = location.href, since = 0;
-  let hookCourse = {}, lastCourse = '';
+  let hookCourse = {}, apiCourse = {}, lastCourse = '';
   let probe = null, discovery = null, requestSerial = 0;
   async function api(path, {signal} = {}) {
     if (!globalThis.PPTState || !await PPTState.hasConsent()) throw Error('请先在截取工具中同意课程资料使用约定');
@@ -17,7 +17,7 @@
   }
   function checkPage() {
     if (page === location.href) return;
-    invalidate(); found.clear(); last = ''; hookCourse = {}; lastCourse = ''; page = location.href; since = performance.now();
+    invalidate(); found.clear(); last = ''; hookCourse = {}; apiCourse = {}; lastCourse = ''; page = location.href; since = performance.now();
   }
   function onNavigation() { if (page !== location.href) probeCurrentPageApi(); }
   window.addEventListener('pagehide', invalidate);
@@ -66,15 +66,13 @@
         if (resolvedCode) captureData = await api(`${base}/captures/${encodeURIComponent(resolvedCode)}`, {signal}).catch(() => null);
       }
       if (location.href !== currentPage || signal.aborted) return;
-      for (const payload of [courseData, latest, captureData].filter(Boolean)) {
+      for (const [payload, entity] of [[courseData, ''], [captureData, 'capture'], [latest, 'schedule']]) {
+        if (!payload) continue;
         if (core.extractUrls) core.extractUrls(payload, currentPage).forEach(url => add(url));
         if (globalThis.PPTCourse) {
-          const detail = payload?.data?.data ?? payload?.data ?? payload;
-          const fallback = detail && typeof detail === 'object' ? PPTCourse.normalize({
-            name: detail.course?.name || detail.course_name || detail.courseName || '',
-            ...PPTCourse.startParts(detail.start_time || detail.startTime || detail.capture_start_time || '')
-          }) : {};
-          hookCourse = {...hookCourse, ...fallback, ...PPTCourse.normalize(PPTCourse.fromJSON(payload, currentPage))};
+          // Only capture/schedule endpoints give generic start_time a lesson meaning.
+          const value = entity ? {[entity]: payload} : payload;
+          apiCourse = {...apiCourse, ...PPTCourse.fromJSON(value, currentPage)};
         }
       }
       const urls = [...found].slice(-150);
@@ -103,7 +101,7 @@
     }, error => { current.error = {code: error.code || 'DISCOVERY', message: error.message}; }).finally(() => { current.pending = false; });
     return current;
   }
-  function metadata() { return globalThis.PPTCourse ? (window === window.top ? {...hookCourse, ...PPTCourse.fromDocument(document)} : {...hookCourse}) : {}; }
+  function metadata() { return globalThis.PPTCourse ? (window === window.top ? {...PPTCourse.fromDocument(document), ...hookCourse, ...apiCourse} : {...hookCourse, ...apiCourse}) : {}; }
   function add(raw) { const info = core.mediaInfo(raw, document.baseURI || location.href); if (info) found.add(info.url); }
   function report() {
     if (!chrome.runtime?.id) return;

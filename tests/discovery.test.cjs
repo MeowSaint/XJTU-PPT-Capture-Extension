@@ -145,19 +145,33 @@ test('unavailable and skipped entries stay visible; persistence errors propagate
   await assert.rejects(batch.discover({page, readJSON: async () => rows(1), onProgress: async () => { throw Error('disk full'); }}), /disk full/);
 });
 
-function contentHarness(fetchImpl, {hasConsent = async () => true} = {}) {
-  let listener; const events = {}, location = {href: page}, ticks = [], messages = [];
+function contentHarness(fetchImpl, {hasConsent = async () => true, initialPage = page, text = ''} = {}) {
+  let listener; const events = {}, location = {href: initialPage}, ticks = [], messages = [];
   const context = vm.createContext({URL, AbortController, DOMException, structuredClone, setTimeout, clearTimeout, queueMicrotask,
     setInterval(fn) { ticks.push(fn); }, performance: {now: () => 0, getEntriesByType: () => []}, location,
-    document: {baseURI: page, querySelectorAll: () => []}, fetch: fetchImpl,
+    document: {baseURI: initialPage, title: '资源管理平台', body: {innerText: text}, querySelector: () => null, querySelectorAll: () => []}, fetch: fetchImpl,
     PPTCore: {mediaInfo: url => url ? {url} : null, extractUrls: payload => payload.urls || [], postLocalMessage() {}, isLocalMessage: () => false},
     PPTState: {hasConsent},
     chrome: {runtime: {id: 'synthetic', sendMessage: async message => { messages.push(message); }, onMessage: {addListener: fn => { listener = fn; }}}}});
   context.window = context; context.top = context; context.addEventListener = (name, fn) => { events[name] = fn; };
+  vm.runInContext(fs.readFileSync(require.resolve('../course.js'), 'utf8'), context);
   vm.runInContext(fs.readFileSync(require.resolve('../batch.js'), 'utf8'), context);
   vm.runInContext(fs.readFileSync(require.resolve('../content.js'), 'utf8'), context);
   return {send: message => new Promise(resolve => listener(message, {}, resolve)), events, location, tick: () => ticks.forEach(fn => fn()), messages};
 }
+
+test('API recording time wins over DOM and generic course opening fallback is rejected', async () => {
+  const h = contentHarness(async () => response({data: {courseId: 42, captureId: 'c1', courseName: 'A', start_time: '2026-09-15T08:40:00Z'}}),
+    {initialPage: page + '/c1', text: '课程名称：DOM\n上课时间：2026-09-14 00:00'});
+  try {
+    const result = await h.send({type: 'PPT_DISCOVER'});
+    assert.deepEqual(JSON.parse(JSON.stringify(result.course)), {name: 'A', date: '2026-09-15', start: '16:40:00'});
+  } finally { h.events.pagehide(); }
+  const directory = contentHarness(async () => response({data: {courseId: 42, courseName: 'A', start_time: '2026-09-14 00:00'}}),
+    {text: '课程名称：A\n开课时间：2026-09-14 00:00'});
+  try { assert.deepEqual(JSON.parse(JSON.stringify((await directory.send({type: 'PPT_DISCOVER'})).course)), {name: 'A'}); }
+  finally { directory.events.pagehide(); }
+});
 
 test('content discovery starts immediately, joins request IDs, cancels fetch and rejects stale requests', async () => {
   let cancelledFetches = 0, detailStarted = false;

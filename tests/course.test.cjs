@@ -36,6 +36,48 @@ test('JSON fields are filtered by course and recording ID; ambiguous lists are n
   const ambiguous = course.fromJSON({rows: [{courseName: 'A', startTime: '2026-01-01 00:00'}, {courseName: 'B', startTime: '2026-01-02 12:00'}]}, page);
   assert.deepEqual(ambiguous, {});
 });
+test('course opening dates never become recording dates through JSON or DOM fallback', () => {
+  assert.deepEqual(course.fromText('课程名称：A\n开课时间：2026-09-14 00:00'), {name: 'A'});
+  assert.deepEqual(course.fromDocument({title: '资源管理平台', body: {innerText: '课程名称：A\n开课时间\n2026-09-14 00:00'}, querySelector: () => null}), {name: 'A'});
+  assert.deepEqual(course.fromText('课程名称：A\n课程日期：2026-09-14 00:00'), {name: 'A'});
+  const documentWithHeading = heading => ({title: '旧标签名', body: {innerText: ''}, querySelector: selector => selector === 'h1' ? {textContent: heading} : null});
+  assert.deepEqual(course.fromDocument(documentWithHeading('A')), {name: 'A'});
+  assert.deepEqual(course.fromDocument(documentWithHeading('录播预览')), {name: '旧标签名'});
+  assert.deepEqual(course.fromText('课程名称：A\n开课时间：2026-09-14 00:00 上课时间：2026-09-15 16:40'), {name: 'A', date: '2026-09-15', start: '16:40:00'});
+  for (const field of ['start_time', 'coursedate', 'startDateTime']) {
+    assert.deepEqual(course.fromJSON({course: {id: 16220, name: 'A', [field]: '2026-09-14 00:00'}}, page), {name: 'A'});
+    assert.deepEqual(course.fromJSON({courseId: 16220, courseName: 'A', [field]: '2026-09-14 00:00'}, page), {name: 'A'});
+  }
+});
+test('recording entities and explicit lesson fields retain matched nested metadata on my and study routes', () => {
+  const wanted = {name: 'A', date: '2026-09-15', start: '16:40:00'};
+  for (const route of [page, page.replace('/my-', '/study-'), page.replace('/my-', '/#/study-')]) {
+    assert.deepEqual(course.fromJSON({course: {id: 16220, name: 'A', start_time: '2026-09-14 00:00'}, captures: [
+      {id: 1, data: {start_time: '2026-09-13 12:00'}},
+      {id: 477014, data: {details: {start_time: '2026-09-15T08:40:00Z'}}}
+    ]}, route), wanted);
+    assert.deepEqual(course.fromJSON({courseId: 99, captureId: 477014, lesson_start_time: '2026-09-15 16:40'}, route), {});
+    assert.deepEqual(course.fromJSON({courseId: 16220, captureId: 999, record_start_time: '2026-09-15 16:40'}, route), {});
+    assert.deepEqual(course.fromJSON({capture: {data: {id: 999, start_time: '2026-09-15 16:40'}}}, route), {});
+    assert.deepEqual(course.fromJSON({capture: {code: 999, start_time: '2026-09-15 16:40'}}, route), {});
+    assert.deepEqual(course.fromJSON({course: {data: {id: 99, name: 'B', lesson_start_time: '2026-09-15 16:40'}}}, route), {});
+    assert.deepEqual(course.fromJSON({course: {data: {id: 16220, name: 'A'}}, capture: {data: {id: 477014, start_time: '2026-09-15T08:40:00Z'}}}, route), wanted);
+  }
+  for (const key of ['capture_start_time', 'lesson_start_time', 'record_start_time', 'class_start_time']) {
+    assert.deepEqual(course.fromJSON({courseName: 'A', [key]: '2026-09-15 16:40'}, page), wanted);
+  }
+  assert.deepEqual(course.fromJSON({courseName: 'A', lessons: [{start_time: '2026-09-15 16:40'}, {start_time: '2026-09-16 16:40'}]}, page), {name: 'A'});
+  assert.deepEqual(course.fromJSON({course: {id: 16220, name: 'A'}, capture: {id: 477014, data: {course: {name: 'A', start_time: '2026-09-14 00:00'}, start_time: '2026-09-15 16:40'}}}, page), wanted);
+});
+test('binding uses detected values unless the same source has explicit manual edits', () => {
+  const detected = {name: 'A', date: '2026-09-15', start: '16:40:00'}, displayed = {name: '旧名称', date: '2026-09-14', start: '00:00:00'};
+  assert.deepEqual(course.forBinding(detected, displayed), detected);
+  assert.deepEqual(course.forBinding(detected, displayed, {manual: true}), detected);
+  assert.deepEqual(course.forBinding(detected, displayed, {sameSource: true}), detected);
+  assert.deepEqual(course.forBinding(detected, displayed, {manual: true, sameSource: true}), displayed);
+  assert.deepEqual(course.forBinding({name: 'A'}, displayed), {name: 'A'});
+  assert.deepEqual(course.forBinding(detected, {name: '我的手动名称'}, {manual: true, sameSource: true}), {name: '我的手动名称'});
+});
 test('background stores only normalized top-frame metadata and isolates navigation', async () => {
   let listener; const storage = {}, tab = {url: page};
   const chrome = {
