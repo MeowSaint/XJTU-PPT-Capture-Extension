@@ -94,7 +94,7 @@ assert.equal(savedManualLesson.course.name, '我的手动名称');
 **Interfaces:**
 - Produces `PPTLibrary.pageLimit(value) -> integer`，100..20000 的整数值原样保留，其他返回5000。
 - Global setting `captureLimits: {maxPages}`，独立于 scanSettings/task.settings；DOM id `page-limit`。提高预算不影响 canResume。
-- Page/space protection errors carry `code: 'PAGE_LIMIT' | 'STORAGE_LOW'`；任务 state=paused，已写截图保留，批量项有明确部分/暂停原因。navigator.storage.estimate 缺失/失败不推断配额不足。
+- Page/space protection errors carry `code: 'PAGE_LIMIT' | 'STORAGE_LOW'`；任务 state=paused，已写截图保留，批量项有明确部分/暂停原因。navigator.storage.estimate 缺失/失败不推断配额不足。STORAGE_LOW 是全局保护：立即停止该批，不再加载/缓存后续课次，最终提示保留原因；PAGE_LIMIT 为单课次保护，可继续其他课次。新增回归断言低空间之后没有下一节 load/download，且释放空间后未完成项可重启。实际 QuotaExceededError 同样阻止后续加载，并保持失败事务回滚/安全断点，不伪装已保存。
 - Checks at scan start and every25 committed new pages，free<33554432 bytes 则下一页提交前暂停。签名缓存维持1000，thumbnail并发≤2。
 
 - [ ] **Step 1: 写失败测试**。unit 验证边界、无效保存值；浏览器验证合法设置恢复、旧默认、保护时的安全页/checkpoint、改阈值继续、QuotaExceededError、estimate未知；2,000页夹具验证增量渲染与导出。
