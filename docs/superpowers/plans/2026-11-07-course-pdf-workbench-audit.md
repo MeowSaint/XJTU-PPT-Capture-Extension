@@ -67,7 +67,9 @@
 
 ## Task 3 — 版本与整体验证
 
-状态：待实现。
+状态：实现中。干净 BASE `cc8a935bd5cb3461846fa2ae8d4c7feeb9770d22`，全新独立实现者 `de484aa3-3d8e-43af-9a85-a169486c9d52`（codex/gpt-6.1-sol / high）。范围限 3.1.2 元数据、当前版本夹具、使用/测试说明，以及 CI browser 步骤追加 `test:improvements`；完整九套顺序回归和中文同日两课/奇数讲义 PDF 渲染证据待回报。产品 JS/CSS/PDF/取消与存储算法不可在此任务修改；发现真实业务失败则交回原任务实现者。整体审查、根目录实际打包与校验、发布及工作区清理由父代理负责，实现者无这些动作权限。
+
+首次 integration probe 在 tests/integration.cjs:212 期望 `/请先补填/`，实际为 `导出失败：PPTMotion is not defined`；作业 `bash-f46eb317080f4612` exit1。父代理只读核实 tests/integration.cjs:102 临时扩展复制表漏掉 motion.js，capture.html:359–361 已在 capture/workspace 之前加载它，scripts/release.cjs:9 实际安装清单也已有该资源。这是夹具消费接口遗漏，未发现新的产品业务问题。Ruling：限定 Task3 为该复制表加入 motion.js，其他断言、权限、拦截与产品源码均保持；只重跑受影响的 integration，再继续后续串行套件。代价是复制清单存在两处，可能继续漂移，须保留这次真实失败与最终打包/强断言核验；不通过模仿 PPTMotion、忽略异常或削弱缺字段检查取得通过。此前本轮 unit224/224、release17/17、bridge三来源已过，只能按实际源覆盖分别记录，不能改称修正后全套重跑。
 
 ## 最终审查与产物
 

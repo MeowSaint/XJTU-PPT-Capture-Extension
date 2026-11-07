@@ -69,7 +69,7 @@
 
 ### Task 3: 3.1.2 版本、说明与整体验证
 
-**Files:** Modify manifest.json、package.json、package-lock.json 的 root 版本字段、capture.html 的可见版本字段、README.md、tests/README.md、tests/features.cjs / tests/integration.cjs / tests/review.cjs / tests/library.cjs / tests/improvements.cjs 中当前版本/产物目录；`.github/workflows/ci.yml` 仅将已有 test:improvements 加入顺序浏览器任务。仅允许确因 Task 1/2 行为改变的 integration selector/布局适配，先报告再改，不修业务源码。Create optional docs/releases/3.1.2.md。
+**Files:** Modify manifest.json、package.json、package-lock.json 的 root 版本字段、capture.html 的可见版本字段、README.md、tests/README.md、tests/features.cjs / tests/integration.cjs / tests/review.cjs / tests/library.cjs / tests/improvements.cjs 中当前版本/产物目录；`.github/workflows/ci.yml` 仅将已有 test:improvements 加入顺序浏览器任务。仅允许确因 Task 1/2 行为改变的 integration selector/布局适配，先报告再改，不修业务源码；另据实际 `PPTMotion is not defined` probe，限定同步 tests/integration.cjs:102 临时扩展复制清单，加入已由 HTML 加载且实际安装清单已有的 motion.js，保留原强断言、权限与拦截。Create optional docs/releases/3.1.2.md。
 
 **Interfaces:** Consumes 34 成员安装清单与整课目录/工作台实际行为；produces 一致的 3.1.2 元数据、准确用户说明和完整验证证据，安装包由控制器最终审查后构建。
 
