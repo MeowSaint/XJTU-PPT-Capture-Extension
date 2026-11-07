@@ -189,6 +189,26 @@ test('course endpoint context rejects opening times with a capture pointer throu
   }
 });
 
+for (const alias of ['latest_capture', 'latestCapture']) for (const matched of [true, false]) {
+  test(`directory probe ${matched ? 'uses matched' : 'rejects mismatched'} ${alias} time with a time-less capture response`, async () => {
+    for (const wrap of [value => value, value => ({data: value}), value => ({data: {data: value}})]) for (const key of ['capture_code', 'captureCode', 'code']) {
+      const calls = [], url = 'https://video.invalid/a.mp4';
+      const detail = {courseId: 42, courseName: 'A', start_time: '2026-09-14 00:00',
+        ...(matched ? {} : {latest_capture_code: 'a'}), [alias]: {[key]: matched ? 'a' : 'b', start_time: '2026-09-15 16:40'}};
+      const h = contentHarness(async path => {
+        calls.push(path);
+        return response(path.endsWith('/captures/a') ? {capture_code: 'a', urls: [url]} : wrap(detail));
+      });
+      try {
+        const result = await h.send({type: 'PPT_DISCOVER'});
+        assert.deepEqual(calls, ['/api/v1/rms-service/study-capture-courses/42', '/api/v1/rms-service/study-capture-courses/42/captures/a']);
+        assert.deepEqual([...result.urls], [url]);
+        assert.deepEqual(JSON.parse(JSON.stringify(result.course)), matched ? {name: 'A', date: '2026-09-15', start: '16:40:00'} : {name: 'A'});
+      } finally { h.events.pagehide(); }
+    }
+  });
+}
+
 for (const fixture of [
   {label: 'explicit latest pointer differs from last schedule', capture: {start_time: '2026-09-15 16:40'}, matching: true, expected: {name: 'A', date: '2026-09-15', start: '16:40:00'}},
   {label: 'matched schedule supplies missing capture time', capture: {}, matching: true, expected: {name: 'A', date: '2026-09-15', start: '16:40:00'}},

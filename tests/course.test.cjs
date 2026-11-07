@@ -60,6 +60,25 @@ test('explicit course and subject entities keep opening times out despite captur
     assert.deepEqual(course.fromJSON({[entity]: wrap({...detail, lesson_start_time: '2026-09-15 16:40'})}, route), {name: 'A', date: '2026-09-15', start: '16:40:00'});
   }
 });
+for (const alias of ['latest_capture', 'latestCapture']) {
+  test(`nested ${alias} retains matched recording time inside course envelopes`, () => {
+    const route = 'https://local.invalid/study-capture-courses/42/preview-detail?captureCode=a';
+    const wanted = {name: 'A', date: '2026-09-15', start: '16:40:00'};
+    const wraps = [value => value, value => ({data: value}), value => ({result: {details: value}})];
+    for (const wrap of wraps) for (const key of ['capture_code', 'captureCode', 'code']) {
+      const detail = {id: 42, name: 'A', capture_code: 'a', start_time: '2026-09-14 00:00', [alias]: {[key]: 'a', start_time: '2026-09-15 16:40'}};
+      assert.deepEqual(course.fromJSON({course: wrap(detail)}, route), wanted);
+      assert.deepEqual(course.fromJSON({course: wrap({...detail, [alias]: {data: detail[alias]}})}, route), wanted);
+    }
+  });
+  test(`nested ${alias} rejects other recordings without promoting the root opening time`, () => {
+    const route = 'https://local.invalid/study-capture-courses/42/preview-detail?captureCode=a';
+    for (const record of [{capture_code: 'b'}, {captureCode: 'b'}, {code: 'b'}, {courseId: 99, capture_code: 'a'}]) {
+      const detail = {id: 42, name: 'A', capture_code: 'a', start_time: '2026-09-14 00:00', [alias]: {data: {...record, start_time: '2026-09-16 09:00'}}};
+      assert.deepEqual(course.fromJSON({course: {data: detail}}, route), {name: 'A'});
+    }
+  });
+}
 test('recording entities and explicit lesson fields retain matched nested metadata on my and study routes', () => {
   const wanted = {name: 'A', date: '2026-09-15', start: '16:40:00'};
   for (const route of [page, page.replace('/my-', '/study-'), page.replace('/my-', '/#/study-')]) {

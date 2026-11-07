@@ -60,8 +60,8 @@
       if (!object || typeof object !== 'object' || depth > 10 || visited++ > 2000) return;
       if (Array.isArray(object)) { object.slice(0, 200).forEach(x => walk(x, scope, depth + 1, score, entity)); return; }
       const fields = Object.fromEntries(Object.entries(object).slice(0, 100).map(([k, v]) => [keyOf(k), v]));
-      // Preserve an entity through data/details envelopes, but reset it on a nested course.
-      const recordScope = /^(?:captures?|records?|recordings?|lessons?|schedules?|classes|class|teaching)(?:info|detail)?$/.test(scope);
+      // Preserve entities through envelopes; actual nested course/recording objects set their own scope.
+      const recordScope = /^(?:captures?|latestcapture|records?|recordings?|lessons?|schedules?|classes|class|teaching)(?:info|detail)?$/.test(scope);
       const courseScope = /^(?:course|subject)(?:info|detail)?$/.test(scope);
       if (recordScope) entity = 'record';
       if (courseScope) entity = 'course';
