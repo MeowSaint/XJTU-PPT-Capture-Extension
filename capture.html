@@ -195,10 +195,6 @@
               <button id="full" class="button-quiet" type="button" disabled>使用完整画面</button>
             </div>
             <p class="note">2 路通常为 PPT 机位；0 路先确认截取区域，再开始提取。</p>
-            <div class="extraction-actions" role="group" aria-label="提取操作">
-              <button id="run" type="button" disabled>开始快速提取</button>
-              <button id="stop" type="button" disabled>停止并保留结果</button>
-            </div>
             <div class="secondary-actions" role="group" aria-label="补页与重新提取">
               <button id="shot" type="button" disabled>保存当前页</button>
               <button id="restart-scan" class="button-quiet" type="button" disabled hidden>从头重扫</button>
@@ -266,6 +262,10 @@
           <section id="pages" tabindex="0" aria-label="幻灯片列表" data-empty-hint="加载视频后，点击“开始快速提取”或“保存当前页”。"></section>
         </section>
       </main>
+    </div>
+    <div class="extraction-actions" role="group" aria-label="提取操作">
+      <button id="run" type="button" disabled>开始快速提取</button>
+      <button id="stop" type="button" disabled>停止并保留结果</button>
     </div>
   </div>
   <dialog id="library-dialog" class="workspace-dialog" aria-labelledby="library-title">

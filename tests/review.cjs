@@ -539,6 +539,93 @@ function zipEntries(bytes) {
       assert.match(await page.locator('#status').textContent(), /导出失败/);
     });
 
+    await test('expanded running batch keeps shared Stop visible and hit-testable at desktop and narrow sizes', async () => {
+      const geometry = [];
+      for (const [width, height] of [[1280, 800], [1440, 900], [1920, 1080], [390, 844]]) {
+        await page.setViewportSize({width, height}); await seed([{id: 101}, {id: 102, image: 1}]);
+        const before = await stored();
+        await page.evaluate(async ({url, course}) => {
+          batchPage = location.origin + '/study-capture-courses/stop-visibility/preview-detail/list';
+          batchJobs = [
+            {id: 'stop-auto', course, sourceName: '2-自动课次.mp4', url, selected: true, state: 'pending', requiresCrop: false, options: []},
+            {id: 'stop-zero', course, sourceName: '0-待确认 PPT 区域.mp4', url: url + '?track=0', selected: false, state: 'needs-crop', requiresCrop: true, cropConfirmed: false, options: []}
+          ];
+          await persistBatch(); renderBatchJobs();
+          window.chrome ||= {}; chrome.permissions = {request: async () => true};
+          window.__stopFixture = {entered: false, aborted: false, originalScan: PPTScanner.prototype.scan};
+          PPTScanner.prototype.scan = async function ({signal, save}) {
+            // Keep the real controller/fastScan/save/Stop path; bound only the scanner's wait for cancellation.
+            await save(frame()); window.__stopFixture.entered = true;
+            await new Promise((resolve, reject) => {
+              const deadline = setTimeout(() => reject(Error('Stop fixture exceeded its 15-second cancellation deadline')), 15000);
+              signal.addEventListener('abort', () => {
+                clearTimeout(deadline); window.__stopFixture.aborted = true; reject(signal.reason);
+              }, {once: true});
+            });
+          };
+        }, {url: origin + '/' + path.relative(root, fixture).split(path.sep).join('/'), course: {...naming.course, date: '2026-11-07'}});
+        await page.locator('#batch-panel > summary').click();
+        await page.locator('#batch-start').click();
+        await page.waitForFunction(() => window.__stopFixture.entered && batchRunning && task && pages.length === 1);
+        assert.equal(await page.locator('#batch-panel').evaluate(panel => panel.open), true);
+        assert.equal(await page.locator('#stop').count(), 1);
+        assert.equal(await page.locator('#batch-jobs .batch-job').count(), 2);
+        assert.match(await page.locator('[data-job-id="stop-zero"]').textContent(), /需要手动框选/);
+        // These frames synchronize the actual screenshot only, not controller progress or button state.
+        await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+        const measured = await page.evaluate(() => {
+          const rect = node => { const r = node.getBoundingClientRect(); return {x: r.x, y: r.y, right: r.right, bottom: r.bottom, width: r.width, height: r.height}; };
+          const clipping = node => {
+            const clips = [{name: 'viewport', x: 0, y: 0, right: innerWidth, bottom: innerHeight, clipX: true, clipY: true}];
+            for (let parent = node.parentElement; parent; parent = parent.parentElement) {
+              const css = getComputedStyle(parent), clipX = /auto|scroll|hidden|clip/.test(css.overflowX), clipY = /auto|scroll|hidden|clip/.test(css.overflowY);
+              if (clipX || clipY) { const r = parent.getBoundingClientRect(); clips.push({name: parent.id || parent.className || parent.tagName,
+                x: r.x + parent.clientLeft, y: r.y + parent.clientTop, right: r.x + parent.clientLeft + parent.clientWidth,
+                bottom: r.y + parent.clientTop + parent.clientHeight, clipX, clipY}); }
+            }
+            return clips;
+          };
+          const contained = (r, clips) => clips.every(c => (!c.clipX || (r.x >= c.x && r.right <= c.right)) && (!c.clipY || (r.y >= c.y && r.bottom <= c.bottom)));
+          const hit = (node, x, y) => { const target = document.elementFromPoint(x, y); return target === node || node.contains(target); };
+          const stop = $('stop'), r = rect(stop), region = rect(stop.parentElement);
+          const targets = [[r.x + 3, r.y + 3], [r.right - 3, r.y + 3], [r.x + 3, r.bottom - 3], [r.right - 3, r.bottom - 3], [r.x + r.width / 2, r.y + r.height / 2]];
+          const essential = ['#batch-panel > summary', '#tab-source', '#tab-extraction', '#tab-export', '#crop-select', '#full', '#shot'].map(selector => {
+            const node = document.querySelector(selector), bounds = rect(node), visible = contained(bounds, clipping(node));
+            const overlap = bounds.x < region.right && bounds.right > region.x && bounds.y < region.bottom && bounds.bottom > region.y;
+            return {selector, visible, overlap, hit: visible ? hit(node, bounds.x + bounds.width / 2, bounds.y + bounds.height / 2) : null};
+          });
+          return {width: innerWidth, height: innerHeight, documentWidth: document.documentElement.scrollWidth, enabled: !stop.disabled,
+            stop: r, region, editor: rect(document.querySelector('.editor-layout')), clips: clipping(stop), targets: targets.map(([x, y]) => ({x, y, hit: hit(stop, x, y)})), essential,
+            captureScroll: $('panel-capture').scrollTop, batchOpen: $('batch-panel').open, running: batchRunning, taskRunning: activeLesson.task.state};
+        });
+        geometry.push(measured); fs.writeFileSync(path.join(output, 'fix-1-stop-geometry.json'), JSON.stringify(geometry, null, 2));
+        assert.equal(measured.enabled && measured.running && measured.batchOpen, true);
+        assert.equal(measured.taskRunning, 'running'); assert.equal(measured.captureScroll, 0, 'fixture never pre-scrolls the capture pane');
+        assert(measured.documentWidth <= width, 'running actions do not add horizontal overflow');
+        if (width > 1020) assert(measured.editor.bottom <= measured.region.y, 'desktop action row reserves space below both panes');
+        for (const clip of measured.clips) assert((!clip.clipX || (measured.stop.x >= clip.x && measured.stop.right <= clip.right)) &&
+          (!clip.clipY || (measured.stop.y >= clip.y && measured.stop.bottom <= clip.bottom)), `enabled Stop escapes its actual clipping context ${clip.name}: ${JSON.stringify(measured)}`);
+        assert(measured.targets.every(target => target.hit), 'all four Stop corners and center are hit-testable before any scroll or click');
+        measured.essential.filter(control => control.visible).forEach(control => assert(!control.overlap && control.hit, `action row covers ${control.selector}`));
+        await page.screenshot({path: path.join(output, `fix-1-expanded-running-${width}x${height}.png`)});
+        const during = await stored(); assert.equal(during.pages.length, before.pages.length + 1);
+        const center = measured.targets[4]; await page.mouse.click(center.x, center.y);
+        assert.equal(await page.evaluate(() => window.__stopFixture.aborted), true, 'the real Stop click aborts the active scan immediately');
+        await page.waitForFunction(() => !batchRunning && !busy() && batchJobs[0].state === 'stopped');
+        assert.equal(await page.locator('#batch-panel').evaluate(panel => panel.open), true, 'Stop keeps the batch disclosure expanded');
+        assert.equal(await page.locator('#stop').isDisabled(), true);
+        assert.match(await page.locator('#batch-status').textContent(), /已停止.*截图均已保留/);
+        const after = await stored(); assert.deepEqual(after.pages, during.pages, 'Stop retains existing and newly committed page bytes');
+        before.pages.forEach(record => assert.deepEqual(after.pages.find(page => page.id === record.id), record));
+        assert.equal(await page.locator('#pages article').count(), 1);
+        measured.cancellation = {immediateAbort: true, retainedBefore: before.pages.length, retainedDuring: during.pages.length,
+          retainedAfter: after.pages.length, activeCards: 1, state: 'stopped', batchStillOpen: true};
+        fs.writeFileSync(path.join(output, 'fix-1-stop-geometry.json'), JSON.stringify(geometry, null, 2));
+        await page.evaluate(() => { PPTScanner.prototype.scan = window.__stopFixture.originalScan; });
+      }
+      await page.setViewportSize({width: 1440, height: 900}); await seed([]);
+    });
+
     await test('1280×800, 1440×900 and 1920×1080 keep video beside a bounded independently scrolling contact sheet', async () => {
       await seed([]); await load(fixture); const sourceKey = await page.evaluate(() => loadedIdentity.sourceKey);
       await seed(Array.from({length: 72}, (_, i) => ({id: i + 1, image: i % 3, sourceTime: i / 20, sourceKey}))); await load(fixture); await atTime(0.25);
