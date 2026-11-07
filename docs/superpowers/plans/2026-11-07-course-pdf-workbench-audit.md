@@ -67,7 +67,7 @@
 
 ## Task 3 — 版本与整体验证
 
-状态：恢复最后验证。原 Task2 owner 的低高度布局与两个限定原生输入块已完成独立gate，四套浏览器结果可按真实源码覆盖合并；Task3尚需运行features与improvements、完成最终报告及自己的独立审查。Task3 source checkpoint `20b67b5efc6a79c51adef33bfc4ca27a97532860`（授权十文件，43+/38−）和独立 128 行未完成报告 `5ccfb360e2d65c2fdfec00c427f87dbda4916353` 已提交，父代理完整读取报告并核验 HEAD 与范围；checkpoint当时剩余五套未运行；当前integration/review/memory/library已由原UI owner按最终产品资源验证，features/improvements待原Task3作者顺序完成。任务原干净 BASE 仍为 `cc8a935bd5cb3461846fa2ae8d4c7feeb9770d22`，全新独立实现者 `de484aa3-3d8e-43af-9a85-a169486c9d52`（codex/gpt-6.1-sol / high）。范围限 3.1.2 元数据、当前版本夹具、使用/测试说明，以及 CI browser 步骤追加 `test:improvements`；完整九套顺序回归和中文同日两课/奇数讲义 PDF 渲染证据待回报。产品 JS/CSS/PDF/取消与存储算法不可在此任务修改；发现真实业务失败则交回原任务实现者。整体审查、根目录实际打包与校验、发布及工作区清理由父代理负责，实现者无这些动作权限。
+状态：完成。全新bb1baa93-d5a2-4aed-b3d8-30b81d5d4f55（sol/high）Spec PASS / Quality PASS，C0/I0/M0，无修正或停放发现；父代理已完整读取137行报告，实现者与审查者均停止。最终两份文档提交 d50620795bd6f48862d059661385d5747db3e950（4+/2−），同一报告最终追加131–259，独立报告/干净HEAD a9c2b9ce98901ad3cc427680547af0965ba3191b；父代理已完整读取追加并核验范围。恢复后的完整features11/11、improvements25/25顺序exit0且作业均已收取。下述为checkpoint与暂停历史：Task3 source checkpoint `20b67b5efc6a79c51adef33bfc4ca27a97532860`（授权十文件，43+/38−）和独立 128 行未完成报告 `5ccfb360e2d65c2fdfec00c427f87dbda4916353` 已提交，父代理完整读取报告并核验 HEAD 与范围；checkpoint当时剩余五套未运行；当前integration/review/memory/library已由原UI owner按最终产品资源验证，features/improvements待原Task3作者顺序完成。任务原干净 BASE 仍为 `cc8a935bd5cb3461846fa2ae8d4c7feeb9770d22`，全新独立实现者 `de484aa3-3d8e-43af-9a85-a169486c9d52`（codex/gpt-6.1-sol / high）。范围限 3.1.2 元数据、当前版本夹具、使用/测试说明，以及 CI browser 步骤追加 `test:improvements`；完整九套顺序回归和中文同日两课/奇数讲义 PDF 渲染证据待回报。产品 JS/CSS/PDF/取消与存储算法不可在此任务修改；发现真实业务失败则交回原任务实现者。整体审查、根目录实际打包与校验、发布及工作区清理由父代理负责，实现者无这些动作权限。
 
 首次 integration probe 在 tests/integration.cjs:212 期望 `/请先补填/`，实际为 `导出失败：PPTMotion is not defined`；作业 `bash-f46eb317080f4612` exit1。父代理只读核实 tests/integration.cjs:102 临时扩展复制表漏掉 motion.js，capture.html:359–361 已在 capture/workspace 之前加载它，scripts/release.cjs:9 实际安装清单也已有该资源。这是夹具消费接口遗漏，未发现新的产品业务问题。Ruling：限定 Task3 为该复制表加入 motion.js，其他断言、权限、拦截与产品源码均保持；只重跑受影响的 integration，再继续后续串行套件。代价是复制清单存在两处，可能继续漂移，须保留这次真实失败与最终打包/强断言核验；不通过模仿 PPTMotion、忽略异常或削弱缺字段检查取得通过。此前本轮 unit224/224、release17/17、bridge三来源已过，只能按实际源覆盖分别记录，不能改称修正后全套重跑。
 
@@ -101,6 +101,28 @@ Ruling：只允许同一原UI owner在这一框选输入块依据公开video尺�
 - 顺序完整 integration量测fddf→review19→memory14→library24 均exit0；仅删新增调查guard后，最终integration7b9再次整链exit0，CSS348d/review84a66及其他三套实际消费的资源不变，不把旧fddf冒称最终fixture。15个job均已逐项收取并finally清理，3PDF渲染/原Referer/0路重载/IDB race与严格输出全部通过；未重复其他5套或7页合成PDF。memory仍maxReads2/restore0animations/节点scroll复用，URL10=允许10为特定视口；JS堆采样差49768B不是RSS，非本地仅阻断未独立计数。
 - 父代理独立读最终[低高度首屏](../../../.test-output/v3.1.2/review-2LKBss/fix-2-expanded-before-scroll-1280x720.png)、[普通滚动可达首卡](../../../.test-output/v3.1.2/review-2LKBss/fix-2-expanded-reachable-1280x720.png)、[390图库](../../../.test-output/v3.1.2/review-2LKBss/fix-2-expanded-reachable-390x844.png)：首屏保留展开任务，普通滚动后完整卡片位于底栏上方，窄屏无横向溢出。截图不独立证明原生事件/时序；这些由真实输入和强断言支撑。
 - 正确b7021c7..25bfd40限定包为9提交/150,386B，包含已知Task3 checkpoint与父代理裁定；全新8963cda0-b33e-4444-a7b7-5951840bbd22（sol/xhigh）完成I2与本次diff新破坏核对，I2 ADDRESSED、Scoped Spec APPROVED / Quality APPROVED，新C0/I0/M0、无范围外发现；父代理完整读取其84行报告。审查者一次不重叠读完1228行包、完整brief（仅补读换行后的原长段）、同一报告274–390及恰好3张指定图，并按具体问题核对有限根/真实字节/原生开始/公开裁剪/Stop源码。没有执行Git、命令、测试、浏览器或网络，不把供给的哈希/作业记录夸成独立实跑，已停止。原I1保护保留；Task3其他元数据/验证仍需独立gate，不用本次限定结论代替。Task2 current gate完成，可从后续干净controller closure恢复原Task3作者。环境仍Node26.13.0/Chrome156/macarm64/合成本地，最低版本、真实课程与原生权限未实测。
+
+## Task3 最终采用的验证记录
+
+下表按实际源码消费和哈希采用结果，不是九套在同一HEAD重跑。恢复前后的42项来源均一致；Task3没有代改UI owner的CSS或两个原生输入块。旧报告128行/15,681 bytes原封保留，三次失败仍为失败。
+
+| 类别 | 实际采用的通过记录 |
+| --- | --- |
+| unit | Task3原224/224，Node测试/模块来源未变 |
+| release | Task3原17/17、34成员临时副本；不代表最终CSS真实ZIP已验证 |
+| bridge | Task3原三种iframe来源通过，foreign拒绝；注入模块未变 |
+| integration | Task2最终永久7b9夹具完整整链，实际crop640×360、精确页序/新页/Referer/IDB/3PDF保持 |
+| review | Task2最终19组，含低高度图库、原生输入、原运行中Stop，errors/blocked空 |
+| features | Task3恢复后11组，job bash-ecec9eef37c946ba，exit0 |
+| memory | Task2最终14组，1000页/256MiB缓存/maxReads2/restore0，非本地仅路由阻断无零尝试计数 |
+| library | Task2最终24组，errors/blocked空 |
+| improvements | Task3恢复后完整25组，job bash-457a78a334c648f4，exit0，真实naming/lesson IDB阻塞与提交；旧stdout focused文案不代表过滤 |
+
+实现者所有作业已收取并finally关闭，无活动mutator。当前环境macarm64/Node26.13.0/npm11.20.0/Chrome156.0.8078.4/Playwright1.62.1/Sharp0.35.4/pdf-lib1.17.1/FFmpeg9.0.2/Poppler26.11.0；未装依赖。来源/93链接/prefix校验和42哈希在task3结果目录中。features的service-worker更新API用忠实本地包装器，不声称全浏览器零外联；improvements page-error只覆盖其实际监听上下文。JS heap49768B是采样差不是RSS。最低Chrome114/Node20、其他OS/真实课程/原生权限和PDF侧栏未人工验收，未产出可选录像。
+
+合成中文同日08:00/10:00的[3,1]课次sample沿用未改pdf.js来源3ee30c2ae58766de877e1fd3f0a6689e8b76507e60eab7b8cc14668069703be1：single4页/handout3张，全部7页由实现者逐页看过；父代理看过handout2/3和最终实际桌面1440、低高度/390图，目录/原JPEG/目的地/空半页由独立硬编码期望核验。没有用图像代替原生目录点击或真实时序证明。
+
+Task3正确冻结包 cc8a935..a9c2b9c，11提交/175,477B；fresh bb1baa93-d5a2-4aed-b3d8-30b81d5d4f55（sol/high）按39行review brief完成Spec+Quality双PASS/C0I0M0。完整1373行包仅读一次，七页PDF和恰好三张实际UI均看过；按问题核对UTF16根/目的地/逐张背压断言、版本/34消费者、原生输入/运行Stop及未弱化的下游链。额外结果字段/日志尾部/owner三SHA先向controller申请后最小补读；不执行Git/命令/测试/浏览器/网络/委派，不读包外controller audit。供给运行与独立源码检查区分清楚，旧临时release不代替实际ZIP。整体最高模型审查与实际34成员CRC/sourcebytes/SHA仍是后续gate。
 
 ## 最终审查与产物
 
