@@ -79,6 +79,14 @@ motion 清单补齐后，integration 的 MP4、命名、缓存释放与 HLS 四�
 
 Ruling：把 I2 交回原 Task2 owner，在保持展开批量和现有固定 Start/Stop 的条件下修复低高度工作区，让用户能通过正常有界滚动到完整卡片，不覆盖底栏、不改排序算法；Task3 checkpoint 后暂停、无并行 mutator。代价是调整最小可用空间/滚动层并增加低高度几何、真实原生拖拽、1000页 lazy 与 Stop/保留回归；保留原 integration 参数、精确页序与新页持久化等强断言。使用同一 Task2 报告追加证据，round2/5 的新独立 scoped review 从上次已审查 b7021c7 定界，不能用 checkpoint 偷换基线；Task3 其他文件由其后续独立 gate 处理。原三套/七页 PDF 仅按未改来源保留，新的 CSS 覆盖与剩余套件另记，不伪称九套已过。
 
+## Ruling10 — 布局修复后区分原生手势与测试 helper
+
+正常20px padding/有限560px第二行的 CSS 指纹为 `348d8ebf56ccd1b1801e121800f7e9fd8fb30147ae17cb1ec3f9c4930b109eb8`。新增 review 用例用连续原生鼠标已在三尺寸通过可信首卡10启动、精确 `[11,12,13,10]`、新页读取持久化/原字节与1000根高度独立性。原 integration helper 仍超时，因此只执行一次忽略目录中的内存被动诊断；job `bash-f2af4a55719542b5` exit1已收取，磁盘 integration 原指纹8127…不变，观察版内存指纹ae1ceed27c1944d7c4fa83e64668f2c5914a547b420968457e29655da724d715。父代理完整读135行 summary.json 与真实 after.png。
+
+此时 document=1280×720，results高560，图库已是 y401.390625..645.390625/h244，正常位于 y665 的55px底栏之上，batch仍open，缩略图4/allowed4/outside[]。原 helper 的可信 pointerdown 为首卡10、pages.scrollTop0，首次可信 dragstart却是第三卡12、rootScroll121；window0/workspace317不变，drop13后正常保存 `[10,11,13,12]`。布局溢出与输入手势错位因此有独立证据。父代理还只读核实已装 Playwright1.62.1 的 coreBundle.js:23549–23568先source move/down，再对target执行pointer action；:19851–19888在target的首个mouse.move之前scrollIntoView，和实测相符。没有修改依赖或产品排序。
+
+Ruling：限定原 UI owner 只将 integration 的拖拽动作改为正确连续原生鼠标：在源卡内真实移动并断言可信首卡 dragstart 后，正常滚到末卡原 x=width-4/y12 右半落点释放；仍断言原精确序列、刷新持久化和所有后续 Referer/PDF/JPEG/IDB，不改强断言、viewport、batch、权限、拦截或timeout。代价是测试多维护几步输入与启动断言，需保留真实事件/哈希和完整链通过，不能靠赋状态/合成事件/force/sleep；不扩大图库只为让 helper 同时看到两行。此为 Ruling9“保留原 helper”的证据驱动限定例外，不是产品算法修补或削弱排序目标。
+
 ## 最终审查与产物
 
 状态：待完成。需记录整体审查结论、实际截图/合成 PDF、34 成员 3.1.2 安装包的 CRC/源字节/SHA-256，以及实际测试环境与未验证项。

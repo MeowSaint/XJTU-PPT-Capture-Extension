@@ -71,9 +71,9 @@
 
 Task3 在 1280×720、批量详情仍展开的真实集成链发现结果区布局回归：#pages 只剩 18px 且 y718.39..736.39 越过 bottom645 的 results/固定底栏。原生事件证明 dragstart 实际抓到第三卡 ID12，随后正确持久化为 [10,11,13,12]；这不是 persistOrder 丢事件。先由 Task3 将版本/夹具工作和完整未完成报告分开 checkpoint 后停止，再恢复原 Task2 owner；禁止并行 mutator。
 
-Files 限 style.css、确有必要的 capture.html 布局包装（当前唯一 3.1.2 span/ID/handler 均保持）、tests/review.cjs 覆盖低高度展开状态；append SAME task-2-report.md。只读/运行当前 tests/integration.cjs，不改它的原始拖拽与强断言；不得在此跟进修改产品业务 JS/PDF/存储/权限/依赖/版本或 Task3 metadata/docs。按设计让工作区自然滚动到完整卡片而不越过底栏，保留 #pages 有界 lazy root/1000 页/读取并发2/URL/节点/scroll 与已经修复的可见 Stop。不自动关闭 batch、不扩大 viewport/强制派事件/额外 sleep 取得通过。
+Files 限 style.css、确有必要的 capture.html 布局包装（当前唯一 3.1.2 span/ID/handler 均保持）、tests/review.cjs 覆盖低高度展开状态；append SAME task-2-report.md。tests/integration.cjs 仅再允许按 Ruling10 将拖拽输入改为真实连续鼠标：源内实际移动触发并断言可信 first-ID dragstart，再正常滚动到原末卡右半落点释放；原强断言、目标 x=width-4/y12、权限/拦截/timeout 不改，其余只读/运行；不得在此跟进修改产品业务 JS/PDF/存储/权限/依赖/版本或 Task3 metadata/docs。按设计让工作区自然滚动到完整卡片而不越过底栏，保留 #pages 有界 lazy root/1000 页/读取并发2/URL/节点/scroll 与已经修复的可见 Stop。不自动关闭 batch、不扩大 viewport/强制派事件/额外 sleep 取得通过。
 
-先保留当前 integration RED 与事件/几何实证，增加真实低高度布局 RED→GREEN，接着 integration→review→memory→library 完整顺序；保留原 integration first→last dragTo 参数、精确页序及新页面持久化/后续 PDF/JPEG/Referer/IDB 断言，覆盖真实启用 Stop/abort/旧新数据保留。正常 1280×800/1440×900/1920×1080/390 布局不退化；读实际低高度展开/常规与窄屏图。源码/追加报告分开提交，所有 job 收取并停止；独立 scoped review 从上次已审查 b7021c7..新HEAD（不是中间 checkpoint）判断新增 I2/本次破坏，Task3 checkpoint 其他文件只作上下文、不重复审核其完整任务。通过后恢复原 Task3；未改的 PDF/版本/样例与有实际源码覆盖的通过项依 Step3 复用，不宣称旧源码全都重跑。
+先保留当前 integration RED 与事件/几何实证，增加真实低高度布局 RED→GREEN，接着 integration→review→memory→library 完整顺序；保留 integration first→last 的原末卡右半落点、精确页序及新页面持久化/后续 PDF/JPEG/Referer/IDB 断言；依据修复布局后的可信事件与本机 Playwright 源码证据，限定用正确连续原生鼠标步骤代替会在真正 dragstart 前滚动目标的 dragTo helper，并新增可信 first-ID 启动检查（Ruling10），覆盖真实启用 Stop/abort/旧新数据保留。正常 1280×800/1440×900/1920×1080/390 布局不退化；读实际低高度展开/常规与窄屏图。源码/追加报告分开提交，所有 job 收取并停止；独立 scoped review 从上次已审查 b7021c7..新HEAD（不是中间 checkpoint）判断新增 I2/本次破坏，Task3 checkpoint 其他文件只作上下文、不重复审核其完整任务。通过后恢复原 Task3；未改的 PDF/版本/样例与有实际源码覆盖的通过项依 Step3 复用，不宣称旧源码全都重跑。
 
 ### Task 3: 3.1.2 版本、说明与整体验证
 
