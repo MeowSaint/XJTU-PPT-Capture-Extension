@@ -8,6 +8,31 @@ const {dependency} = require('./runtime.cjs');
 const {PDFDocument, PDFName} = dependency('pdf-lib');
 const sharp = dependency('sharp');
 const source = fs.readFileSync(path.join(__dirname, '../pdf.js'), 'utf8');
+
+for (const cacheKind of ['absent', 'successful', 'rejecting']) {
+  test(`downloadBlob delayed cleanup handles ${cacheKind} cache without retaining URLs`, async () => {
+    const captureSource = fs.readFileSync(path.join(__dirname, '../capture.js'), 'utf8');
+    const start = captureSource.indexOf('const downloadURLs = new Set();');
+    const end = captureSource.indexOf("window.addEventListener('pagehide'", start);
+    assert(start >= 0 && end > start, 'exercise the production download helper');
+    const timers = [], revoked = [], messages = [], actions = []; let removals = 0;
+    const context = vm.createContext({
+      URL: {createObjectURL: () => 'blob:fixture-download', revokeObjectURL: url => revoked.push(url)},
+      document: {createElement: () => ({click: () => actions.push('click'), remove: () => actions.push('remove')}),
+        body: {append: () => actions.push('append')}},
+      setTimeout: (fn, delay) => { assert.equal(delay, 60000); timers.push(fn); }, status: message => messages.push(message)
+    });
+    vm.runInContext(captureSource.slice(start, end), context);
+    context.cache = cacheKind === 'absent' ? undefined : {remove: async () => { removals++; if (cacheKind === 'rejecting') throw Error('synthetic cleanup failure'); }};
+    vm.runInContext("downloadBlob({}, '课程完整性报告.json', cache)", context);
+    assert.deepEqual(actions, ['append', 'click', 'remove']); assert.equal(timers.length, 1);
+    assert.equal(vm.runInContext('downloadURLs.size', context), 1);
+    assert.doesNotThrow(() => timers[0]()); await new Promise(setImmediate);
+    assert.deepEqual(revoked, ['blob:fixture-download']); assert.equal(vm.runInContext('downloadURLs.size', context), 0);
+    assert.equal(removals, cacheKind === 'absent' ? 0 : 1);
+    assert.deepEqual(messages, cacheKind === 'rejecting' ? ['下载临时文件清理失败：synthetic cleanup failure'] : []);
+  });
+}
 const jpeg = Buffer.from('/9j/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCAADAAcDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAABQf/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCcAAVZf//Z', 'base64');
 const page = (sourceTime = 0, w = 7, h = 3) => ({data: 'data:image/jpeg;base64,' + jpeg.toString('base64'), w, h, sourceTime});
 function exportsWith(overrides = {}) {

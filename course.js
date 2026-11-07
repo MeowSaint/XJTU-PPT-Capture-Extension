@@ -108,6 +108,83 @@
     if (values.length === 1) Object.assign(result, normalize({date: observations[0].info.date, start: observations[0].info.start}));
     return result;
   }
+  function responseContext(endpoint, page) {
+    try {
+      const path = new URL(endpoint, page).pathname;
+      const match = path.match(/\/api\/(?:v1\/rms-service|frontend)\/(?:my|study)-capture-courses\/([^/]+)(?:\/(captures|schedules)(?:\/([^/]+))?)?\/?$/);
+      if (match) return {courseId: decodeURIComponent(match[1]), entity: match[2] === 'captures' ? 'capture' : match[2] === 'schedules' ? 'schedules' : 'course', captureCode: match[2] === 'captures' && match[3] ? decodeURIComponent(match[3]) : ''};
+    } catch { /* An unrelated response has no endpoint authority. */ }
+    return {};
+  }
+  function fromResponse(value, page, endpoint) {
+    const context = responseContext(endpoint, page);
+    // Course roots may contain a capture pointer and an unrelated opening time.
+    // Carry endpoint identity through every envelope in both discovery worlds.
+    if (!context.entity) return fromJSON(value, page);
+    const entity = context.captureCode ? {capture_code: context.captureCode, data: value} : value;
+    return fromJSON({course: {id: context.courseId, [context.entity === 'course' ? 'data' : context.entity]: entity}}, page);
+  }
+  function mediaCandidates(value, page, endpoint) {
+    const context = responseContext(endpoint, page), result = []; let visited = 0;
+    const keyOf = key => key.replace(/[_-]/g, '').toLowerCase();
+    function walk(object, scope = '', depth = 0, entity = context.entity || '', courseId = context.courseId || '', captureCode = context.captureCode || '') {
+      if (depth > 10 || visited++ > 2000 || result.length >= 300) return;
+      if (typeof object === 'string') {
+        const media = root.PPTCore?.mediaInfo(object, page); if (!media) return;
+        let course = {};
+        if (captureCode) {
+          const target = new URL(page);
+          target.pathname = target.pathname.replace(/(\/preview-detail)\/[^/]+\/?$/, '$1');
+          target.hash = target.hash.replace(/(\/preview-detail)\/[^/?#]+/, '$1');
+          target.searchParams.set('captureCode', captureCode);
+          course = fromResponse(value, target.href, endpoint);
+        } else {
+          const name = fromResponse(value, page, endpoint).name;
+          if (name) course.name = name;
+        }
+        result.push({url: media.url, course, ...(courseId ? {courseId: String(courseId)} : {}), ...(captureCode ? {captureCode: String(captureCode)} : {})});
+        return;
+      }
+      if (!object || typeof object !== 'object') return;
+      if (Array.isArray(object)) { object.slice(0, 200).forEach(child => walk(child, scope, depth + 1, entity, courseId, captureCode)); return; }
+      const fields = Object.fromEntries(Object.entries(object).slice(0, 100).map(([key, child]) => [keyOf(key), child]));
+      const recordScope = /^(?:captures?|latestcapture|records?|recordings?|lessons?|schedules?|classes|class|teaching)(?:info|detail)?$/.test(scope);
+      const courseScope = /^(?:course|subject)(?:info|detail)?$/.test(scope);
+      if (recordScope) entity = 'record';
+      if (courseScope) { entity = 'course'; captureCode = ''; }
+      courseId = fields.courseid ?? (courseScope ? fields.id : null) ?? courseId;
+      if (entity !== 'course') {
+        const details = recordScope || /^(?:data|result|info|details?|payload)$/.test(scope);
+        captureCode = fields.capturecode ?? fields.captureid ?? fields.recordid ?? fields.lessonid
+          ?? (details && /^(?:record|capture|schedules)$/.test(entity) ? fields.code ?? fields.id : null) ?? captureCode;
+      }
+      for (const [key, child] of Object.entries(object).slice(0, 100)) walk(child, keyOf(key), depth + 1, entity, courseId, captureCode);
+    }
+    walk(value);
+    return mergeCandidates([], result);
+  }
+  function mergeCandidates(previous = [], incoming = []) {
+    const result = new Map();
+    for (const item of [...previous, ...incoming].slice(-600)) {
+      const media = root.PPTCore?.mediaInfo(item?.url); if (!media) continue;
+      const next = {url: media.url, course: normalize(item.course)};
+      for (const key of ['courseId', 'captureCode']) if (typeof item[key] === 'string' || typeof item[key] === 'number') next[key] = String(item[key]);
+      const old = result.get(next.url);
+      const conflict = old && ['courseId', 'captureCode'].some(key => old[key] && next[key] && old[key] !== next[key]);
+      if (item.ambiguous || old?.ambiguous || conflict) {
+        const name = old?.course.name || next.course.name;
+        result.set(next.url, {url: next.url, course: name ? {name} : {}, ambiguous: true});
+      } else if (old) {
+        // A later unassociated network URL cannot erase identified API metadata.
+        result.set(next.url, {...old, ...next, course: {...old.course, ...next.course}});
+      } else result.set(next.url, next);
+    }
+    return [...result.values()].slice(-300);
+  }
+  function forMedia(url, candidates, fallback) {
+    const match = candidates.find(item => item.url === url);
+    return normalize(match ? {...(fallback?.name ? {name: fallback.name} : {}), ...match.course} : {name: fallback?.name});
+  }
   function fromText(text, title = '', heading = '') {
     text = String(text || '').slice(0, 30000);
     const info = {}, name = text.match(/(?:课程名称|课程名|授课名称)\s*[:：]\s*([^\n\r]+)/)?.[1];
@@ -127,7 +204,7 @@
     const heading = specific?.getAttribute('data-course-name') || specific?.textContent || doc.querySelector('h1')?.textContent || '';
     return fromText(doc.body?.innerText || '', doc.title || '', fromText('', '', heading).name || '');
   }
-  const api = {normalize, forBinding, startParts, filename, fromJSON, fromText, fromDocument};
+  const api = {normalize, forBinding, startParts, filename, fromJSON, fromResponse, mediaCandidates, mergeCandidates, forMedia, fromText, fromDocument};
   root.PPTCourse = api;
   if (typeof module !== 'undefined') module.exports = api;
 })(globalThis);

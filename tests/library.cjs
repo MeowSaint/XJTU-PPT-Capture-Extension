@@ -100,6 +100,63 @@ async function seed({version = 3, pages = [], lessons = [], activeId = lessons[0
   }, {version, specs: pages, lessons, activeId, batches, naming, images});
   await open();
 }
+// Run both real discovery producers on a synthetic page, then feed their reply through
+// the workspace's actual discovery/preflight/select/load/bind path. No injected course values.
+async function producerReply({base, payload, capture = {}, transport = 'fetch', extra = []}) {
+  const producer = await context.newPage(), calls = []; let session;
+  producer.on('pageerror', error => errors.push('producer: ' + error.message));
+  try {
+    await producer.route(origin + '/study-capture-courses/**', route => route.fulfill({contentType: 'text/html', body: '<!doctype html><meta charset="utf-8"><title>资源管理平台</title><p>课程名称：A</p><p>开课时间：2026-09-14 00:00</p>'}));
+    await producer.route(origin + '/api/**', route => {
+      const pathname = new URL(route.request().url()).pathname; calls.push(pathname);
+      return route.fulfill({contentType: 'application/json', body: JSON.stringify(/\/captures\//.test(pathname) ? capture : payload)});
+    });
+    await producer.goto(base);
+    for (const script of ['media.js', 'course.js', 'page-hook.js']) await producer.addScriptTag({content: fs.readFileSync(path.join(root, script), 'utf8')});
+    session = await context.newCDPSession(producer);
+    const {frameTree} = await session.send('Page.getFrameTree');
+    const {executionContextId} = await session.send('Page.createIsolatedWorld', {frameId: frameTree.frame.id, worldName: 'acquisition-isolated'});
+    const isolated = async expression => {
+      const result = await session.send('Runtime.evaluate', {contextId: executionContextId, expression, awaitPromise: true, returnByValue: true});
+      assert.equal(result.exceptionDetails, undefined, result.exceptionDetails?.text); return result.result.value;
+    };
+    await isolated(`window.fixtureMessages = []; window.chrome = {runtime: {id: 'producer-fixture',
+      sendMessage: async message => fixtureMessages.push(message), onMessage: {addListener: fn => { window.fixtureDiscover = fn; }}}};
+      window.PPTState = {hasConsent: async () => true};`);
+    for (const script of ['media.js', 'course.js', 'batch.js', 'content.js']) await isolated(fs.readFileSync(path.join(root, script), 'utf8'));
+    await producer.evaluate(async ({transport, extra}) => {
+      const endpoint = '/api/v1/rms-service/study-capture-courses/42';
+      if (transport === 'xhr') await new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest(); xhr.open('GET', endpoint); xhr.responseType = 'json'; xhr.onload = resolve; xhr.onerror = reject; xhr.send();
+      });
+      else await fetch(endpoint);
+      for (const url of extra) { const video = document.createElement('video'); video.src = url; document.body.append(video); }
+    }, {transport, extra});
+    const reply = await isolated("new Promise(resolve => fixtureDiscover({type: 'PPT_DISCOVER'}, {}, resolve))");
+    // Drain cross-world postMessage tasks after the explicit MAIN query.
+    await isolated('new Promise(resolve => setTimeout(resolve, 30))');
+    const final = await isolated("new Promise(resolve => fixtureDiscover({type: 'PPT_GET_MEDIA'}, {}, resolve))");
+    fs.writeFileSync(path.join(output, `producer-${transport}-${Date.now()}.json`), JSON.stringify({reply, final, calls}, null, 2));
+    return final;
+  } finally { if (session) await session.detach(); await producer.close(); }
+}
+async function discoverReply(base, reply, {storageFirst = false} = {}) {
+  await page.evaluate(async ({base, reply, storageFirst}) => {
+    batchPage = base;
+    chrome.permissions = {contains: async () => true, request: async () => true};
+    chrome.scripting = {executeScript: async () => []};
+    chrome.tabs = {query: async () => [{id: 42, url: base, title: '资源管理平台'}], sendMessage: async () => reply};
+    chrome.storage = {...chrome.storage, session: {get: async key => storageFirst ? {[key]: {page: base, course: reply.course,
+      items: reply.urls.map(url => ({...PPTCore.mediaInfo(url), source: 'synthetic observed', seen: 1}))}} : {}}};
+    await discover();
+  }, {base, reply, storageFirst});
+  await page.waitForFunction(() => !$('sources').disabled && !$('preflight-status').textContent.includes('正在检测') && !$('preflight-status').textContent.includes('等待检测'));
+}
+async function selectedLoad(url) {
+  await page.locator('#tab-source').click(); await page.locator('#sources').selectOption(url); await page.locator('#load').click();
+  await page.waitForFunction(url => sourceReady && !busy() && activeLesson?.source?.url === url, url);
+  await settled();
+}
 async function test(name, body) {
   if (process.env.PPT_TEST_FILTER && !new RegExp(process.env.PPT_TEST_FILTER).test(name)) return;
   await body(); passed.push(name); console.log('PASS ' + name);
@@ -190,6 +247,8 @@ function zipEntries(bytes) {
     await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
     origin = `http://127.0.0.1:${server.address().port}`;
     browser = await chromium.launch({...browserOptions(), downloadsPath: output});
+    fs.writeFileSync(path.join(output, 'environment.json'), JSON.stringify({node: process.version, platform: process.platform, arch: process.arch,
+      playwright: dependency('playwright/package.json').version, browser: browser.version(), executablePath: process.env.PPT_TEST_BROWSER || 'runtime default'}, null, 2));
     context = await browser.newContext({viewport: {width: 1440, height: 900}, acceptDownloads: true, reducedMotion: 'reduce'});
     await context.route('**/*', route => {
       const url = route.request().url();
@@ -200,13 +259,131 @@ function zipEntries(bytes) {
     page.on('pageerror', error => errors.push(error.message));
     await open();
 
+    for (const transport of ['fetch', 'xhr']) await test(`acquisition boundary course opening stays absent through ${transport}, selection, binding and reload`, async () => {
+      const base = origin + '/study-capture-courses/42/preview-detail/a';
+      const url = origin + '/' + path.relative(root, fixture).split(path.sep).join('/') + '?capture=a';
+      await seed({naming: {course: {}, page: '', manual: false}});
+      const reply = await producerReply({base, transport, payload: {data: {id: 42, courseName: 'A', capture_code: 'a', start_time: '2026-09-14 00:00'}},
+        capture: {data: {capture_code: 'a', lesson_videos: [{download_url: url}]}}});
+      assert.deepEqual(reply.course, {name: 'A'}, 'MAIN must not reintroduce the course opening date');
+      await discoverReply(base, reply); await selectedLoad(url);
+      const saved = (await stored()).lessons[0];
+      assert.deepEqual(saved.course, {name: 'A'}); assert.equal(saved.source.url, url); assert.equal(saved.source.sourceKey, 'url:' + url);
+      await page.reload(); await idle(); assert.deepEqual((await stored()).lessons[0], saved);
+      assert.equal(await page.locator('#course-date').inputValue(), ''); assert.equal(await page.locator('#course-start').inputValue(), '');
+    });
+
+    await test('acquisition boundary matched recording endpoints, latest aliases and schedules retain their selected time', async () => {
+      const directory = origin + '/study-capture-courses/42/preview-detail';
+      const url = origin + '/' + path.relative(root, fixture).split(path.sep).join('/') + '?capture=a';
+      const wanted = {name: 'A', date: '2026-09-15', start: '16:40:00'};
+      for (const variant of ['capture', 'latest_capture', 'latestCapture', 'schedules']) {
+        await seed({naming: {course: {}, page: '', manual: false}});
+        const record = {capture_code: 'a', start_time: '2026-09-15T08:40:00Z', lesson_videos: [{download_url: url}]};
+        const payload = {id: 42, courseName: 'A', latest_capture_code: 'a', start_time: '2026-09-14 00:00',
+          ...(variant === 'schedules' ? {schedules: [record, {capture_code: 'b', start_time: '2026-09-16 09:00'}]} : variant === 'capture' ? {} : {[variant]: {data: record}})};
+        const reply = await producerReply({base: directory, payload: {data: {data: payload}}, transport: 'xhr',
+          capture: {data: variant === 'capture' ? record : {capture_code: 'a', lesson_videos: [{download_url: url}]}}});
+        await discoverReply(directory, reply); await selectedLoad(url);
+        assert.deepEqual((await stored()).lessons[0].course, wanted, variant);
+        await page.reload(); await idle(); assert.deepEqual(await page.evaluate(() => namingInfo()), wanted);
+        await page.evaluate(() => { chrome.permissions = {request: async () => true}; });
+        await page.locator('#tab-source').click(); await page.locator('#resume-load').click();
+        await page.waitForFunction(() => sourceReady && !busy());
+        assert.deepEqual((await stored()).lessons[0].course, wanted, 'same-source reopen preserves valid metadata before discovery');
+        if (variant === 'capture') {
+          const id = (await stored()).lessons[0].id;
+          await page.locator('#tab-source').click(); await page.getByText('手动视频地址', {exact: true}).click();
+          await page.locator('#url').fill(url + '&token=renewed'); await page.locator('#load-url').click();
+          await page.waitForFunction(() => sourceReady && !busy()); await settled();
+          const renewed = (await stored()).lessons;
+          assert.equal(renewed.length, 1); assert.equal(renewed[0].id, id);
+          assert.deepEqual(renewed[0].course, wanted, 'canonical same-source identity retains metadata across signing renewal');
+        }
+      }
+    });
+
+    await test('acquisition selection directory maps A and B separately and leaves unmapped time absent after preflight and reload', async () => {
+      const base = origin + '/study-capture-courses/42/preview-detail';
+      const videoURL = origin + '/' + path.relative(root, fixture).split(path.sep).join('/');
+      const urls = {a: videoURL + '?capture=a', b: videoURL + '?capture=b', unmapped: videoURL + '?capture=unknown'};
+      const expected = {a: {name: 'A', date: '2026-09-15', start: '16:40:00'}, b: {name: 'A', date: '2026-09-16', start: '09:00:00'}, unmapped: {name: 'A'}};
+      for (const selected of ['a', 'b', 'unmapped']) {
+        await seed({naming: {course: {}, page: '', manual: false}});
+        const reply = await producerReply({base, payload: {data: {id: 42, courseName: 'A', latest_capture_code: 'b', schedules: [
+          {capture_code: 'a', start_time: '2026-09-15 16:40', lesson_videos: [{download_url: urls.a}]},
+          {capture_code: 'b', start_time: '2026-09-16 09:00', lesson_videos: [{download_url: urls.b}]}
+        ]}}, capture: {capture_code: 'b', urls: [urls.b]}, extra: [urls.unmapped]});
+        await discoverReply(base, reply, {storageFirst: selected === 'b'});
+        const options = await page.locator('#sources option').evaluateAll(options => options.filter(option => !option.disabled).map(option => option.value));
+        for (const url of Object.values(urls)) assert(options.includes(url), 'all usable candidates must remain selectable');
+        await selectedLoad(urls[selected]); const saved = (await stored()).lessons[0];
+        assert.deepEqual(saved.course, expected[selected], selected); assert.equal(saved.source.sourceKey, 'url:' + urls[selected]);
+        await page.reload(); await idle(); assert.deepEqual((await stored()).lessons[0], saved); assert.deepEqual(await page.evaluate(() => namingInfo()), expected[selected]);
+      }
+    });
+
+    await test('acquisition selection corrects only selected automatic history and preserves manual identities, crop, scans and assets', async () => {
+      const base = origin + '/study-capture-courses/42/preview-detail', other = base.replace('/42/', '/99/');
+      const videoURL = origin + '/' + path.relative(root, fixture).split(path.sep).join('/');
+      const urls = {a: videoURL + '?capture=a', b: videoURL + '?capture=b'};
+      const stale = {name: 'A', date: '2026-09-14', start: '00:00:00'}, wanted = {name: 'A', date: '2026-09-15', start: '16:40:00'};
+      const auto = lesson('selected-auto', {course: stale, page: base, namingManual: false, source: {kind: 'remote', page: base, url: urls.a, sourceKey: 'url:' + urls.a},
+        crop: {x: .1, y: .1, w: .7, h: .7}, ignoreRect: {x: .2, y: .2, w: .1, h: .1}, task: {id: 'saved-scan', state: 'paused', checkpoint: 3}, suspects: [{start: 1, end: 2}]});
+      const manual = lesson('selected-manual', {course: {...stale, name: '我的手动名称'}, page: base, source: {kind: 'remote', page: base, url: urls.b, sourceKey: 'url:' + urls.b}});
+      const unrelated = lesson('selected-other-course', {page: other});
+      for (const selected of ['a', 'b']) {
+        await seed({lessons: [auto, manual, unrelated], pages: [{id: 401, lessonId: auto.id}, {id: 402, lessonId: manual.id}, {id: 403, lessonId: unrelated.id}]});
+        const before = await stored();
+        const reply = await producerReply({base, payload: {id: 42, courseName: 'A', latest_capture_code: 'b', schedules: [
+          {capture_code: 'a', start_time: '2026-09-15 16:40', urls: [urls.a]}, {capture_code: 'b', start_time: '2026-09-16 09:00', urls: [urls.b]}
+        ]}, capture: {capture_code: 'b', urls: [urls.b]}});
+        await discoverReply(base, reply); await selectedLoad(urls[selected]); const after = await stored();
+        assert.deepEqual(after.pages, before.pages); assert.deepEqual(after.assets, before.assets);
+        assert.equal(after.lessons.length, before.lessons.length);
+        const savedManual = after.lessons.find(item => item.id === manual.id), beforeManual = before.lessons.find(item => item.id === manual.id);
+        assert.deepEqual({...savedManual, source: beforeManual.source}, beforeManual);
+        assert.equal(savedManual.source.sourceKey, beforeManual.source.sourceKey); assert.equal(savedManual.source.url, urls.b);
+        assert.deepEqual(after.lessons.find(item => item.id === unrelated.id), unrelated);
+        const savedAuto = after.lessons.find(item => item.id === auto.id);
+        assert.deepEqual(savedAuto.course, selected === 'a' ? wanted : stale); assert.equal(savedAuto.id, auto.id);
+        for (const key of ['crop', 'ignoreRect', 'task', 'suspects', 'settings', 'created']) assert.deepEqual(savedAuto[key], auto[key], key);
+        await page.reload(); await idle(); assert.deepEqual(await stored(), after);
+      }
+    });
+
+    await test('acquisition selection late session-cache updates refresh exact candidate metadata before loading', async () => {
+      await page.addInitScript(() => {
+        window.fixtureStorageListeners = [];
+        window.chrome = window.chrome || {};
+        chrome.storage = {onChanged: {addListener: listener => fixtureStorageListeners.push(listener)}};
+      });
+      const base = origin + '/study-capture-courses/42/preview-detail';
+      const videoURL = origin + '/' + path.relative(root, fixture).split(path.sep).join('/'), a = videoURL + '?capture=a', b = videoURL + '?capture=b';
+      await seed({naming: {course: {}, page: '', manual: false}});
+      const reply = await producerReply({base, payload: {id: 42, courseName: 'A', latest_capture_code: 'b', schedules: [
+        {capture_code: 'a', start_time: '2026-09-15 16:40', urls: [a]}, {capture_code: 'b', start_time: '2026-09-16 09:00', urls: [b]}
+      ]}, capture: {capture_code: 'b', urls: [b]}});
+      await discoverReply(base, {...reply, candidates: []}, {storageFirst: true});
+      await page.evaluate(async ({base, reply}) => {
+        chrome.tabs.sendMessage = async () => reply;
+        if (fixtureStorageListeners.length !== 1) throw Error('expected actual capture session-cache listener');
+        await fixtureStorageListeners[0]({'media-42': {newValue: {page: base, course: reply.course,
+          items: reply.urls.map(url => ({...PPTCore.mediaInfo(url), source: 'late synthetic observed', seen: 2}))}}}, 'session');
+      }, {base, reply});
+      await page.waitForFunction(() => !$('sources').disabled && !$('preflight-status').textContent.includes('正在检测') && !$('preflight-status').textContent.includes('等待检测'));
+      await selectedLoad(a);
+      assert.deepEqual((await stored()).lessons[0].course, {name: 'A', date: '2026-09-15', start: '16:40:00'});
+      await page.reload(); await idle(); assert.deepEqual(await page.evaluate(() => namingInfo()), {name: 'A', date: '2026-09-15', start: '16:40:00'});
+    });
+
     await test('recording metadata first remote bind persists detected time and protects same-source manual edits on reopen', async () => {
       const base = origin + '/study-capture-courses/42/preview-detail/a', url = origin + '/' + path.relative(root, fixture).split(path.sep).join('/');
       const detected = {name: 'A', date: '2026-09-15', start: '16:40:00'};
       await seed({naming: {course: {name: 'A', date: '2026-09-14', start: '00:00:00'}, page: base, manual: false}});
       assert.equal(await page.evaluate(async ({base, url, detected}) => {
         coursePage = base; chrome.permissions = {request: async () => true};
-        acceptCourse(detected, base); await namingSave;
+        acceptCourse(detected, base); acceptCandidates([{url, course: detected, courseId: '42', captureCode: 'a'}], base); await namingSave;
         return loadRemote(url, {permissionGranted: true});
       }, {base, url, detected}), true);
       await settled(); const first = (await stored()).lessons[0];
@@ -217,7 +394,7 @@ function zipEntries(bytes) {
       assert.deepEqual(await page.evaluate(() => namingInfo()), detected);
       assert.deepEqual((await stored()).lessons[0].course, detected);
       await page.evaluate(async () => { setNaming({name: 'A', date: '2026-09-14', start: '00:00:00'}, activeLesson.page); await persistLesson(); });
-      await page.evaluate(({base, detected}) => { coursePage = base; acceptCourse(detected, base); }, {base, detected});
+      await page.evaluate(({base, detected, url}) => { coursePage = base; acceptCandidates([{url, course: detected, courseId: '42', captureCode: 'a'}], base); acceptCourse(detected, base); }, {base, detected, url});
       await settled(); assert.deepEqual((await stored()).lessons[0].course, detected);
       assert.equal(await page.evaluate(() => sourceReady), false, 'refresh corrects automatic history without reloading video');
       await page.locator('#tab-export').click(); await page.locator('#course-name').fill('A 手工名称'); await settled();
@@ -239,6 +416,7 @@ function zipEntries(bytes) {
       const job = {id: 'metadata-job', course: detected, url, sourceName: '2-recording.mp4', requiresCrop: false, selected: true, state: 'pending'};
       assert.equal(await page.evaluate(async ({base, job}) => {
         coursePage = batchPage = base; batchJobs = [job]; sourceCourse = {...job.course};
+        acceptCandidates([{url: job.url, course: {name: '其他候选', date: '2026-09-16', start: '09:00:00'}, courseId: '42', captureCode: 'b'}], base);
         chrome.permissions = {request: async () => true};
         return loadRemote(job.url, {permissionGranted: true, batchJob: job, sourceName: job.sourceName});
       }, {base, job}), true);
@@ -249,6 +427,7 @@ function zipEntries(bytes) {
       await page.evaluate(async stale => { setNaming(stale, activeLesson.page); await persistLesson(); }, stale);
       assert.equal(await page.evaluate(async ({base, job}) => {
         coursePage = batchPage = base; batchJobs = [job]; sourceCourse = {...job.course};
+        acceptCandidates([{url: job.url, course: {name: '其他候选', date: '2026-09-16', start: '09:00:00'}, courseId: '42', captureCode: 'b'}], base);
         chrome.permissions = {request: async () => true};
         return loadRemote(job.url, {permissionGranted: true, batchJob: job});
       }, {base, job}), true);

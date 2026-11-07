@@ -5,7 +5,7 @@
   if (window.__pptContentCollector) return;
   const found = new Set();
   let last = '', page = location.href, since = 0;
-  let hookCourse = {}, apiCourse = {}, lastCourse = '';
+  let hookCourse = {}, apiCourse = {}, lastCourse = '', candidates = [];
   let probe = null, discovery = null, requestSerial = 0;
   async function api(path, {signal} = {}) {
     if (!globalThis.PPTState || !await PPTState.hasConsent()) throw Error('请先在截取工具中同意课程资料使用约定');
@@ -17,7 +17,7 @@
   }
   function checkPage() {
     if (page === location.href) return;
-    invalidate(); found.clear(); last = ''; hookCourse = {}; apiCourse = {}; lastCourse = ''; page = location.href; since = performance.now();
+    invalidate(); found.clear(); last = ''; hookCourse = {}; apiCourse = {}; candidates = []; lastCourse = ''; page = location.href; since = performance.now();
   }
   function onNavigation() { if (page !== location.href) probeCurrentPageApi(); }
   window.addEventListener('pagehide', invalidate);
@@ -74,15 +74,15 @@
         if (!payload) continue;
         if (core.extractUrls) core.extractUrls(payload, currentPage).forEach(url => add(url));
         if (globalThis.PPTCourse) {
-          // Only capture/schedule endpoints give generic start_time a lesson meaning.
-          const value = entity ? {[entity]: payload} : payload;
-          apiCourse = {...apiCourse, ...PPTCourse.fromJSON(value, metadataPage.href)};
+          const endpoint = entity === 'course' ? base : entity === 'capture' ? `${base}/captures/${encodeURIComponent(resolvedCode)}` : `${base}/schedules`;
+          candidates = PPTCourse.mergeCandidates(candidates, PPTCourse.mediaCandidates(payload, currentPage, endpoint));
+          apiCourse = {...apiCourse, ...PPTCourse.fromResponse(payload, metadataPage.href, endpoint)};
         }
       }
       const urls = [...found].slice(-150);
       if (urls.length && chrome.runtime?.id) {
         last = JSON.stringify(urls);
-        chrome.runtime.sendMessage({type: 'PPT_MEDIA', urls}).catch(() => {});
+        chrome.runtime.sendMessage({type: 'PPT_MEDIA', ...mediaReply()}).catch(() => {});
       }
       const course = metadata();
       if (Object.keys(course).length && chrome.runtime?.id) {
@@ -107,15 +107,30 @@
   }
   function metadata() { return globalThis.PPTCourse ? (window === window.top ? {...PPTCourse.fromDocument(document), ...hookCourse, ...apiCourse} : {...hookCourse, ...apiCourse}) : {}; }
   function add(raw) { const info = core.mediaInfo(raw, document.baseURI || location.href); if (info) found.add(info.url); }
+  function mediaReply() {
+    const course = metadata(), urls = [...found].slice(-150);
+    return {urls, course, page: location.href, candidates: urls.map(url => {
+      const candidate = candidates.find(item => item.url === url);
+      return {...candidate, url, course: globalThis.PPTCourse ? PPTCourse.forMedia(url, candidates, course) : {}};
+    })};
+  }
   function report() {
     if (!chrome.runtime?.id) return;
     if (page !== location.href) { checkPage(); probeCurrentPageApi(); }
-    document.querySelectorAll('video,source,a[href]').forEach(el => { add(el.currentSrc); add(el.src || el.href); });
+    const route = pageRoute(), domCandidates = [];
+    document.querySelectorAll('video,source,a[href]').forEach(el => {
+      for (const raw of [el.currentSrc, el.src || el.href]) {
+        add(raw);
+        const media = core.mediaInfo(raw, document.baseURI || location.href);
+        if (media && route.captureCode && /^(?:VIDEO|SOURCE)$/.test(el.tagName)) domCandidates.push({url: media.url, courseId: route.courseId, captureCode: route.captureCode, course: metadata()});
+      }
+    });
+    if (globalThis.PPTCourse) candidates = PPTCourse.mergeCandidates(domCandidates, candidates);
     performance.getEntriesByType('resource').filter(entry => entry.startTime >= since).forEach(entry => add(entry.name));
-    const urls = [...found].slice(-150), text = JSON.stringify(urls);
+    const urls = [...found].slice(-150), text = JSON.stringify([urls, candidates]);
     if (urls.length && text !== last) {
       last = text;
-      chrome.runtime.sendMessage({type: 'PPT_MEDIA', urls}).catch(() => {});
+      chrome.runtime.sendMessage({type: 'PPT_MEDIA', ...mediaReply()}).catch(() => {});
     }
     core.postLocalMessage(window, {type: 'PPT_CAPTURE_QUERY_V2'});
     const course = metadata(), courseText = JSON.stringify(course);
@@ -127,7 +142,9 @@
   window.addEventListener('message', event => {
     if (!core.isLocalMessage(event, window) || event.data?.type !== 'PPT_CAPTURE_MEDIA_V2' || !Array.isArray(event.data.urls)) return;
     if (event.data.page && event.data.page !== location.href) return;
+    checkPage();
     event.data.urls.slice(0, 200).forEach(raw => { if (typeof raw === 'string') add(raw); });
+    if (globalThis.PPTCourse && event.data.page === location.href) candidates = PPTCourse.mergeCandidates(candidates, Array.isArray(event.data.candidates) ? event.data.candidates : []);
     if (window === window.top && event.data.page === location.href && globalThis.PPTCourse) hookCourse = {...hookCourse, ...PPTCourse.normalize(event.data.course)};
   });
   chrome.runtime.onMessage.addListener((message, sender, respond) => {
@@ -151,13 +168,13 @@
       return;
     }
     if (message.type === 'PPT_GET_MEDIA') {
-      respond({urls: [...found].slice(-150), course: metadata(), page: location.href});
+      respond(mediaReply());
       return;
     }
     if (message.type !== 'PPT_DISCOVER') return;
     last = ''; lastCourse = ''; report();
     probeCurrentPageApi().finally(() => {
-      respond({urls: [...found].slice(-150), course: metadata(), page: location.href});
+      respond(mediaReply());
     });
     return true;
   });

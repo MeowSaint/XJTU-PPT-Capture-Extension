@@ -160,6 +160,108 @@ function contentHarness(fetchImpl, {hasConsent = async () => true, initialPage =
   return {send: message => new Promise(resolve => listener(message, {}, resolve)), events, location, tick: () => ticks.forEach(fn => fn()), messages};
 }
 
+async function acquisitionVM({transport, directory = false, recordingTime = false}) {
+  const base = page + (directory ? '' : '/a'), endpoint = '/api/v1/rms-service/study-capture-courses/42';
+  const urls = {a: 'http://127.0.0.1/same.mp4?capture=a', b: 'http://127.0.0.1/same.mp4?capture=b', unmapped: 'http://127.0.0.1/same.mp4?capture=unknown'};
+  const record = code => ({capture_code: code, start_time: code === 'a' ? '2026-09-15T08:40:00Z' : '2026-09-16 09:00', urls: [urls[code]]});
+  const payload = {data: {id: 42, courseName: 'A', start_time: '2026-09-14 00:00', ...(directory
+    ? {latest_capture_code: 'b', schedules: [record('a'), record('b')], urls: [urls.unmapped]}
+    : {capture_code: 'a'})}};
+  const detail = directory ? {capture_code: 'b', urls: [urls.b]} : recordingTime ? record('a') : {capture_code: 'a', urls: [urls.a]};
+  const calls = [], worlds = [], mainMessages = []; let listener;
+  const valueFor = input => /\/captures\//.test(String(input)) ? {data: detail} : payload;
+  function world(label) {
+    const events = new Map(), location = new URL(base);
+    const context = vm.createContext({URL, Blob, Response, TextDecoder, AbortController, DOMException, structuredClone, setTimeout, clearTimeout, queueMicrotask,
+      setInterval() {}, location, origin: location.origin, performance: {now: () => 0, getEntriesByType: () => []},
+      document: {baseURI: base, title: '资源管理平台', body: {innerText: '课程名称：A\n开课时间：2026-09-14 00:00'}, querySelector: () => null, querySelectorAll: () => []},
+      fetch: async input => {
+        calls.push({world: label, url: String(input)});
+        const result = new Response(JSON.stringify(valueFor(input)), {headers: {'content-type': 'application/json'}});
+        Object.defineProperty(result, 'url', {value: new URL(input, base).href}); return result;
+      }, PPTState: {hasConsent: async () => true}, chrome: {runtime: {id: 'vm-fixture', sendMessage: async () => {}, onMessage: {addListener: fn => { listener = fn; }}}}});
+    context.window = context; context.top = context;
+    context.addEventListener = (name, fn) => { if (!events.has(name)) events.set(name, []); events.get(name).push(fn); };
+    context.postMessage = data => {
+      if (label === 'main' && data.type === 'PPT_CAPTURE_MEDIA_V2') mainMessages.push(structuredClone(data));
+      for (const receiver of worlds) queueMicrotask(() => receiver.events.get('message')?.forEach(fn => fn({data: structuredClone(data), source: vm.runInContext('window', receiver.context), origin: location.origin})));
+    };
+    class XHR {
+      open(_method, url) { this.responseURL = new URL(url, base).href; }
+      addEventListener(_name, fn) { this.loaded = fn; }
+      getResponseHeader() { return 'application/json'; }
+      send() {
+        calls.push({world: label, url: this.responseURL});
+        this.response = valueFor(this.responseURL); this.responseText = JSON.stringify(this.response);
+        queueMicrotask(() => this.loaded?.());
+      }
+    }
+    context.XMLHttpRequest = XHR;
+    worlds.push({context, events});
+    for (const file of ['media.js', 'course.js']) vm.runInContext(fs.readFileSync(require.resolve('../' + file), 'utf8'), context);
+    return context;
+  }
+  const main = world('main'), isolated = world('isolated');
+  vm.runInContext(fs.readFileSync(require.resolve('../page-hook.js'), 'utf8'), main);
+  vm.runInContext(fs.readFileSync(require.resolve('../batch.js'), 'utf8'), isolated);
+  vm.runInContext(fs.readFileSync(require.resolve('../content.js'), 'utf8'), isolated);
+  try {
+    for (const url of [endpoint, endpoint + '/captures/' + (directory ? 'b' : 'a')]) {
+      if (transport === 'fetch') await main.fetch(url);
+      else { const xhr = new main.XMLHttpRequest(); xhr.open('GET', url); xhr.responseType = 'json'; xhr.send(); }
+    }
+    const send = message => new Promise(resolve => listener(message, {}, resolve));
+    await send({type: 'PPT_DISCOVER'});
+    await until(() => mainMessages.some(message => message.urls.length)); await new Promise(setImmediate);
+    const reply = JSON.parse(JSON.stringify(await send({type: 'PPT_GET_MEDIA'})));
+    assert(calls.some(call => call.world === 'main' && call.url.includes('study-capture-courses/42')));
+    assert(calls.some(call => call.world === 'isolated' && call.url.endsWith('/captures/' + (directory ? 'b' : 'a'))));
+    return {reply, urls};
+  } finally { worlds.forEach(receiver => receiver.events.get('pagehide')?.forEach(fn => fn())); }
+}
+async function selectedVMBinding(reply, url) {
+  const saved = [], nodes = {progress: {value: 0}}, noop = () => {};
+  const context = vm.createContext({URL, Blob, AbortController, structuredClone, crypto: require('node:crypto').webcrypto,
+    sourceCourse: reply.course, sourceCandidates: reply.candidates || [], coursePage: reply.page, candidatesPage: reply.page,
+    dbReady: Promise.resolve(), lessonSave: Promise.resolve(), namingSave: Promise.resolve(), lessons: [], activeLesson: null, activeBatchJob: null,
+    namingManual: false, namingPage: reply.page, db: {}, studyAccepted: true, task: null, realtimeTimer: null, realtimeBusy: false,
+    reviewBusy: false, exportBusy: false, pageWrites: 0, batchRunning: false, pendingURL: '', pendingOrigins: [],
+    lastAcquisitionFailure: '', sourceName: '', sourceReady: false, loadedIdentity: null, objectURL: null,
+    $: id => nodes[id], controls: noop, status: noop, invalidateUndo: noop, releaseSource: async () => {}, setCourseReferrer: async () => {},
+    fetchVideo: async () => new Blob(['synthetic video']), awaitVideo: async () => {}, applyBatchCrop: async () => {},
+    video: {duration: 6, videoWidth: 640, videoHeight: 360, pause: noop}, frame: noop, draw: noop, timecode: String,
+    originPattern: raw => new URL(raw).origin + '/*', namingInfo: () => reply.course, scanSettings: () => ({step: .5}),
+    syncAllPages: noop, forgetUndo: noop, applyLesson: noop, render: noop, renderLibrary: noop,
+    releaseFailedSource: async error => error, acquisitionReason: () => 'VM_LOAD',
+    PPTLibrary: {...require('../library.js'), put: async (_db, lesson) => saved.push(structuredClone(lesson)), activate: async () => {}}});
+  for (const file of ['media.js', 'course.js']) vm.runInContext(fs.readFileSync(require.resolve('../' + file), 'utf8'), context);
+  const source = fs.readFileSync(require.resolve('../capture.js'), 'utf8');
+  for (const [start, end] of [['async function bindLesson(', 'async function switchLesson('], ['async function loadRemote(', "$('load').onclick"]]) {
+    const first = source.indexOf(start), last = source.indexOf(end, first);
+    assert(first >= 0 && last > first, 'exercise actual source loading and binding functions'); vm.runInContext(source.slice(first, last), context);
+  }
+  try {
+    assert.equal(await context.loadRemote(url, {permissionGranted: true}), true);
+    assert.equal(saved.length, 1); return JSON.parse(JSON.stringify(saved[0]));
+  } finally { if (context.objectURL) URL.revokeObjectURL(context.objectURL); }
+}
+for (const transport of ['fetch', 'xhr']) {
+  for (const recordingTime of [false, true]) test(`acquisition VM ${transport} MAIN through isolated reply and selected binding keeps ${recordingTime ? 'matched recording time' : 'opening time absent'}`, async () => {
+    const {reply, urls} = await acquisitionVM({transport, recordingTime});
+    const expected = recordingTime ? {name: 'A', date: '2026-09-15', start: '16:40:00'} : {name: 'A'};
+    assert.deepEqual(reply.course, expected);
+    const saved = await selectedVMBinding(reply, urls.a);
+    assert.deepEqual(saved.course, expected); assert.equal(saved.source.sourceKey, 'url:' + urls.a);
+  });
+  test(`acquisition VM ${transport} directory selection binds each exact A, B and unmapped source`, async () => {
+    const {reply, urls} = await acquisitionVM({transport, directory: true});
+    for (const [selected, expected] of Object.entries({a: {name: 'A', date: '2026-09-15', start: '16:40:00'}, b: {name: 'A', date: '2026-09-16', start: '09:00:00'}, unmapped: {name: 'A'}})) {
+      assert(reply.urls.includes(urls[selected])); const saved = await selectedVMBinding(reply, urls[selected]);
+      assert.deepEqual(saved.course, expected, selected); assert.equal(saved.source.sourceKey, 'url:' + urls[selected]);
+    }
+  });
+}
+
 test('API recording time wins over DOM and generic course opening fallback is rejected', async () => {
   const h = contentHarness(async () => response({data: {courseId: 42, captureId: 'c1', courseName: 'A', start_time: '2026-09-15T08:40:00Z'}}),
     {initialPage: page + '/c1', text: '课程名称：DOM\n上课时间：2026-09-14 00:00'});

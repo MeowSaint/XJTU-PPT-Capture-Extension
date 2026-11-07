@@ -13,6 +13,7 @@ let batchDiscovery = null;
 const referrerRule = 16220;
 let referrerOrigins = new Set(), referrerPage = '', referrerWrites = Promise.resolve();
 let sourceCourse = {}, sourceCoursePage = '', namingPage = '', namingManual = false, namingSave = Promise.resolve(), discoverySerial = 0;
+let sourceCandidates = [], candidatesPage = '';
 let videoCache = null, previewURL = null, previewLoadingId = null, previewRevision = 0;
 let allPages = [], lessons = [], activeLesson = null, savedBatches = [], lessonSave = Promise.resolve(), scanId = '';
 let savedPDFOptions = {layout: 'single', timestamps: false, bookmarks: false};
@@ -81,11 +82,11 @@ function sameMediaSource(a, b) {
   if (!a || !b) return false;
   return PPTBatch.trackKey(a) === PPTBatch.trackKey(b);
 }
-async function bindLesson(source) {
+async function bindLesson(source, detectedCourse = sourceCourse) {
   await dbReady; await lessonSave;
   const key = PPTLibrary.key(source);
   let lesson = lessons.find(item => item.source && PPTLibrary.key(item.source) === key);
-  const detected = source.batchJobId ? activeBatchJob?.course || {} : sourceCourse;
+  const detected = source.batchJobId ? activeBatchJob?.course || {} : detectedCourse;
   if (!lesson) {
     // A course-level form is not a manual override for a newly selected batch lesson.
     const manual = !source.batchJobId && !activeLesson && namingManual && namingPage === (source.page || '');
@@ -352,8 +353,12 @@ function persistNaming() {
   namingSave.catch(e => status('命名信息保存失败：' + e.message));
   return namingSave;
 }
+function acceptCandidates(items, page) {
+  if (candidatesPage !== page) { sourceCandidates = []; candidatesPage = page; }
+  sourceCandidates = PPTCourse.mergeCandidates(sourceCandidates, Array.isArray(items) ? items : []);
+}
 function acceptCourse(info, page) {
-  if (sourceCoursePage !== page) sourceCourse = {};
+  if (sourceCoursePage !== page) { sourceCourse = {}; acceptCandidates([], page); }
   sourceCoursePage = page; sourceCourse = {...sourceCourse, ...PPTCourse.normalize(info)};
   const option = $('course').selectedOptions[0];
   if (page === coursePage && option && sourceCourse.name) option.textContent = sourceCourse.name;
@@ -363,7 +368,10 @@ function acceptCourse(info, page) {
     // A directory's latest lesson cannot rename a different retained batch lesson.
     const sameLesson = activeLesson?.page === page && !activeLesson.source?.batchJobId && /\/preview-detail\/[^/?#]+/.test(page);
     if (!namingManual && (!activeLesson || (!activeLesson.source && !pages.length) || sameLesson)) {
-      setNaming(PPTCourse.forBinding(sourceCourse, namingInfo()), page); persistNaming();
+      const selected = sameLesson && activeLesson.source?.kind === 'remote';
+      const candidate = selected && candidatesPage === page && sourceCandidates.find(item => item.url === activeLesson.source.url);
+      const detected = selected ? candidate ? PPTCourse.forMedia(candidate.url, [candidate], sourceCourse) : activeLesson.course : sourceCourse;
+      setNaming(PPTCourse.forBinding(detected, namingInfo()), page); persistNaming();
     }
   }).catch(() => {});
 }
@@ -1200,7 +1208,12 @@ async function loadRemote(raw, options = {}) {
     }
     if (!(video.duration > 0) || !Number.isFinite(video.duration)) throw Error('视频没有可用的完整时长，无法快速扫描');
     sourceReady = true; loadedIdentity = {sourceName, coursePage, batchJobId: batchJob?.id || '', sourceKey: 'url:' + info.url};
-    await bindLesson({kind: 'remote', url: info.url, ...loadedIdentity, page: coursePage, duration: video.duration});
+    const source = {kind: 'remote', url: info.url, ...loadedIdentity, page: coursePage, duration: video.duration};
+    const candidates = candidatesPage === coursePage ? sourceCandidates : [];
+    const candidate = candidates.find(item => item.url === info.url);
+    const retained = !candidate && lessons.find(item => item.source && PPTLibrary.key(item.source) === PPTLibrary.key(source));
+    const detected = retained ? retained.course : PPTCourse.forMedia(info.url, candidates, sourceCourse);
+    await bindLesson(source, detected);
     await applyBatchCrop(batchJob);
     video.pause(); frame(0); draw(); $('progress').value = 0;
     status(`已加载 ${sourceName} · ${timecode(video.duration)} · ${video.videoWidth} × ${video.videoHeight}。可框选 PPT 或直接开始快速提取。`);
@@ -1237,7 +1250,7 @@ function downloadBlob(blob, name, cache) {
   document.body.append(link); link.click(); link.remove();
   setTimeout(() => {
     URL.revokeObjectURL(url); downloadURLs.delete(url);
-    cache.remove().catch(e => status('下载临时文件清理失败：' + e.message));
+    cache?.remove().catch(e => status('下载临时文件清理失败：' + e.message));
   }, 60000);
 }
 window.addEventListener('pagehide', () => {
@@ -1922,6 +1935,7 @@ async function discover() {
     await chrome.scripting.executeScript({target: {tabId: id, allFrames: true}, files: ['media.js', 'course.js', 'batch.js', 'extension-state.js', 'content.js']}).catch(() => {});
     let discovered = await chrome.tabs.sendMessage(id, {type: 'PPT_DISCOVER'}, {frameId: 0}).catch(() => null);
     const courseReply = await chrome.tabs.sendMessage(id, {type: 'PPT_COURSE'}, {frameId: 0}).catch(() => null);
+    let mediaReply = await chrome.tabs.sendMessage(id, {type: 'PPT_GET_MEDIA'}, {frameId: 0}).catch(() => null);
     if (revision !== discoverySerial) return;
     const key = 'media-' + id, tabUrl = tabs.find(t => t.id === id)?.url;
     let entry = (await chrome.storage.session.get(key))[key];
@@ -1931,7 +1945,7 @@ async function discover() {
       await new Promise(resolve => setTimeout(resolve, 350));
       if (revision !== discoverySerial) return;
       discovered = await chrome.tabs.sendMessage(id, {type: 'PPT_DISCOVER'}, {frameId: 0}).catch(() => discovered);
-      const mediaReply = await chrome.tabs.sendMessage(id, {type: 'PPT_GET_MEDIA'}, {frameId: 0}).catch(() => null);
+      mediaReply = await chrome.tabs.sendMessage(id, {type: 'PPT_GET_MEDIA'}, {frameId: 0}).catch(() => mediaReply);
       entry = (await chrome.storage.session.get(key))[key];
       if (revision !== discoverySerial) return;
       sources = entry?.page === tabUrl ? entry.items : [];
@@ -1939,9 +1953,21 @@ async function discover() {
         const fallbackUrls = mediaReply?.page === tabUrl && Array.isArray(mediaReply.urls) ? mediaReply.urls : discovered?.page === tabUrl && Array.isArray(discovered.urls) ? discovered.urls : [];
         sources = fallbackUrls.map(raw => PPTCore.mediaInfo(raw, tabUrl)).filter(Boolean).map(info => ({...info, source: '页面 / 播放器', seen: Date.now()}));
       }
-      if (mediaReply?.page === coursePage) acceptCourse(mediaReply.course, coursePage);
     }
+    // The session URL cache is legacy-compatible; candidate authority comes directly
+    // from the current top-frame discovery reply even when that cache is populated.
+    const combined = new Map(sources.map(item => [item.url, item]));
+    for (const reply of [discovered, courseReply, mediaReply]) {
+      if (reply?.page !== coursePage) continue;
+      acceptCandidates(reply.candidates, coursePage);
+      for (const raw of Array.isArray(reply.urls) ? reply.urls : []) {
+        const info = PPTCore.mediaInfo(raw, coursePage);
+        if (info && !combined.has(info.url)) combined.set(info.url, {...info, source: '页面 / 播放器', seen: Date.now()});
+      }
+    }
+    sources = [...combined.values()];
     if (entry?.page === coursePage) acceptCourse(entry.course, coursePage);
+    if (mediaReply?.page === coursePage) acceptCourse(mediaReply.course, coursePage);
     if (courseReply?.page === coursePage) acceptCourse(courseReply.course, coursePage);
     if (discovered?.page === coursePage) acceptCourse(discovered.course, coursePage);
     updateSources(true);
@@ -1955,6 +1981,8 @@ function sourceSummary() {
   return context + (sources.length ? `已发现 ${sources.length} 个视频地址，选好后点击“加载选中视频”。` : '当前课次暂无单节视频候选。可刷新课程页并播放一次，再点“刷新视频列表”。');
 }
 function updateSources(reset = false) {
+  sources = sources.map(item => ({...item, ...(sourceCandidates.find(candidate => candidate.url === item.url) || {}),
+    course: PPTCourse.forMedia(item.url, sourceCandidates, sourceCourse)}));
   window.PPTWorkspace?.refreshSources(sources, coursePage, {reset});
   controls();
 }
@@ -1976,9 +2004,20 @@ $('page-limit').onchange = async () => {
   await limitsSave; renderLibrary(); controls();
 };
 for (const id of ['mode', 'diff', 'dedupe', 'stable']) $(id).onchange = () => { saveLessonSettings(); controls(); };
-if (window.chrome?.storage?.onChanged) chrome.storage.onChanged.addListener((changes, area) => {
-  const value = changes['media-' + $('course').value]?.newValue;
-  if (area === 'session' && value?.page === coursePage) { sources = value.items; acceptCourse(value.course, value.page); updateSources(); $('source-status').textContent = sourceSummary(); }
+if (window.chrome?.storage?.onChanged) chrome.storage.onChanged.addListener(async (changes, area) => {
+  const id = Number($('course').value), value = changes['media-' + id]?.newValue;
+  if (area !== 'session' || value?.page !== coursePage) return;
+  const revision = discoverySerial, page = coursePage;
+  const reply = await chrome.tabs?.sendMessage(id, {type: 'PPT_GET_MEDIA'}, {frameId: 0}).catch(() => null);
+  if (revision !== discoverySerial || page !== coursePage) return;
+  if (reply?.page === page) acceptCandidates(reply.candidates, page);
+  const combined = new Map((value.items || []).map(item => [item.url, item]));
+  for (const raw of reply?.page === page && Array.isArray(reply.urls) ? reply.urls : []) {
+    const info = PPTCore.mediaInfo(raw, page);
+    if (info && !combined.has(info.url)) combined.set(info.url, {...info, source: '页面 / 播放器', seen: Date.now()});
+  }
+  sources = [...combined.values()]; acceptCourse(reply?.page === page ? reply.course : value.course, page);
+  updateSources(); $('source-status').textContent = sourceSummary();
 });
 $('lesson-select').onchange = () => switchLesson($('lesson-select').value);
 $('resume-load').onclick = () => {

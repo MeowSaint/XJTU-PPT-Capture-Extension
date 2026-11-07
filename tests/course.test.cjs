@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const vm = require('node:vm'), fs = require('node:fs');
 const course = require('../course.js'), core = require('../media.js');
+global.PPTCore = core;
 const page = 'https://rms-v5.xjtu.edu.cn/my-capture-courses/16220/preview-detail/477014';
 const expected = {name: '传感网络与大数据技术', date: '2026-09-07', start: '15:30:00'};
 
@@ -98,6 +99,34 @@ test('recording entities and explicit lesson fields retain matched nested metada
   }
   assert.deepEqual(course.fromJSON({courseName: 'A', lessons: [{start_time: '2026-09-15 16:40'}, {start_time: '2026-09-16 16:40'}]}, page), {name: 'A'});
   assert.deepEqual(course.fromJSON({course: {id: 16220, name: 'A'}, capture: {id: 477014, data: {course: {name: 'A', start_time: '2026-09-14 00:00'}, start_time: '2026-09-15 16:40'}}}, page), wanted);
+});
+test('endpoint context preserves course scope through envelopes and capture authority through identifier-free details', () => {
+  const endpoint = '/api/v1/rms-service/my-capture-courses/16220';
+  const payload = {data: {result: {id: 16220, courseName: 'A', capture_code: '477014', start_time: '2026-09-14 00:00'}}};
+  assert.deepEqual(course.fromResponse(payload, page, endpoint), {name: 'A'});
+  assert.deepEqual(course.fromResponse(payload, page, endpoint.replace('16220', '99')), {});
+  assert.deepEqual(course.fromResponse({data: {start_time: '2026-09-15T08:40:00Z'}}, page, endpoint + '/captures/477014'), {date: '2026-09-15', start: '16:40:00'});
+  assert.deepEqual(course.fromResponse({data: {start_time: '2026-09-15T08:40:00Z'}}, page, endpoint + '/captures/other'), {});
+});
+test('exact candidate URLs retain A/B metadata, isolate nested course pointers, and make conflicting URL identities name-only', () => {
+  const endpoint = '/api/v1/rms-service/my-capture-courses/16220', a = 'http://127.0.0.1/same-name.mp4?source=a', b = a.replace('=a', '=b');
+  const payload = {data: {id: 16220, courseName: 'A', capture_code: '477014', start_time: '2026-09-14 00:00', urls: [a + '&unmapped=1'], schedules: [
+    {capture_code: '477014', start_time: '2026-09-15 16:40', lesson_videos: [{id: 900, download_url: a}]},
+    {capture_code: 'other', start_time: '2026-09-16 09:00', lesson_videos: [{id: 901, download_url: b}]}
+  ]}};
+  for (const route of [page, page.replace('/my-', '/study-'), page.replace('/my-', '/#/study-')]) {
+    const candidates = course.mediaCandidates(payload, route, endpoint);
+    assert.deepEqual(course.forMedia(a, candidates, {name: 'A', date: '2026-09-14'}), {name: 'A', date: '2026-09-15', start: '16:40:00'});
+    assert.deepEqual(course.forMedia(b, candidates, {name: 'A'}), {name: 'A', date: '2026-09-16', start: '09:00:00'});
+    assert.deepEqual(course.forMedia(a + '&unmapped=1', candidates, {name: 'A', date: '2026-09-14'}), {name: 'A'});
+    const known = candidates.find(item => item.url === a);
+    const retained = course.mergeCandidates([known], [{url: a, course: {name: 'A'}}]);
+    assert.deepEqual(retained, [known]);
+    const conflict = course.mergeCandidates([known], [{...known, captureCode: 'other', course: {name: 'A', date: '2026-09-16'}}]);
+    assert.deepEqual(course.forMedia(a, conflict, {name: 'A', date: '2026-09-14'}), {name: 'A'});
+    assert.equal(conflict[0].ambiguous, true);
+    assert.deepEqual(course.mergeCandidates(conflict, [known]), conflict, 'later observations cannot restore an ambiguous URL mapping');
+  }
 });
 test('binding uses detected values unless the same source has explicit manual edits', () => {
   const detected = {name: 'A', date: '2026-09-15', start: '16:40:00'}, displayed = {name: '旧名称', date: '2026-09-14', start: '00:00:00'};
