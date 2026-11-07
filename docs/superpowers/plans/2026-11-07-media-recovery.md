@@ -34,17 +34,18 @@
 **Files:** Create `mp4-recovery.js`, `tests/mp4-recovery.test.cjs`; Modify `package.json`。模块暂不接入浏览器，先独立验证；不要动其他阶段/控制器文档。
 
 **Interfaces:**
-- Produces `PPTMP4.inspect(blob,{signal}={}) -> Promise<Inspection>` / `PPTMP4.prepare(blob,{signal}={}) -> Promise<Prepared>`；字段和状态严格按Spec §1，不暴露外部patch计划。
+- Produces `PPTMP4.inspect(blob,{signal}={}) -> Promise<Inspection>` / `PPTMP4.prepare(blob,{signal}={}) -> Promise<Prepared>`；字段和状态严格按Spec §1，不暴露外部patch计划。公开movieDuration/videoDuration为秒，后者用tkhd presentation duration而非mdhd原始媒体长度；movieTimescale为ticks/second，内部关系仍按原始时基精确校验。取消拒绝name='AbortError'；真实读取错误拒绝code='LOCAL_READ_FAILED'/phase='local-read'并保留cause，两者不返回伪造Inspection或触发重复原生加载。
 - Limits:65536/read、16777216累计、50000boxes、depth8、32tracks；生产不可从网页输入扩大。Node测试可用Blob-like稀疏对象验证大offset，不分配巨型Buffer。
 - eligible仅单启用clear AVC avc1/avc3 +普通AAC mp4a，duration/edit/依赖等按Spec §2。稳定codes至少覆盖AUDIO_OMITTED/NO_AUDIO/OTHER_CONTAINER/FRAGMENTED_MP4/UNSUPPORTED_TRACKS/UNSUPPORTED_CODEC/TRACK_REFERENCES/ENCRYPTED/UNSUPPORTED_TIMELINE/LIMIT_EXCEEDED/MISSING_MOOV/MALFORMED_BOX。
 - prepare：eligible→同长度patch Blob/audio-omitted；video-only/unsupported→同一原Blob/original；confirmed malformed recognized MP4/missing-index→reject/null；abort/read error不伪装成missing-index。
 
-- [ ] **Step 1: 写失败测试**。用小型box构造器生成合法/负例，覆盖头/尾moov、多mdat、32/64bit/uuid/size0、截断/重复/嵌套size0、不可信counts、fMP4、加密/引用/外部dref、未知codec/brands、video-only、多track、时序v0/v1、普通positive media_time edit、复杂edit/零timescale/sentinel/duration不符；取消/读失败/每种预算限制。
+- [ ] **Step 1: 写失败测试**。用小型box构造器生成合法/负例，覆盖头/尾moov、多mdat、32/64bit/uuid/size0、截断/重复/嵌套size0、不可信counts、fMP4、加密/引用/外部dref、未知codec/brands、video-only、多track、时序v0/v1、普通positive media_time edit、复杂edit/零timescale/sentinel/duration不符。movie timescale=1000、mvhd/tkhd duration=8000必须公开为8秒；positive edit下mdhd原始长度可为8.1秒，不能替代videoDuration。ftyp-only/ftyp+free空壳须unsupported且prepare保原Blob；只有完整合法、非碎片、非空mdat且无moov的夹具才断言missing-index。取消断言name='AbortError'、公开Promise结束且迟到读不继续；读失败断言code='LOCAL_READ_FAILED'/phase='local-read'/cause原异常；逐种证明预算真的限制读取。
 
 ```js
 assert.equal(prepared.mode, 'audio-omitted');
 assert.equal(prepared.blob.size, original.size);
-assert.deepEqual(changedOffsets, audioTrackTypeOffsets.flatMap(n=>[n,n+1,n+2,n+3]));
+assert.equal(changedOffsets.every(n => audioTrackTypeOffsets.some(t => n >= t && n < t + 4)), true);
+assert.deepEqual(patchedTrackTypes, audioTrackTypeOffsets.map(() => 'free'));
 assert.deepEqual(retainedVideoBytes, originalVideoBytes);
 assert.equal(maxRead <= 65536, true);
 assert.equal(mdatPayloadReads, 0);
@@ -64,7 +65,7 @@ type字节可能相同的字符位置不变，changedOffsets断言应比较“�
 **Files:** Modify `capture.js`, `capture.html`, `media.js`, `scanner.js`, `scripts/release.cjs`, `tests/release.test.cjs`, `tests/core.test.cjs`, `tests/scanner.test.cjs`, `tests/library.cjs`, `tests/features.cjs`, `tests/integration.cjs`, `README.md`, `tests/README.md`；必要修正Task1的 `mp4-recovery.js` / `tests/mp4-recovery.test.cjs` 必须有具体失败证据。不修改permissions或引入新依赖。
 
 **Interfaces:**
-- Consumes Task1 inspect/prepare、第一阶段的coverage/report/取消和原OPFS生命周期。
+- Consumes Task1 inspect/prepare、第一阶段的coverage/report/取消和原OPFS生命周期。inspection时长按秒与native duration比较；AbortError按取消清理，LOCAL_READ_FAILED/local-read按本地读取失败解释，不当missing-index、不重复加载。保留第一阶段候选URL精确关联、可选candidates字段、batch job.course和同源手动命名优先级；接口与证据交接见 `docs/superpowers/plans/2026-11-07-long-session-acquisition-audit.md`，媒体准备不能回退为所有URL共享一份全局课次日期。
 - Produces `PPTCore.mediaError(mediaError,{phase='load',local=false,audioOmitted=false,time=null}={}) -> Error`，附code/phase/nativeCode/time。媒体码只说明实际已知失败，不单凭nativeCode确诊音频/视频损坏。
 - Extends `PPTScanner(video,frame,mediaContext={})` 可选第三参数，旧两参数兼容；load/seek错误共用解释。seek保留30s期限与AbortSignal。
 - `fetchVideo(url,signal,{timeoutMs=30000}={})` 首响应/每次body read无进展期限；清除计时器，完整206判定与可比Content-Length检查见Spec §4。

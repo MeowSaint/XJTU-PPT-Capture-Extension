@@ -24,11 +24,13 @@ Inspection = {format:'mp4'|'other'|'unknown', status:'eligible'|'video-only'|'un
 Prepared = {mode:'audio-omitted'|'original'|'reject', blob:Blob|null, inspection:Inspection}
 ```
 
-模块只处理已完整获取的Blob，不fetch、不碰DOM/OPFS/URL。每次read≤65536字节，累计读≤16777216字节（重复也计），最多50000 boxes、深度8、32 tracks。只按已验证父容器/offset遍历，不在原始字节中搜索box名、不读取mdat payload、不按不可信count分配数组。前后都检查signal，取消即结束公开Promise并忽略迟到读结果；真实读取错误单列local-read，不伪装成无索引。超预算是unsupported/unverified。
+`movieDuration`、`videoDuration` 的公开单位都是秒：分别为mvhd duration / movieTimescale和保留视频tkhd presentation duration / movieTimescale；后者不是mdhd原始媒体长度。`movieTimescale` 是ticks/second。时长缺失或不能安全解释时为null，不能凭猜测填值；内部准入仍在原始时基中精确比较，不能靠舍入后的秒值放行。Task2用这些秒值与原生video.duration比较。
+
+模块只处理已完整获取的Blob，不fetch、不碰DOM/OPFS/URL。每次read≤65536字节，累计读≤16777216字节（重复也计），最多50000 boxes、深度8、32 tracks。只按已验证父容器/offset遍历，不在原始字节中搜索box名、不读取mdat payload、不按不可信count分配数组。前后都检查signal，取消即以name='AbortError'拒绝公开Promise并忽略迟到读结果；真实读取错误以code='LOCAL_READ_FAILED'、phase='local-read'的Error拒绝，并保留cause，不伪装成无索引。两种拒绝都不触发原文件重复加载；Task2分别处理取消或本地读取失败并清理所属资源。正常unsupported返回Inspection，并由prepare原样passthrough；超预算是unsupported/unverified。
 
 支持普通32位size、size=1的64位extended header（BigInt检查范围后转换）、顶层size=0到EOF、uuid额外header。要求严格前进、不超父box/文件、安全整数、不接受截断或歧义的重复关键box；嵌套size=0拒绝重写。仅已识别ISO/MP4品牌才可能诊断格式损坏，其他容器/未知品牌原样交原生路径。
 
-缺少moov只能在认可的非碎片MP4完整且合法的顶层遍历后判定。moov位于文件尾是正常情况。仅ftyp、64KiB首段、读失败或超预算不能证明无索引。moof或moov/mvex一律不重写，包括只有初始化段的碎片文件。
+缺少moov只能在认可的非碎片MP4完整且合法的顶层遍历后，并且已见到边界有效、payload非空的mdat时判定；不读取payload。moov位于文件尾是正常情况。仅ftyp（包括只附有free/skip的空壳）、64KiB首段、读失败或超预算不能证明无索引，保持unsupported/unverified。moof或moov/mvex一律不重写，包括只有初始化段的碎片文件。
 
 ## 2. 音轨忽略的准入与字节保持
 
