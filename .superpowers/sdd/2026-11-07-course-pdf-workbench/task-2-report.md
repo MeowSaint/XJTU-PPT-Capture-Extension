@@ -178,3 +178,96 @@ node --check capture.js && node --check workspace.js && node --check motion.js &
 仍未验证：真实学校登录/媒体、日常浏览器 profile、原生权限弹窗、Chrome114/Node20 最低版本组合、其他系统或真实超长课程数据。没有实现或声称完整键盘重排；原鼠标拖排与已有键盘选择/预览/裁剪能力保留。可选录像因缺少 Playwright 专用编码器未产出。没有待解决的本任务业务测试失败，也不把截图渲染内部成因写成已证明。
 
 完成本报告提交和父代理交接后停止所有实现变更，等待控制器的具体审查结论。
+
+## I1 修复记录：第 1/5 轮，2026-11-07
+
+状态：DONE，等待控制器重新审查。本节记录独立审查 C0/I1/M0 中唯一的 I1 修复。上文保留初次交付时的结果；本节的源码、命令和运行中截图对应修复后的状态。
+
+### 起点、提交与实际改动
+
+- 本轮干净起点：`fe1798b988e67e3e5eef71faada7a7cb82c6757e`。这是控制器提交修复 brief 与设计裁定后的 HEAD。
+- 后续定界审查的 `FIX_BASE` 仍为 `e3952346d71f1bd78cf105b2987d01a241f430bf`，不替换为本轮起点。
+- 修复源码提交：`76341d6141b2105a243ce2ee290f892a9fa678c6`，`fix(ui): keep shared Stop visible during batch extraction`。仅 3 个文件，97 行增加、7 行删除。
+- 本节追加在同一报告中，另作报告提交；该提交的精确 SHA 在最终交接中提供，也可用上文的 `git log -1 --format=%H -- .superpowers/sdd/2026-11-07-course-pdf-workbench/task-2-report.md` 取得。
+- 依据指定修复 brief 执行；没有修改、暂存控制器的文档或开展 Task 3。
+
+原审查发现：批量面板展开后会压缩 `#panel-capture` 的实际滚动区；位于预览和裁剪控件之后的共享 Stop 虽已启用，却落在滚动区外。原取消处理器没有被认定失效。初次交付的批量截图是展开但空闲的状态，缺少“实际运行且未预滚 capture”的证据，因此没有揭示这一布局问题。
+
+本轮把 [capture.html](../../../capture.html) 中原有的 Start/Stop 组整体移到 `.app-shell` 的第三行，保留同一个 `#run` 和唯一 `#stop`、原文字、原生按钮语义和所有处理器。[style.css](../../../style.css) 为桌面操作行预留高度，使其不受视频/结果滚动区裁切；窄屏使用底部 sticky 行，两个按钮保持一行，并保留安全区内边距。上文“视频下开始/停止”的初版位置由此项控制器裁定取代。
+
+[capture.js](../../../capture.js) 没有变化：`batchStopRequested`、真实 `AbortController`、暂停/保留结果、任务和存储语义均使用原实现。批量面板继续展开，没有增加另一套停止按钮或动画等待。[tests/review.cjs](../../../tests/review.cjs) 只新增一组针对 I1 的行为回归，既有断言全部保留。
+
+### 有意义的 RED 与运行路径
+
+先加测试，再移动产品节点。新组在 1280×800、1440×900、1920×1080、390×844 各执行一轮：
+
+1. 写入两张有真实图片资产的保留页，保存包含自动课次与 0 路待框选课次的批量列表。
+2. 通过真实 summary 和 `#batch-start` 点击展开/启动；实际加载 localhost MP4，经原 `loadRemote()`、OPFS、`fastScan()`、任务控制器和 `save()` 提交一张页。
+3. 仅将 fixture 的 `PPTScanner.prototype.scan` 临时替换为“提交一帧后等待真实 abort signal”，并设置 15 秒失败期限；没有设置 `busy`、`batchRunning`、`disabled` 等标志来制造运行画面。权限 request 使用本地 fixture shim，不证明原生扩展许可弹窗。
+4. 在任务仍为 running 时遍历 Stop 的真实 overflow 裁切祖先及视口，检查完整边界、内缩 3px 的四角和中心 `elementFromPoint` 命中；`#panel-capture.scrollTop` 始终为 0。然后按实测中心坐标执行普通鼠标点击，避免测试框架为 Stop 自动滚动。
+5. 断言真实 signal 立即 abort、原任务停止、Stop 恢复禁用、原生批量 details 仍展开；逐记录比较停止前后的全部三张页元数据、签名和图片字节，并核对原两张保留页未变。每轮通过后恢复 scanner 方法；失败路径仍由套件 finally 关闭上下文、浏览器和本地服务。
+
+RED 的实际失败为 `AssertionError [ERR_ASSERTION]: enabled Stop escapes its actual clipping context viewport`，当时位于 `tests/review.cjs:605`。1280×800 时 Stop 已启用且任务 running，矩形为 x=600、y=820.0625、120×34，bottom=854.0625；视口 bottom=800，实际 `#panel-capture` 裁切 bottom=780，5 个命中点全部为 false。面板仍展开，capture 未滚动。日志见 [fix-1 RED](../../../.test-output/task-2-fix-1-red.log)，原始 [失败几何](../../../.test-output/v3.1.2/review-2H1I0h/fix-1-stop-geometry.json)。
+
+第一次 GREEN 已通过四个尺寸；直接看图后发现 390px 的操作组换成了两行，因此只收紧该组为 nowrap，减少占用高度。随后重新通过 focused GREEN，接着执行规定的三套完整验证。没有其他新失败或下载计数问题。
+
+### 实际命令与结果
+
+下面是本轮全部浏览器命令，均使用指定可执行文件；stdout/stderr 原样保存在相应日志中。两个 GREEN 之间只有上面说明的窄屏行高调整和证据断言补充。
+
+```bash
+PPT_TEST_FILTER='expanded running batch' PPT_TEST_BROWSER='/Users/jasondai/Library/Caches/ms-playwright/chromium-1248/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing' node tests/review.cjs > .test-output/task-2-fix-1-red.log 2>&1
+PPT_TEST_FILTER='expanded running batch' PPT_TEST_BROWSER='/Users/jasondai/Library/Caches/ms-playwright/chromium-1248/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing' node tests/review.cjs > .test-output/task-2-fix-1-green.log 2>&1
+PPT_TEST_FILTER='expanded running batch' PPT_TEST_BROWSER='/Users/jasondai/Library/Caches/ms-playwright/chromium-1248/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing' node tests/review.cjs > .test-output/task-2-fix-1-green-final.log 2>&1
+PPT_TEST_BROWSER='/Users/jasondai/Library/Caches/ms-playwright/chromium-1248/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing' npm run test:review > .test-output/task-2-fix-1-review.log 2>&1
+PPT_TEST_BROWSER='/Users/jasondai/Library/Caches/ms-playwright/chromium-1248/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing' npm run test:memory > .test-output/task-2-fix-1-memory.log 2>&1
+PPT_TEST_BROWSER='/Users/jasondai/Library/Caches/ms-playwright/chromium-1248/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing' npm run test:library > .test-output/task-2-fix-1-library.log 2>&1
+```
+
+| 运行 | 结果 | 具体证据 |
+| --- | --- | --- |
+| focused RED | exit 1，实际 running 的 Stop 越界/无法命中 | [日志](../../../.test-output/task-2-fix-1-red.log)，review-2H1I0h |
+| 第一次 focused GREEN | 1 组、4 尺寸，exit 0 | [日志](../../../.test-output/task-2-fix-1-green.log)，review-YXTtkh |
+| 最终 focused GREEN | 1 组、4 尺寸，exit 0 | [日志](../../../.test-output/task-2-fix-1-green-final.log)，review-aOP4pz |
+| 全量 review | 18/18，exit 0 | [日志](../../../.test-output/task-2-fix-1-review.log)、[结果](../../../.test-output/v3.1.2/review-LR5goa/results.json) |
+| 全量 memory | 14/14，exit 0，0 browser errors | [日志](../../../.test-output/task-2-fix-1-memory.log)、[指标](../../../.test-output/v3.1.2/memory-1794041360658/report.json) |
+| 全量 library | 24/24，exit 0 | [日志](../../../.test-output/task-2-fix-1-library.log)、[结果](../../../.test-output/v3.1.2/library-FI68Ku/results.json) |
+
+完整 covering 顺序为 review → memory → library；各前项完成并收集结果后才启动下一项。全量 review 的“focused review groups”仍是既有输出标签，该次命令没有 filter。三套完整验证覆盖相同的最终产品 HTML/CSS 和最终回归测试，之后只有提交与本报告追加。按修复 brief 没有重跑 features、improvements、release、独立 export 或可选录像，上文这些项目只保留初轮证据的历史含义。
+
+错误/请求范围沿用上文准确界定：review 与 library 各自实际主页面的 `pageerror` 列表和 context 非本地 blocked 列表都为空；memory 每个 fresh 页面收集的错误列表为空，其 route 会阻断非本地请求但没有累计“尝试次数为零”的独立列表。没有把这些结果扩大为所有 console、profile、权限 UI 或实网环境都已验证。
+
+### 运行中几何与亲自看图
+
+以下四张均来自完整 review 的实际 DOM，拍摄时批量列表展开、自动课次运行、待框选课次仍在列表。我逐一用 `read_image` 查看：桌面共享操作行位于两栏之外且完整可见；390px 行内的两个按钮没有换行或水平裁切。截图不是重建 HTML 或合成图。
+
+| 实际运行截图 | Stop 实测矩形（x、y、width、height） | 命中与操作行 |
+| --- | --- | --- |
+| [1280×800](../../../.test-output/v3.1.2/review-LR5goa/fix-1-expanded-running-1280x800.png) | `668, 756, 120, 34` | 5/5 命中；editor bottom=745，独立行 y=745、height=55 |
+| [1440×900](../../../.test-output/v3.1.2/review-LR5goa/fix-1-expanded-running-1440x900.png) | `668, 856, 120, 34` | 5/5 命中；editor bottom=845，独立行 y=845、height=55 |
+| [1920×1080](../../../.test-output/v3.1.2/review-LR5goa/fix-1-expanded-running-1920x1080.png) | `668, 1036, 120, 34` | 5/5 命中；editor bottom=1025，独立行 y=1025、height=55 |
+| [390×844](../../../.test-output/v3.1.2/review-LR5goa/fix-1-expanded-running-390x844.png) | `254, 800, 120, 34` | 5/5 命中；底部行 y=789、height=55，documentWidth=390 |
+
+完整 [几何/取消记录](../../../.test-output/v3.1.2/review-LR5goa/fix-1-stop-geometry.json) 保留了每个裁切上下文、五点坐标、capture scroll、可见控件命中与停止结果。桌面行占位的几何断言防止其覆盖两栏；对已在实际裁切区内完整可见的批量 summary、页签、裁剪/补页控件，另断言与操作行不相交且中心能命中。离开视口或被自身滚动区裁切的控件不计为可见。390px 保留点击批量开始后的原生文档滚动位置，列表其余内容仍通过纵向滚动访问；没有为了找到 Stop 预滚 capture 或收起批量面板。
+
+四个尺寸的取消结果均为 `immediateAbort: true`、`state: stopped`、`batchStillOpen: true`，保留页总数 `2 → 3 → 3`，当前课新提交卡片 1 张。比较覆盖精确元数据/签名/图像字节，不仅是可见计数。新组使用有界 scanner 等待来稳定验证取消，不用于证明识别算法或真实学校长视频的扫描精度。
+
+本轮 memory 仍通过 1,000 页/资产/节点、无恢复动画、节点与非零 scrollTop 复用；实测 `maxReads: 2`、`activeURLs: 10 = allowedImages: 10`、`animations: 0`、`bounded/oldRevoked/reused/preservedScroll: true`。这些 URL 数值对应本轮的结果滚动区，不把初轮 13 个 URL 当成固定数量。256 MiB OPFS 顺序写入/checksum、配额与取消、1,000 页 ZIP 字节和失败清理均通过；library 继续通过真实检查点、重扫、课程隔离、待框选和持久化竞争断言。
+
+### 最终源码、自审与边界
+
+[限定源码 diff](../../../.test-output/task-2-fix-1-source.diff) 已逐行自审；只移动原组并增加必要 CSS，没有读取或审查整分支。[静态记录](../../../.test-output/task-2-fix-1-source.json) 对照本轮起点核对：154 个 ID 完全相同且唯一，精确版本 span 仍 1 个，motion 加载顺序不变，取消控制源码无变化。最终源码 hash：
+
+| 本轮文件 | SHA-256 |
+| --- | --- |
+| [capture.html](../../../capture.html) | `2a4d6735fcbd6ca84fc0c2eba9ac85ab6e614268e5cf9a830f1f3806ad272864` |
+| [style.css](../../../style.css) | `cd944b5bd34891897b7efb7391822915952b692c3d6470ece7cf29a85d0e496f` |
+| [tests/review.cjs](../../../tests/review.cjs) | `b6b9d809da390da607049e9921d2b667201ee7aa2f29c65fcebe41171655a32f` |
+
+`node --check tests/review.cjs`、`git diff --check -- capture.html style.css tests/review.cjs` 及暂存后的 `git diff --cached --check` 均 exit 0。源码提交仅逐名暂存上述 3 个文件，提交后工作区干净；随后只追加本报告。应用 ponytail full 和 humanizer-zh，沿用 Apple Design 的即时响应原则。
+
+本轮运行环境为 macOS arm64、Node `v26.13.0`、指定 Chromium `156.0.8078.4`，仍未验证 Chrome114/Node20 最低版本、其他系统、真实学校媒体/账户或原生权限弹窗。测试只用既有依赖、localhost 合成 fixture 和一次性上下文；没有重试录像、安装组件、改运行时设置或使用真实 profile。全部 6 个本轮后台 job 均已逐项收集；所有 fixture 浏览器/服务器沿用 finally 清理。
+
+报告暂存时普通 `git add -- .superpowers/sdd/2026-11-07-course-pdf-workbench/task-2-report.md` 返回 exit 1，提示 `The following paths are ignored by one of your .gitignore files:`，路径为 `.superpowers`。按既有明确授权，仅对此报告使用 `git add -f -- .superpowers/sdd/2026-11-07-course-pdf-workbench/task-2-report.md`；没有强制暂存其他路径。追加内容检查确认初轮报告仍为完整原前缀，71 个本地证据链接均存在，最终产品 hash 未变。
+
+本轮实现与证据提交后停止变更，交控制器做下一次限定审查；不开展新的修复或 Task 3。
