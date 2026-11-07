@@ -44,7 +44,7 @@
 
 ## Task 2 — 工作台与动效
 
-状态：已完成，Task 2 的初审 I1 已在第 1/5 轮修复并经全新限定复审通过，无未解决发现。以下保留初次交付及修复过程，最终源码/报告 HEAD 为 `b7021c7c9ed49c8876e732ab2174aa9ee52f6700`。初次 BASE `3f666a69cf01071d03a08c2773f3507ca93cb33e`；唯一实现者 11bf1c1c-e5b7-44f8-85aa-227169d3190a（codex/gpt-6.1-sol / max）已停止。源码提交 `1c67cbb886346982397e6e90c26c2016726d402c`，完整 180 行报告单独提交 `e3952346d71f1bd78cf105b2987d01a241f430bf`。父代理已读报告，核对 HEAD 和范围：13 个白名单源码/测试文件、471 行增加和 101 行删除，另加自己的报告；只留下父代理预期的审计文件未暂存。
+状态：完成。I1 已在第 1/5 轮、I2 已在第 2/5 轮分别经全新限定复审通过；当前 I1/I2 均无未解决或停放发现。最终源码/报告 HEAD 为25bfd40f225f57d4061fbc98c75064a2b0a14a1e。以下先记录初次交付及第 1 轮历史，其上一轮源码/报告 HEAD 为 `b7021c7c9ed49c8876e732ab2174aa9ee52f6700`。初次 BASE `3f666a69cf01071d03a08c2773f3507ca93cb33e`；唯一实现者 11bf1c1c-e5b7-44f8-85aa-227169d3190a（codex/gpt-6.1-sol / max）已停止。源码提交 `1c67cbb886346982397e6e90c26c2016726d402c`，完整 180 行报告单独提交 `e3952346d71f1bd78cf105b2987d01a241f430bf`。父代理已读报告，核对 HEAD 和范围：13 个白名单源码/测试文件、471 行增加和 101 行删除，另加自己的报告；只留下父代理预期的审计文件未暂存。
 
 - 宽工作区批量入口、结果旁全部/所选/整课导出与设置、来源全名和 0 路提示、明确独立的当前/批量课程、390px 堆叠、暗色/对比/实色回退及可中断局部反馈已实现。新增 38 行 [motion.js](../../../motion.js)，原 141 个 ID 全部保留，当前 154 个 ID 唯一；业务不等待动画，裁剪维持 1:1，新增可见卡片每批至多 12 张，恢复 1000 页不批量动画。
 - 顺序完整验证为 review 17/17、features 11/11、memory 14/14、library 24/24、improvements 25/25、release 17/17（34 资源），均 exit0。前三套已覆盖最终 JS/CSS，之后只删除两个局部编号 span；后三套和最终 focused 5/5 跑在最终 HTML 上。10 个改变的 JS/CJS 语法与 diff 检查通过，不能将早先整套记录冒称最后 HTML 字节的重复运行。
@@ -67,11 +67,11 @@
 
 ## Task 3 — 版本与整体验证
 
-状态：暂停，等待原 Task2 owner 处理新增低高度布局回归。Task3 source checkpoint `20b67b5efc6a79c51adef33bfc4ca27a97532860`（授权十文件，43+/38−）和独立 128 行未完成报告 `5ccfb360e2d65c2fdfec00c427f87dbda4916353` 已提交，父代理完整读取报告并核验 HEAD 与范围；剩余五套尚未运行。任务原干净 BASE 仍为 `cc8a935bd5cb3461846fa2ae8d4c7feeb9770d22`，全新独立实现者 `de484aa3-3d8e-43af-9a85-a169486c9d52`（codex/gpt-6.1-sol / high）。范围限 3.1.2 元数据、当前版本夹具、使用/测试说明，以及 CI browser 步骤追加 `test:improvements`；完整九套顺序回归和中文同日两课/奇数讲义 PDF 渲染证据待回报。产品 JS/CSS/PDF/取消与存储算法不可在此任务修改；发现真实业务失败则交回原任务实现者。整体审查、根目录实际打包与校验、发布及工作区清理由父代理负责，实现者无这些动作权限。
+状态：恢复最后验证。原 Task2 owner 的低高度布局与两个限定原生输入块已完成独立gate，四套浏览器结果可按真实源码覆盖合并；Task3尚需运行features与improvements、完成最终报告及自己的独立审查。Task3 source checkpoint `20b67b5efc6a79c51adef33bfc4ca27a97532860`（授权十文件，43+/38−）和独立 128 行未完成报告 `5ccfb360e2d65c2fdfec00c427f87dbda4916353` 已提交，父代理完整读取报告并核验 HEAD 与范围；checkpoint当时剩余五套未运行；当前integration/review/memory/library已由原UI owner按最终产品资源验证，features/improvements待原Task3作者顺序完成。任务原干净 BASE 仍为 `cc8a935bd5cb3461846fa2ae8d4c7feeb9770d22`，全新独立实现者 `de484aa3-3d8e-43af-9a85-a169486c9d52`（codex/gpt-6.1-sol / high）。范围限 3.1.2 元数据、当前版本夹具、使用/测试说明，以及 CI browser 步骤追加 `test:improvements`；完整九套顺序回归和中文同日两课/奇数讲义 PDF 渲染证据待回报。产品 JS/CSS/PDF/取消与存储算法不可在此任务修改；发现真实业务失败则交回原任务实现者。整体审查、根目录实际打包与校验、发布及工作区清理由父代理负责，实现者无这些动作权限。
 
 首次 integration probe 在 tests/integration.cjs:212 期望 `/请先补填/`，实际为 `导出失败：PPTMotion is not defined`；作业 `bash-f46eb317080f4612` exit1。父代理只读核实 tests/integration.cjs:102 临时扩展复制表漏掉 motion.js，capture.html:359–361 已在 capture/workspace 之前加载它，scripts/release.cjs:9 实际安装清单也已有该资源。这是夹具消费接口遗漏，未发现新的产品业务问题。Ruling：限定 Task3 为该复制表加入 motion.js，其他断言、权限、拦截与产品源码均保持；只重跑受影响的 integration，再继续后续串行套件。代价是复制清单存在两处，可能继续漂移，须保留这次真实失败与最终打包/强断言核验；不通过模仿 PPTMotion、忽略异常或削弱缺字段检查取得通过。此前本轮 unit224/224、release17/17、bridge三来源已过，只能按实际源覆盖分别记录，不能改称修正后全套重跑。
 
-## Task2 集成跟进 — round2/5，I2 尚待修复
+## Task2 集成跟进 — round2/5，I2 已经独立限定复审通过
 
 motion 清单补齐后，integration 的 MP4、命名、缓存释放与 HLS 四页提取均已跑过，但原 first→last 拖拽等待在 tests/integration.cjs:330 超时。原实现者只做一次被动诊断，job `bash-888f544487874d9f` exit1，所有 job 已收取；临时观测已还原，integration 指纹精确恢复 `8127cc73b66f834c6d83255d3e28f3a110bf756d5b62f2163b35956c5d0493d1`，没有调整原 dragTo、强断言、窗口或折叠状态。
 
@@ -92,6 +92,15 @@ Ruling：限定原 UI owner 只将 integration 的拖拽动作改为正确连续
 正确原生首卡手势后的完整 integration（integration 指纹495deb43a3150b8b125465ff419b47af14945299558a3a7a012742bb44e07a64，CSS348d不变，job bash-9f8345d836894e53已收取exit1）已通过原精确排序、新页持久化、HLS Referer/cache/PDF，推进到原375/现395裁剪断言：真实解码为640×361，而原强断言要求高度360。父代理读integration365–429、capture853–879/922–966：测试取整个overlay包围盒25%→75%，产品则按video.clientWidth/clientHeight与原始宽高计算contain后的真实图像界限，再用PointerEvent映射并round源像素尺寸。整个overlay半高不必等于含留边图像的半高，旧用例的精确360前提需要真实几何核对。
 
 Ruling：只允许同一原UI owner在这一框选输入块依据公开video尺寸/原始比例与overlay/canvas坐标，选择扣除contain留边后的真实图像25%→75%原生鼠标点；完整记录公开尺寸、两端点与只读实际crop/输出，不从输出或私有crop倒算expected。保留原宽度范围、高度严格360和保存/预览decode/恢复full/后续全部强断言，不改产品crop/frame/JS/CSS、viewport、权限、route或timeout。若真实几何不支持该解释，先报告而不放宽断言或继续换值。代价是测试多维护图像坐标规划与公开几何记录；不是把361算通过，也不代表已完成最后整链。原生排序Ruling10不变，其他文件仍禁止修改。
+
+### Task2 round2 最终交付与限定复审
+
+- 原 owner 已停止；源码 `353085aa6ba391d14a7767540ca036ae00639561` 仅 style.css / tests/review.cjs / tests/integration.cjs，157+/6−。同一报告只追加117行，原273行前缀字节不变，报告/干净 HEAD `25bfd40f225f57d4061fbc98c75064a2b0a14a1e`。父代理完整读取274–390，核对 HEAD、两提交范围及无其他修改。
+- 最终 CSS348d 正常16/20px滚动定位间距、批量 max-content / 工作区第二行 min560 / overflow:auto；图库4页与1000页均高244，外层scrollHeight均918，只有内容377→94281。1280×720普通滚动317后，首卡及选择/时间/删除20点命中全部通过；1000页加载6=当前允许6，outside为空，不按全列表撑高观察根。三尺寸可信首卡10→末13，精确[11,12,13,10]、新页读取和元数据/签名/图片字节保留；原4尺寸Stop20点/实际abort/2→3→3仍通过。
+- Ruling11量测确认公开client417×235/raw1280×720/contain417×234.5625，旧整overlay半高预测360.671，新图像点保存后真实decode640×360。旧预测必须361仅为本机归因guard；移除新增调查断言后，严格实际h360/原宽范围和所有后续业务断言均保留，公开预测日志仍在，永久fixture再次完整通过。对original8127掩去仅R10/11输入块后其余文本逐字节相同。
+- 顺序完整 integration量测fddf→review19→memory14→library24 均exit0；仅删新增调查guard后，最终integration7b9再次整链exit0，CSS348d/review84a66及其他三套实际消费的资源不变，不把旧fddf冒称最终fixture。15个job均已逐项收取并finally清理，3PDF渲染/原Referer/0路重载/IDB race与严格输出全部通过；未重复其他5套或7页合成PDF。memory仍maxReads2/restore0animations/节点scroll复用，URL10=允许10为特定视口；JS堆采样差49768B不是RSS，非本地仅阻断未独立计数。
+- 父代理独立读最终[低高度首屏](../../../.test-output/v3.1.2/review-2LKBss/fix-2-expanded-before-scroll-1280x720.png)、[普通滚动可达首卡](../../../.test-output/v3.1.2/review-2LKBss/fix-2-expanded-reachable-1280x720.png)、[390图库](../../../.test-output/v3.1.2/review-2LKBss/fix-2-expanded-reachable-390x844.png)：首屏保留展开任务，普通滚动后完整卡片位于底栏上方，窄屏无横向溢出。截图不独立证明原生事件/时序；这些由真实输入和强断言支撑。
+- 正确b7021c7..25bfd40限定包为9提交/150,386B，包含已知Task3 checkpoint与父代理裁定；全新8963cda0-b33e-4444-a7b7-5951840bbd22（sol/xhigh）完成I2与本次diff新破坏核对，I2 ADDRESSED、Scoped Spec APPROVED / Quality APPROVED，新C0/I0/M0、无范围外发现；父代理完整读取其84行报告。审查者一次不重叠读完1228行包、完整brief（仅补读换行后的原长段）、同一报告274–390及恰好3张指定图，并按具体问题核对有限根/真实字节/原生开始/公开裁剪/Stop源码。没有执行Git、命令、测试、浏览器或网络，不把供给的哈希/作业记录夸成独立实跑，已停止。原I1保护保留；Task3其他元数据/验证仍需独立gate，不用本次限定结论代替。Task2 current gate完成，可从后续干净controller closure恢复原Task3作者。环境仍Node26.13.0/Chrome156/macarm64/合成本地，最低版本、真实课程与原生权限未实测。
 
 ## 最终审查与产物
 
