@@ -104,6 +104,38 @@ async function test(name, body) {
   if (process.env.PPT_TEST_FILTER && !new RegExp(process.env.PPT_TEST_FILTER).test(name)) return;
   await body(); passed.push(name); console.log('PASS ' + name);
 }
+// Only seek/decode is synthetic: production scan(), save(), encoding and IDB commits remain real.
+async function boundedScanner(duration = 694) {
+  await page.evaluate(duration => {
+    Object.defineProperty(video, 'duration', {configurable: true, value: duration});
+    window.longProbe = {seeks: [], commits: [], maximumSignatures: 0, maximumSignatureBytes: 0, estimates: []};
+    const seek = PPTScanner.prototype.seek, add = PPTPageStore.add, cache = cacheSignature;
+    PPTScanner.prototype.seek = async function(time, signal) {
+      signal?.throwIfAborted(); longProbe.seeks.push(time);
+      const index = Math.floor(time / .5), canvas = document.createElement('canvas'); canvas.width = 32; canvas.height = 18;
+      const ctx = canvas.getContext('2d'); ctx.fillStyle = index % 2 ? '#ffffff' : '#000000'; ctx.fillRect(0, 0, 32, 18);
+      ctx.fillStyle = '#9e2437'; ctx.fillText(String(index), 0, 12);
+      return {canvas, sig: new Uint8ClampedArray(192 * 108 * 4).fill(index % 2 ? 255 : 0), sourceTime: time, signatureCrop: {...crop}};
+    };
+    PPTPageStore.add = async (...args) => { const id = await add(...args); longProbe.commits.push({id, scanId: args[1].scanId, time: args[1].sourceTime}); return id; };
+    cacheSignature = (...args) => {
+      cache(...args); longProbe.maximumSignatures = Math.max(longProbe.maximumSignatures, args[0]?.signatures.size || 0);
+      longProbe.maximumSignatureBytes = Math.max(longProbe.maximumSignatureBytes, [...(args[0]?.signatures.values() || [])].reduce((sum, sig) => sum + (sig?.byteLength || 0), 0));
+    };
+    window.restoreBoundedScanner = () => { PPTScanner.prototype.seek = seek; PPTPageStore.add = add; cacheSignature = cache; delete video.duration; };
+    $('mode').value = '0.5'; $('dedupe').checked = false;
+  }, duration);
+}
+async function scanEvidence() {
+  return page.evaluate(async () => {
+    const tx = db.transaction(['pages', 'assets', 'settings']), rows = tx.objectStore('pages').getAll(), assets = tx.objectStore('assets').count(), saved = tx.objectStore('settings').get('lesson:' + activeLesson.id);
+    await new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onabort = tx.onerror = () => reject(tx.error); });
+    const times = rows.result.map(row => row.sourceTime);
+    return {pages: rows.result.length, assets: assets.result, task: saved.result.task, first: Math.min(...times), last: Math.max(...times),
+      duplicateScanTimes: rows.result.length - new Set(rows.result.map(row => `${row.scanId}:${row.sourceTime}`)).size,
+      probe: structuredClone(longProbe), status: $('status').textContent, canResume: canResume()};
+  });
+}
 function zipEntries(bytes) {
   const end = bytes.length - 22;
   assert.equal(bytes.readUInt32LE(end), 0x06054b50, 'ZIP end directory');
@@ -676,6 +708,184 @@ function zipEntries(bytes) {
       assert.deepEqual((await stored()).pages, before.pages); assert.deepEqual(await page.evaluate(() => crop), savedCrop);
       await page.reload(); await count(1);
       assert.deepEqual((await stored()).lessons.find(lesson => lesson.id === 'release').crop, savedCrop);
+    });
+
+    await test('long session global limits restore valid values and normalize invalid saved and entered values', async () => {
+      for (const value of [undefined, '1388', 99, 20001, 100.5, 100, 20000, 1388]) {
+        await seed();
+        await page.evaluate(async value => {
+          const tx = db.transaction('settings', 'readwrite'); tx.objectStore('settings').put({maxPages: value}, 'captureLimits');
+          await new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onabort = tx.onerror = () => reject(tx.error); });
+        }, value);
+        await open();
+        assert.equal(await page.locator('#page-limit').inputValue(), String(Number.isInteger(value) && value >= 100 && value <= 20000 ? value : 5000));
+      }
+      await page.locator('#tab-extraction').click(); await page.locator('#page-limit').fill('100.5');
+      await page.evaluate(() => $('page-limit').onchange());
+      assert.equal(await page.locator('#page-limit').inputValue(), '5000');
+      assert.deepEqual(await page.evaluate(() => ({limits: captureLimits, settings: scanSettings()})), {limits: {maxPages: 5000}, settings: {...settings, step: .5}});
+      const failed = await page.evaluate(async () => {
+        const put = IDBObjectStore.prototype.put;
+        IDBObjectStore.prototype.put = function(value, key) { if (key === 'captureLimits') throw Error('synthetic limit setting write failure'); return put.apply(this, arguments); };
+        try { $('page-limit').value = '2000'; await $('page-limit').onchange(); }
+        finally { IDBObjectStore.prototype.put = put; }
+        return {limits: captureLimits, input: $('page-limit').value, settled: await limitsSave.then(() => true), message: $('status').textContent};
+      });
+      assert.deepEqual(failed.limits, {maxPages: 5000}); assert.equal(failed.input, '5000'); assert.equal(failed.settled, true); assert.match(failed.message, /synthetic limit setting write failure/);
+    });
+
+    await test('long session real scanner commits 1388 pages and reaches the end under the default limit', async () => {
+      await seed(); await load(); await boundedScanner();
+      try {
+        await page.evaluate(() => fastScan());
+        const evidence = await scanEvidence();
+        fs.writeFileSync(path.join(output, 'long-default.json'), JSON.stringify(evidence, null, 2));
+        assert.equal(evidence.pages, 1388); assert.equal(evidence.assets, 1388);
+        assert.equal(evidence.task.state, 'done'); assert.equal(evidence.task.checkpoint, 693.95);
+        assert.equal(evidence.first, .25); assert.equal(evidence.last, 693.75); assert.equal(evidence.duplicateScanTimes, 0);
+        assert.equal(evidence.probe.commits.length, 1388); assert(evidence.probe.seeks.includes(693.95));
+        assert.equal(evidence.probe.maximumSignatures, 1000); assert.equal(evidence.probe.maximumSignatureBytes, 82944000);
+      } finally { await page.evaluate(() => restoreBoundedScanner()); }
+    });
+
+    await test('long session page limit pauses safely then resumes the same scan after a persisted global change', async () => {
+      await seed(); await load(); await boundedScanner();
+      try {
+        await page.locator('#tab-extraction').click();
+        const input = page.locator('#page-limit'); assert.equal(await input.inputValue(), '5000');
+        await input.fill('1000'); await input.dispatchEvent('change'); await page.evaluate(() => limitsSave);
+        const before = await page.evaluate(() => scanSettings());
+        await page.evaluate(() => fastScan()); const paused = await scanEvidence();
+        assert.equal(paused.pages, 1000); assert.equal(paused.assets, 1000); assert.equal(paused.task.state, 'paused');
+        assert.equal(paused.task.reason, 'PAGE_LIMIT'); assert.equal(paused.task.checkpoint, 499.5); assert.equal(paused.task.baselineTime, 499.75);
+        assert.equal(paused.canResume, true); assert.match(paused.status, /上限|1000/);
+        const tail = await page.evaluate(() => {
+          window.tailCards = [...$('pages').children]; selectedPages.add(pages[0].id); selectionAnchor = pages[0].id; updateSelection();
+          $('pages').scrollTop = 120; window.tailScroll = $('pages').scrollTop;
+          const renderAll = render; window.tailFullRenders = 0; render = (...args) => { tailFullRenders++; return renderAll(...args); };
+          const mutations = []; window.tailMutations = mutations;
+          window.tailObserver = new MutationObserver(rows => mutations.push(...rows.map(row => ({removed: row.removedNodes.length, added: row.addedNodes.length}))));
+          tailObserver.observe($('pages'), {childList: true});
+          window.tailCleanup = () => { render = renderAll; tailObserver.disconnect(); };
+          return {selection: [...selectedPages], anchor: selectionAnchor};
+        });
+        await input.fill('1388'); await input.dispatchEvent('change'); await page.evaluate(() => limitsSave);
+        assert.deepEqual(await page.evaluate(() => scanSettings()), before); assert.equal(await page.evaluate(() => canResume()), true);
+        await page.evaluate(() => fastScan()); const done = await scanEvidence();
+        assert.equal(done.pages, 1388); assert.equal(done.assets, 1388); assert.equal(done.task.state, 'done');
+        assert.equal(done.task.id, paused.task.id); assert.equal(done.task.checkpoint, 693.95); assert.equal(done.duplicateScanTimes, 0);
+        const cards = await page.evaluate(() => ({same: tailCards.every((card, i) => $('pages').children[i] === card), fullRenders: tailFullRenders,
+          removed: tailMutations.reduce((sum, row) => sum + row.removed, 0), added: tailMutations.reduce((sum, row) => sum + row.added, 0),
+          selection: [...selectedPages], anchor: selectionAnchor, scroll: $('pages').scrollTop, previousScroll: tailScroll}));
+        assert.equal(cards.same, true); assert.equal(cards.fullRenders, 0); assert.equal(cards.removed, 0); assert.equal(cards.added, 388);
+        assert.deepEqual(cards.selection, tail.selection); assert.equal(cards.anchor, tail.anchor); assert.equal(cards.scroll, cards.previousScroll);
+        fs.writeFileSync(path.join(output, 'long-resume.json'), JSON.stringify({paused, done, cards}, null, 2));
+        await page.evaluate(() => tailCleanup());
+      } finally { await page.evaluate(() => { window.tailCleanup?.(); restoreBoundedScanner(); }); }
+      await page.reload(); await idle(); assert.equal(await page.locator('#page-limit').inputValue(), '1388');
+      await page.evaluate(async () => { const tx = db.transaction('settings', 'readwrite'); tx.objectStore('settings').put({maxPages: 20001}, 'captureLimits'); await new Promise(resolve => { tx.oncomplete = resolve; }); });
+      await page.reload(); await idle(); assert.equal(await page.locator('#page-limit').inputValue(), '5000');
+    });
+
+    await test('long session storage estimates pause before the next commit at start and every 25 committed pages', async () => {
+      for (const lowAt of [0, 25]) {
+        await seed(); await load(); await boundedScanner(15);
+        try {
+          await page.evaluate(lowAt => { navigator.storage.estimate = async () => {
+            longProbe.estimates.push(longProbe.commits.length); return {quota: 64 * 1024 ** 2, usage: longProbe.commits.length >= lowAt ? 33 * 1024 ** 2 : 0};
+          }; }, lowAt);
+          await page.evaluate(() => fastScan()); const paused = await scanEvidence();
+          assert.equal(paused.pages, lowAt); assert.equal(paused.assets, lowAt); assert.equal(paused.task.reason, 'STORAGE_LOW');
+          assert.equal(paused.task.state, 'paused'); assert.equal(paused.task.checkpoint, lowAt ? 12 : 0); assert.equal(paused.canResume, true);
+          assert.deepEqual(paused.probe.estimates, lowAt ? [0, 25] : [0]);
+          await page.evaluate(() => { navigator.storage.estimate = async () => ({quota: 64 * 1024 ** 2, usage: 0}); });
+          await page.evaluate(() => fastScan()); const done = await scanEvidence();
+          assert.equal(done.task.id, paused.task.id); assert.equal(done.task.state, 'done'); assert.equal(done.pages, 30); assert.equal(done.assets, 30); assert.equal(done.duplicateScanTimes, 0);
+          fs.writeFileSync(path.join(output, `storage-low-${lowAt}.json`), JSON.stringify({paused, done}, null, 2));
+        } finally { await page.evaluate(() => { delete navigator.storage.estimate; restoreBoundedScanner(); }); }
+      }
+      for (const mode of ['missing', 'throws', 'unknown', 'nonfinite', 'boundary']) {
+        await seed(); await load(); await boundedScanner(1);
+        try {
+          await page.evaluate(mode => { navigator.storage.estimate = mode === 'missing' ? undefined : async () => {
+            if (mode === 'throws') throw Error('synthetic estimate unavailable');
+            return mode === 'unknown' ? {} : mode === 'nonfinite' ? {quota: Infinity, usage: NaN} : {quota: 33554432, usage: 0};
+          }; }, mode);
+          await page.evaluate(() => fastScan()); const done = await scanEvidence();
+          assert.equal(done.task.state, 'done', mode); assert.equal(done.pages, 2, mode);
+        } finally { await page.evaluate(() => { delete navigator.storage.estimate; restoreBoundedScanner(); }); }
+      }
+    });
+
+    await test('long session aborted quota transaction retains assets and resumes without duplicate scan times', async () => {
+      await seed(); await load(); await boundedScanner(3);
+      try {
+        await page.evaluate(() => {
+          const put = IDBObjectStore.prototype.put;
+          IDBObjectStore.prototype.put = function(...args) {
+            if (this.name === 'assets' && longProbe.commits.length === 2) {
+              const tx = this.transaction; Object.defineProperty(tx, 'error', {value: new DOMException('synthetic IDB quota', 'QuotaExceededError')}); tx.abort(); return;
+            }
+            return put.apply(this, args);
+          };
+          window.restoreQuotaPut = () => { IDBObjectStore.prototype.put = put; };
+        });
+        await page.evaluate(() => fastScan()); const paused = await scanEvidence();
+        assert.equal(paused.task.reason, 'STORAGE_LOW'); assert.equal(paused.task.state, 'paused');
+        assert.equal(paused.pages, 2); assert.equal(paused.assets, 2); assert.equal(paused.task.checkpoint, .5); assert.equal(paused.task.baselineTime, .75);
+        await page.evaluate(() => restoreQuotaPut()); await page.evaluate(() => fastScan()); const done = await scanEvidence();
+        assert.equal(done.pages, 6); assert.equal(done.assets, 6); assert.equal(done.task.id, paused.task.id); assert.equal(done.task.state, 'done'); assert.equal(done.duplicateScanTimes, 0);
+        fs.writeFileSync(path.join(output, 'quota-resume.json'), JSON.stringify({paused, done}, null, 2));
+      } finally { await page.evaluate(() => { window.restoreQuotaPut?.(); restoreBoundedScanner(); }); }
+    });
+
+    await test('long session batch storage stops before later loads while page limits allow the next lesson', async () => {
+      for (const failure of ['estimate', 'quota-load', 'quota-scan', 'page-limit']) {
+        const batchPage = 'https://synthetic.invalid/batch-guards';
+        const jobs = ['guard-a', 'guard-b'].map(id => ({id, url: origin + '/' + path.relative(root, fixture) + '?job=' + id, sourceName: id + '.mp4', course: {...course}, selected: true, state: 'pending', requiresCrop: false}));
+        await seed({batches: [{page: batchPage, jobs}]}); await boundedScanner(failure === 'page-limit' ? 51 : 1);
+        try {
+          await page.evaluate(failure => {
+            window.batchGuardProbe = {loads: [], caches: [], scans: 0};
+            const load = loadRemote, create = PPTDiskCache.create, scan = PPTScanner.prototype.scan, put = IDBObjectStore.prototype.put;
+            loadRemote = (...args) => { batchGuardProbe.loads.push(args[0]); return load(...args); };
+            PPTDiskCache.create = (...args) => { batchGuardProbe.caches.push(args[0]); if (failure === 'quota-load') throw new DOMException('synthetic OPFS quota', 'QuotaExceededError'); return create(...args); };
+            PPTScanner.prototype.scan = function(options) { batchGuardProbe.scans++; return scan.call(this, options); };
+            if (failure === 'estimate') { let estimates = 0; navigator.storage.estimate = async () => ({quota: 33554432, usage: ++estimates > 1 ? 1 : 0}); }
+            if (failure === 'quota-scan') IDBObjectStore.prototype.put = function(...args) {
+              if (this.name === 'assets') { const tx = this.transaction; Object.defineProperty(tx, 'error', {value: new DOMException('synthetic IDB quota', 'QuotaExceededError')}); tx.abort(); return; }
+              return put.apply(this, args);
+            };
+            if (failure === 'page-limit') captureLimits = {maxPages: 100};
+            window.restoreBatchGuards = () => { loadRemote = load; PPTDiskCache.create = create; PPTScanner.prototype.scan = scan; IDBObjectStore.prototype.put = put; delete navigator.storage.estimate; };
+          }, failure);
+          await page.evaluate(() => runBatch(Promise.resolve(true)));
+          const result = await page.evaluate(async () => ({probe: batchGuardProbe, jobs: structuredClone(batchJobs), status: $('batch-status').textContent,
+            lessons: (await PPTLibrary.restore(db)).lessons, cache: videoCache, sourceReady, busy: busy()}));
+          if (failure === 'page-limit') {
+            assert.equal(result.probe.loads.length, 2); assert.equal(result.probe.scans, 2);
+            assert(result.lessons.every(lesson => lesson.task.state === 'paused' && lesson.task.reason === 'PAGE_LIMIT'));
+            assert(result.jobs.every(job => job.state === 'partial' && job.pages === 100));
+          } else {
+            assert.equal(result.probe.loads.length, 1, failure); assert.equal(result.jobs[1].state, 'pending');
+            assert.match(result.status, /空间不足|剩余空间/);
+            if (failure !== 'quota-load') assert.equal(result.lessons[0].task.reason, 'STORAGE_LOW');
+          }
+          assert.equal(result.cache, null); assert.equal(result.sourceReady, false); assert.equal(result.busy, false);
+          await page.evaluate(() => { restoreBatchGuards(); captureLimits = {maxPages: 5000}; });
+          await page.evaluate(() => runBatch(Promise.resolve(true)));
+          const resumed = await page.evaluate(async () => {
+            const saved = await PPTLibrary.restore(db);
+            return {jobs: structuredClone(batchJobs), tasks: saved.lessons.map(lesson => lesson.task),
+              pages: saved.pages.length, duplicateScanTimes: saved.pages.length - new Set(saved.pages.map(row => `${row.lessonId}:${row.scanId}:${row.sourceTime}`)).size};
+          });
+          assert(resumed.jobs.every(job => job.state === 'done'), `${failure}: unfinished jobs restart after space/limit recovery`);
+          assert(resumed.tasks.every(task => task.state === 'done')); assert.equal(resumed.duplicateScanTimes, 0);
+          if (result.lessons[0]?.task) assert.equal(resumed.tasks.find(task => task.id === result.lessons[0].task.id)?.state, 'done');
+          assert.equal(resumed.pages, failure === 'page-limit' ? 204 : 4);
+          fs.writeFileSync(path.join(output, `batch-${failure}.json`), JSON.stringify({interrupted: result, resumed}, null, 2));
+        } finally { await page.evaluate(() => { window.restoreBatchGuards?.(); restoreBoundedScanner(); }); }
+      }
     });
 
     await test('a task paused at checkpoint zero retains its task identity when resumed', async () => {

@@ -118,6 +118,11 @@
             <input id="dedupe" type="checkbox" checked>
             <span>去除重复页</span>
           </label>
+          <label class="field-stack spaced-field">
+            <span>每节页数上限</span>
+            <input id="page-limit" type="number" min="100" max="20000" step="1" value="5000" aria-describedby="page-limit-note">
+          </label>
+          <p id="page-limit-note" class="note">可设置 100–20000 页，默认 5000 页。达到上限后保留截图和进度，调高上限即可继续；本机剩余空间不足时也会暂停。</p>
           <p class="note pane-note">2 秒、8 秒粗采样可能漏掉短暂翻页。精细采样也可能漏过短于采样间隔或稳定确认窗口的画面；漏页时可细查对应时间段。</p>
           <div class="bar">
             <button id="ignore-select" type="button" aria-pressed="false" disabled>框选忽略区</button>

@@ -1,6 +1,9 @@
 /* Durable lesson metadata shares the existing settings store; image assets stay separate. */
 (function (root) {
   'use strict';
+  function pageLimit(value) {
+    return Number.isInteger(value) && value >= 100 && value <= 20000 ? value : 5000;
+  }
   function courseKey(page = '', course = {}) {
     try {
       const url = new URL(page), id = (url.pathname + url.hash).match(/\/(?:my|study)-capture-courses\/([^/?#]+)/)?.[1] || url.searchParams.get('courseId') || url.searchParams.get('course_id');
@@ -148,7 +151,7 @@
       return () => result;
     });
   }
-  const api = {key, courseKey, recover, mergeRanges, restore, put, activate, batch, remove};
+  const api = {pageLimit, key, courseKey, recover, mergeRanges, restore, put, activate, batch, remove};
   root.PPTLibrary = api;
   if (typeof module !== 'undefined') module.exports = api;
 })(globalThis);

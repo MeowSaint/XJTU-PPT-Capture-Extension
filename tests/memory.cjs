@@ -81,6 +81,7 @@ async function fresh() {
 }
 async function dispose(context) { await context.close(); contexts.delete(context); }
 async function test(name, action, page) {
+  if (process.env.PPT_TEST_FILTER && !new RegExp(process.env.PPT_TEST_FILTER).test(name)) return;
   const start = Date.now();
   try {
     const details = await action(); report.results.push({name, pass: true, milliseconds: Date.now() - start, details}); console.log('PASS', name);
@@ -410,6 +411,81 @@ async function workspace() {
   } finally { await dispose(context); }
 }
 
+async function longWorkspace() {
+  const {context, page} = await fresh();
+  try {
+    const fixture = await page.evaluate(async () => {
+      const fixture = await __memory.fixture(), db = await PPTPageStore.open(), sig = new Uint8ClampedArray(192 * 108 * 4).fill(23);
+      for (let i = 0; i < 2000; i++) await PPTPageStore.add(db, {order: (i + 1) * 1024, w: 1280, h: 720, time: 1000 + i, sourceTime: i * 5,
+        sourceName: 'long-synthetic.mp4', sourceKey: 'long-memory', course: {name: 'Synthetic 2000', date: '2026-01-02', start: '08:00'}}, {image: fixture.image, thumbnail: fixture.thumbnail, sig});
+      db.close(); return {sha256: fixture.sha256, imageSize: fixture.image.size};
+    });
+    await page.goto(origin + '/capture.html'); await page.waitForFunction(() => ready);
+    await page.locator('#terms-agree').check(); await page.locator('#terms-accept').click(); await page.waitForFunction(() => studyAccepted && !busy());
+    await settleThumbnails(page);
+    const cdp = await context.newCDPSession(page); await cdp.send('Performance.enable');
+    report.heap.metadata2000 = await heap(cdp);
+    const restored = await page.evaluate(async () => ({pages: pages.length, cards: $('pages').children.length, assets: await __memory.count(db, 'assets'),
+      metadataOnly: pages.every(row => !('data' in row) && !('sig' in row) && !Object.values(row).some(value => value instanceof Blob || ArrayBuffer.isView(value))),
+      first: pages[0].sourceTime, last: pages.at(-1).sourceTime}));
+    assert.deepEqual(restored, {pages: 2000, cards: 2000, assets: 2000, metadataOnly: true, first: 0, last: 9995});
+    const cache = await page.evaluate(async () => {
+      const original = PPTPageStore.assets, context = createDedupeContext(), batches = [];
+      PPTPageStore.assets = (db, ids) => { batches.push(ids.length); return original(db, ids); };
+      try {
+        await hasSimilar(new Uint8ClampedArray(192 * 108 * 4).fill(250), .1, context);
+        return {count: context.signatures.size, bytes: [...context.signatures.values()].reduce((sum, sig) => sum + (sig?.byteLength || 0), 0), batches};
+      } finally { PPTPageStore.assets = original; releaseDedupeContext(context); }
+    });
+    assert.equal(cache.count, 1000); assert.equal(cache.bytes, 82944000); assert.equal(Math.max(...cache.batches), 32); assert.equal(cache.batches.reduce((a, b) => a + b), 2000);
+    report.heap.signatures2000Released = await heap(cdp);
+    await page.evaluate(() => {
+      window.longCards = [...$('pages').children]; window.longRead = {active: 0, max: 0};
+      const thumbnail = PPTPageStore.thumbnail;
+      PPTPageStore.thumbnail = async (...args) => { longRead.active++; longRead.max = Math.max(longRead.max, longRead.active); try { return await thumbnail(...args); } finally { longRead.active--; } };
+      $('pages').scrollTop = $('pages').scrollHeight;
+    });
+    await page.waitForFunction(() => $('pages').lastElementChild.querySelector('img').hasAttribute('src')); await settleThumbnails(page);
+    const thumbnails = await page.evaluate(() => {
+      const rect = $('pages').getBoundingClientRect(), states = [...thumbnailStates];
+      const inside = image => { const r = image.getBoundingClientRect(); return r.bottom >= rect.top - 201 && r.top <= rect.bottom + 201 && r.right >= rect.left && r.left <= rect.right; };
+      return {maxReads: longRead.max, live: states.filter(([, state]) => state.url).length, allowed: states.filter(([image]) => inside(image)).length,
+        bounded: states.every(([image, state]) => !state.url || inside(image)), reused: longCards.every((card, i) => $('pages').children[i] === card), releasedCache: dedupeContext === null};
+    });
+    assert.equal(thumbnails.maxReads, 2); assert(thumbnails.live > 0 && thumbnails.live <= thumbnails.allowed && thumbnails.live < 100);
+    assert(thumbnails.bounded && thumbnails.reused && thumbnails.releasedCache);
+    await page.evaluate(() => {
+      const imageBytes = PPTPageStore.imageBytes; window.longExport = {active: 0, max: 0, reads: 0};
+      PPTPageStore.imageBytes = async (...args) => { longExport.active++; longExport.max = Math.max(longExport.max, longExport.active); longExport.reads++;
+        try { return await imageBytes(...args); } finally { longExport.active--; } };
+    });
+    await page.clock.install(); report.heap.export2000Before = await heap(cdp);
+    const pending = page.waitForEvent('download'); await page.evaluate(() => exportRetained('zip'));
+    const download = await pending, filename = path.join(output, 'synthetic-2000-slides.zip'); await download.saveAs(filename); assert.equal(await download.failure(), null);
+    const zip = zipSummary(filename, fixture.sha256), reads = await page.evaluate(() => longExport);
+    assert.equal(zip.entries, 2000); assert.equal(zip.imageBytes, fixture.imageSize * 2000); assert.deepEqual(reads, {active: 0, max: 1, reads: 2000});
+    report.heap.export2000Finished = await heap(cdp); report.heap.export2000SampledDelta = report.heap.export2000Finished - report.heap.export2000Before;
+    assert(report.heap.export2000SampledDelta < 64 * 1024 ** 2);
+    await page.clock.fastForward(60001); await page.waitForFunction(async () => downloadURLs.size === 0 && (await __memory.files()).length === 0);
+    assert.equal(await page.evaluate(() => [...__memory.live.values()].filter(value => value.type === 'image/jpeg').length), thumbnails.live);
+    const append = await page.evaluate(async () => {
+      const container = $('pages'), scroll = container.scrollTop, id = pages.at(-1).id;
+      selectedPages = new Set([id]); updateSelection();
+      let added = 0, removed = 0;
+      const observer = new MutationObserver(records => { for (const row of records) { added += row.addedNodes.length; removed += row.removedNodes.length; } });
+      observer.observe(container, {childList: true});
+      const canvas = document.createElement('canvas'); canvas.width = 32; canvas.height = 18; canvas.getContext('2d').fillRect(0, 0, 32, 18);
+      await save({canvas, sig: new Uint8ClampedArray(192 * 108 * 4), sourceTime: 10000, signatureCrop: {...crop}});
+      await Promise.resolve(); observer.disconnect(); canvas.width = canvas.height = 0;
+      return {pages: pages.length, cards: container.children.length, added, removed, scrollPreserved: scroll > 0 && container.scrollTop === scroll,
+        reused: longCards.every((card, i) => container.children[i] === card), selectionPreserved: selectedPages.has(id) && selectedPages.size === 1};
+    });
+    assert.deepEqual(append, {pages: 2001, cards: 2001, added: 1, removed: 0, scrollPreserved: true, reused: true, selectionPreserved: true});
+    await cdp.detach(); report.evidence.push(filename);
+    return {restored, cache, thumbnails, zip, reads, append, cleanup: true, syntheticImagesRepeat: true, measurement: 'sampled Chromium JS heap, not process RSS or a measured peak'};
+  } finally { await dispose(context); }
+}
+
 async function main() {
   server = http.createServer(async (request, response) => {
     try {
@@ -430,6 +506,7 @@ async function main() {
     await test('failed migration rolls back the full upgrade and keeps the v2 database intact', failedMigration);
     await test('real OPFS startup reclaims unlocked sessions and protects another active page', cacheSessions);
     await workspace();
+    await test('2000 pages restore with bounded caches, thumbnails and byte-correct streaming ZIP', longWorkspace);
   } catch (error) { report.errors.push(error.stack || String(error)); }
   finally {
     for (const context of contexts) await context.close().catch(error => report.errors.push(error.message));

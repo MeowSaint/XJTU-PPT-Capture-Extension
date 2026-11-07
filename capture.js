@@ -16,12 +16,16 @@ let sourceCourse = {}, sourceCoursePage = '', namingPage = '', namingManual = fa
 let videoCache = null, previewURL = null, previewLoadingId = null, previewRevision = 0;
 let allPages = [], lessons = [], activeLesson = null, savedBatches = [], lessonSave = Promise.resolve(), scanId = '';
 let savedPDFOptions = {layout: 'single', timestamps: false, bookmarks: false};
+let captureLimits = {maxPages: 5000}, limitsSave = Promise.resolve(), lastAcquisitionFailure = '';
+const manualStorageGuard = {committed: 0, checked: false};
 const dbReady = PPTPageStore.open({blocked: () => status('请先关掉其他已打开的截取工具页，再刷新本页。')}).then(async database => {
   db = database;
-  const pdf = await new Promise((resolve, reject) => {
-    const tx = db.transaction('settings'), request = tx.objectStore('settings').get('exportPDF');
-    tx.oncomplete = () => resolve(request.result); tx.onerror = tx.onabort = () => reject(tx.error || Error('PDF 设置读取失败'));
+  const {pdf, limits} = await new Promise((resolve, reject) => {
+    const tx = db.transaction('settings'), settings = tx.objectStore('settings');
+    const pdf = settings.get('exportPDF'), limits = settings.get('captureLimits');
+    tx.oncomplete = () => resolve({pdf: pdf.result, limits: limits.result}); tx.onerror = tx.onabort = () => reject(tx.error || Error('提取设置读取失败'));
   });
+  captureLimits = {maxPages: PPTLibrary.pageLimit(limits?.maxPages)}; $('page-limit').value = captureLimits.maxPages;
   applyPDFOptions(pdf); savedPDFOptions = pdfOptions();
   await PPTPageStore.prune(db);
   const saved = await PPTLibrary.restore(db);
@@ -680,7 +684,7 @@ document.addEventListener('keydown', event => {
 });
 function controls() {
   const active = busy();
-  for (const id of ['load-url', 'url', 'file', 'share', 'sources', 'course', 'discover', 'mode', 'diff', 'dedupe', 'stable', 'full', 'course-name', 'course-date', 'course-start', 'pdf-layout', 'pdf-timestamps', 'pdf-bookmarks']) $(id).disabled = active;
+  for (const id of ['load-url', 'url', 'file', 'share', 'sources', 'course', 'discover', 'mode', 'diff', 'dedupe', 'stable', 'page-limit', 'full', 'course-name', 'course-date', 'course-start', 'pdf-layout', 'pdf-timestamps', 'pdf-bookmarks']) $(id).disabled = active;
   $('load').disabled = active || !$('sources').value;
   $('full').disabled = active || !sourceReady;
   $('crop-select').disabled = active || !sourceReady;
@@ -979,12 +983,31 @@ function frame(sourceTime = video.currentTime) {
   const ctx = small.getContext('2d', {willReadFrequently: true}); ctx.drawImage(canvas, 0, 0, 192, 108);
   return {canvas, sig: ctx.getImageData(0, 0, 192, 108).data, sourceTime, signatureCrop: {...crop}};
 }
+function acquisitionError(code, message, cause) { return Object.assign(new Error(message, {cause}), {code}); }
+function acquisitionReason(error) {
+  for (let depth = 0; error && depth < 8; depth++, error = error.cause) {
+    if (error.name === 'QuotaExceededError' || error.code === 'STORAGE_LOW') return 'STORAGE_LOW';
+    if (error.code === 'PAGE_LIMIT') return 'PAGE_LIMIT';
+  }
+  return '';
+}
+async function checkCaptureStorage(guard = manualStorageGuard) {
+  if (guard.checked && guard.committed < 25) return;
+  let estimate;
+  try { estimate = await navigator.storage?.estimate?.(); } catch { /* Unavailable estimates do not block real writes. */ }
+  if (Number.isFinite(estimate?.quota) && estimate.quota >= 0 && Number.isFinite(estimate?.usage) && estimate.usage >= 0 && estimate.quota - estimate.usage < 32 * 1024 ** 2) {
+    throw acquisitionError('STORAGE_LOW', '本机剩余空间不足 32 MiB，已暂停提取；截图和进度已保留。请释放空间后继续。');
+  }
+  guard.checked = true; guard.committed = 0;
+}
 async function save(f, context = null) {
   const signal = context?.signal || task?.signal, lessonId = activeLesson?.id;
   const check = () => { signal?.throwIfAborted(); checkDedupeContext(context); if (activeLesson?.id !== lessonId) throw new DOMException('课次已切换', 'AbortError'); };
   await dbReady; check();
   if (scanId && pages.some(page => page.scanId === scanId && Math.abs(page.sourceTime - f.sourceTime) < 0.001)) return false;
-  if (pages.length >= 1000) throw Error('本节已达 1000 页，请先导出 PDF，再清空本节继续');
+  const maxPages = PPTLibrary.pageLimit(captureLimits.maxPages), storageGuard = context?.storageGuard || manualStorageGuard;
+  if (pages.length >= maxPages) throw acquisitionError('PAGE_LIMIT', `本节已达 ${maxPages} 页上限，截图和进度已保留；可在提取设置中调高上限后继续。`);
+  await checkCaptureStorage(storageGuard);
   if (!pages.length) await persistNaming();
   check();
   const asset = {...await PPTPageStore.encode(f.canvas), sig: f.sig};
@@ -1005,12 +1028,24 @@ async function save(f, context = null) {
   else if (Number.isFinite(before)) page.order = before + 1024;
   else if (Number.isFinite(after)) page.order = after - 1024;
   else page.order = 1024;
-  page.id = await writePage(page, asset); cacheSignature(context, page.id, f.sig);
+  try { page.id = await writePage(page, asset); }
+  catch (error) {
+    if (acquisitionReason(error) === 'STORAGE_LOW') throw acquisitionError('STORAGE_LOW', '本机存储空间不足，已暂停提取；已保存的截图和进度已保留。请释放空间后继续。', error);
+    throw error;
+  }
+  storageGuard.committed++; cacheSignature(context, page.id, f.sig);
+  const append = insertAt === pages.length;
   pages.splice(insertAt, 0, page); syncAllPages(); forgetUndo(); last = f.sig;
-  render({revealNew: true}); return true;
+  if (append) {
+    const container = $('pages'), scrollTop = container.scrollTop, card = addCard(page, insertAt);
+    $('count').textContent = `共 ${pages.length} 页`; $('review-notice').hidden = false;
+    container.scrollTop = scrollTop; updateSelection(); renderLibrary(); controls(); revealCards([card]);
+  } else render({revealNew: true});
+  return true;
 }
 async function releaseSource() {
   releaseDedupeContext(); cancelSelection();
+  manualStorageGuard.checked = false; manualStorageGuard.committed = 0;
   let persistenceError;
   if (activeLesson && ready && sourceReady) try { await persistLesson(); } catch (error) { persistenceError = error; }
   window.PPTWorkspace?.cancelPreflight();
@@ -1128,6 +1163,7 @@ async function inspectPlaylist(url, signal, visited = new Set(), depth = 0, orig
 async function loadRemote(raw, options = {}) {
   if (!studyAccepted || task || realtimeTimer || realtimeBusy || reviewBusy || exportBusy || pageWrites || (batchRunning && !options.batchJob)) return false;
   const batchJob = options.batchJob || null;
+  lastAcquisitionFailure = '';
   if (!batchJob) activeBatchJob = null;
   const info = PPTCore.mediaInfo(raw);
   if (!info) { status('请输入完整的 HTTP(S) MP4、WebM 或 m3u8 视频地址'); return false; }
@@ -1166,8 +1202,9 @@ async function loadRemote(raw, options = {}) {
     pendingOrigins = []; loaded = true;
   } catch (e) {
     const reason = await releaseFailedSource(controller.signal.aborted ? controller.signal.reason : e);
+    lastAcquisitionFailure = acquisitionReason(reason);
     if (activeBatchJob === batchJob) activeBatchJob = null;
-    status(reason.name === 'AbortError' ? '视频加载已停止。可以重新加载。' : '加载失败：' + reason.message);
+    status(lastAcquisitionFailure === 'STORAGE_LOW' ? '本机存储空间不足，视频加载已暂停；已保存的截图和进度已保留。请释放空间后重试：' + reason.message : reason.name === 'AbortError' ? '视频加载已停止。可以重新加载。' : '加载失败：' + reason.message);
   } finally { task = null; controls(); }
   return loaded;
 }
@@ -1331,12 +1368,13 @@ async function fastScan({restart = false, range = null} = {}) {
   scanId = resume ? activeLesson.task.id : crypto.randomUUID();
   if (!range) activeLesson.task = {id: scanId, state: 'running', checkpoint: start, baselineTime, duration: video.duration, settings, crop: {...crop}, ignoreRect: ignoreRect && {...ignoreRect}};
   const context = createDedupeContext(controller.signal);
+  context.storageGuard = {committed: 0, checked: false}; lastAcquisitionFailure = '';
   let outcome = null, discovered = [];
   cancelSelection(); controls(); video.pause(); $('progress').value = 0;
   status(range ? '正在细查所选时间段…' : resume ? `正在从 ${timecode(start)} 继续扫描…` : '正在快速扫描，请保持工具页打开…');
   const started = performance.now();
   try {
-    await persistLesson();
+    await limitsSave; await persistLesson(); await checkCaptureStorage(context.storageGuard);
     const scanner = new PPTScanner(video, frame);
     const result = await scanner.scan({step: range ? 0.5 : settings.step, threshold: settings.threshold, dedupe: range ? true : settings.dedupe, start, end, baselineTime, signal: controller.signal, save: f => save(f, context),
       compare: (a, b, threshold) => PPTCore.similar(a, b, threshold, context.mask),
@@ -1347,9 +1385,11 @@ async function fastScan({restart = false, range = null} = {}) {
         try { await persistLesson(); } catch (e) { activeLesson.suspects = previous; throw e; }
       },
       checkpoint: async p => {
-        if (range) return;
-        const previous = activeLesson.task; activeLesson.task = {...previous, checkpoint: p.time, baselineTime: p.baselineTime};
-        try { await persistLesson(); } catch (e) { activeLesson.task = previous; throw e; }
+        if (!range) {
+          const previous = activeLesson.task; activeLesson.task = {...previous, checkpoint: p.time, baselineTime: p.baselineTime};
+          try { await persistLesson(); } catch (e) { activeLesson.task = previous; throw e; }
+        }
+        await checkCaptureStorage(context.storageGuard);
       },
       progress: p => { $('progress').value = p.ratio; status(`扫描 ${timecode(p.time)} / ${timecode(p.duration)} · ${(p.ratio * 100).toFixed(1)}% · 新增 ${p.saved} 页 · 耗时 ${((performance.now() - started) / 1000).toFixed(1)} 秒`); }
     });
@@ -1364,18 +1404,19 @@ async function fastScan({restart = false, range = null} = {}) {
     status(`${range ? '局部细查' : '提取'}完成：新增 ${result.saved} 页，本节共 ${pages.length} 页，耗时 ${((performance.now() - started) / 1000).toFixed(1)} 秒。${activeLesson.suspects.length ? `还有 ${activeLesson.suspects.length} 个时间段待复核。` : ''}\n请先筛选页面，再下载 PDF 或图片包。`);
     outcome = result;
   } catch (e) {
+    lastAcquisitionFailure = acquisitionReason(e);
     let message = e.name === 'AbortError' ? `已停止，本次新增 ${pages.length - before} 页。` : '提取中断，已截页面已保留：' + e.message;
-    if (!range) activeLesson.task = {...activeLesson.task, state: e.name === 'AbortError' ? 'paused' : 'failed'};
+    if (!range) activeLesson.task = {...activeLesson.task, state: e.name === 'AbortError' || lastAcquisitionFailure ? 'paused' : 'failed', ...(lastAcquisitionFailure ? {reason: lastAcquisitionFailure} : {})};
     try { await persistLesson(); } catch (storage) { message += '；任务状态未能保存：' + storage.message; }
     status(message);
   } finally {
     releaseDedupeContext(context); scanId = ''; task = null; video.pause();
     if (manualJob) {
       const count = batchPageCount(manualJob); manualJob.pages = count;
-      manualJob.state = outcome ? 'done' : count ? 'partial' : 'failed'; manualJob.error = outcome ? '' : $('status').textContent;
+      manualJob.state = outcome ? 'done' : count ? 'partial' : lastAcquisitionFailure ? 'stopped' : 'failed'; manualJob.error = outcome ? '' : $('status').textContent;
       try { await persistBatch(manualJob); } catch (e) { status('批量状态保存失败：' + e.message); }
       renderBatchJobs();
-      $('batch-status').textContent = outcome ? `本节 0 路视频已完成，共 ${count} 页；可继续回看和细查。` : `本节 0 路视频未完成，已保留 ${count} 页。`;
+      $('batch-status').textContent = outcome ? `本节 0 路视频已完成，共 ${count} 页；可继续回看和细查。` : `本节 0 路视频未完成，已保留 ${count} 页。${lastAcquisitionFailure ? manualJob.error : ''}`;
     }
     renderLibrary(); controls();
   }
@@ -1673,13 +1714,20 @@ async function runBatch(permission) {
   let startupError = '';
   try {
     if (!await permission) throw Error('未获得视频域名访问权限');
+    await checkCaptureStorage({checked: false, committed: 0});
     for (let index = 0; index < selected.length; index++) {
       if (batchStopRequested) break;
       const job = selected[index]; activeBatchJob = job; job.state = 'loading'; job.error = ''; await persistBatch(); renderBatchJobs();
       $('batch-status').textContent = `第 ${index + 1} / ${selected.length} 节：正在加载 ${job.course.date} ${String(job.course.start).slice(0, 5)}…`;
       coursePage = batchPage; sourceCourse = {...job.course}; sourceCoursePage = coursePage;
       const loaded = await loadRemote(job.url, {permissionGranted: true, sourceName: job.sourceName, batchJob: job});
-      if (!loaded) { job.state = batchStopRequested ? 'stopped' : 'failed'; job.error = $('status').textContent; await persistBatch(); renderBatchJobs(); continue; }
+      if (!loaded) {
+        const storageLow = lastAcquisitionFailure === 'STORAGE_LOW';
+        job.state = batchStopRequested || storageLow ? 'stopped' : 'failed'; job.error = $('status').textContent;
+        await persistBatch(); renderBatchJobs();
+        if (storageLow) { startupError = job.error; break; }
+        continue;
+      }
       if (batchStopRequested) { job.state = 'stopped'; await releaseSource(); renderBatchJobs(); break; }
       if (job.requiresCrop && (!job.cropConfirmed || job.cropRejected)) {
         job.state = 'needs-crop'; job.selected = false; await persistBatch(); await releaseSource(); renderBatchJobs(); continue;
@@ -1687,9 +1735,11 @@ async function runBatch(permission) {
       job.state = 'scanning'; await persistBatch(); renderBatchJobs();
       $('batch-status').textContent = `第 ${index + 1} / ${selected.length} 节：正在提取 PPT…`;
       const result = await fastScan(); job.pages = batchPageCount(job);
-      if (!result) { job.state = batchStopRequested ? 'stopped' : 'failed'; job.error = $('status').textContent; }
+      const protection = lastAcquisitionFailure;
+      if (!result) { job.state = batchStopRequested ? 'stopped' : protection ? (job.pages ? 'partial' : 'stopped') : 'failed'; job.error = $('status').textContent; }
       else job.state = 'done';
       await releaseSource(); await persistBatch(); renderBatchJobs();
+      if (protection === 'STORAGE_LOW') { startupError = job.error; break; }
     }
   } catch (error) { startupError = error.message; }
   finally {
@@ -1854,6 +1904,22 @@ function updateSources(reset = false) {
   controls();
 }
 $('discover').onclick = discover; $('course').onchange = discover; $('sources').onchange = controls;
+$('page-limit').onchange = async () => {
+  const next = {maxPages: PPTLibrary.pageLimit(Number($('page-limit').value))};
+  $('page-limit').value = next.maxPages;
+  limitsSave = limitsSave.then(async () => {
+    const previous = captureLimits;
+    try {
+      await dbReady;
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction('settings', 'readwrite'); tx.objectStore('settings').put(next, 'captureLimits');
+        tx.oncomplete = resolve; tx.onerror = tx.onabort = () => reject(tx.error || Error('页数上限保存失败'));
+      });
+      captureLimits = next;
+    } catch (error) { $('page-limit').value = previous.maxPages; status('页数上限保存失败：' + error.message); }
+  });
+  await limitsSave; renderLibrary(); controls();
+};
 for (const id of ['mode', 'diff', 'dedupe', 'stable']) $(id).onchange = () => { saveLessonSettings(); controls(); };
 if (window.chrome?.storage?.onChanged) chrome.storage.onChanged.addListener((changes, area) => {
   const value = changes['media-' + $('course').value]?.newValue;

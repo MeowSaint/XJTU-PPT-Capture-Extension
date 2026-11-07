@@ -3,6 +3,13 @@ const assert = require('node:assert/strict');
 const library = require('../library.js');
 const batch = require('../batch.js');
 
+test('page limits preserve every valid integer and reject invalid saved values', () => {
+  for (let value = 100; value <= 20000; value++) assert.equal(library.pageLimit(value), value);
+  for (const value of [undefined, null, '', '1388', {}, [], true, NaN, Infinity, -1, 0, 99, 100.5, 1388.1, 20001]) {
+    assert.equal(library.pageLimit(value), 5000, `invalid value: ${String(value)}`);
+  }
+});
+
 test('crop reuse validates bounds, zero-track identity and actual aspect within one percent', () => {
   const source = {sourceName: '0-camera.mp4', url: 'https://cdn.invalid/0-camera.mp4?id=1&token=old'};
   const override = {crop: {x: .1, y: .2, w: .7, h: .6}, aspect: 16 / 9, track: batch.trackKey(source)};
