@@ -99,7 +99,7 @@ async function main() {
   const origin = `http://127.0.0.1:${server.address().port}`;
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'ppt-capture-test-')), ext = path.join(temp, 'extension');
   fs.mkdirSync(ext);
-  for (const name of ['manifest.json', 'background.js', 'media.js', 'course.js', 'batch.js', 'page-hook.js', 'content.js', 'capture.html', 'capture.js', 'page-store.js', 'library.js', 'disk-cache.js', 'workspace.js', 'extension-state.js', 'preflight.js', 'scanner.js', 'style.css', 'pdf.js', 'vendor', 'icons']) fs.cpSync(path.join(root, name), path.join(ext, name), {recursive: true});
+  for (const name of ['manifest.json', 'background.js', 'media.js', 'course.js', 'batch.js', 'page-hook.js', 'content.js', 'capture.html', 'capture.js', 'page-store.js', 'library.js', 'disk-cache.js', 'workspace.js', 'extension-state.js', 'preflight.js', 'scanner.js', 'style.css', 'motion.js', 'pdf.js', 'vendor', 'icons']) fs.cpSync(path.join(root, name), path.join(ext, name), {recursive: true});
   const manifest = JSON.parse(fs.readFileSync(path.join(ext, 'manifest.json'), 'utf8'));
   // Grant only fixture server access in this test copy to avoid a headless permission dialog.
   manifest.host_permissions.push('http://127.0.0.1/*', 'http://localhost/*');
@@ -121,9 +121,9 @@ async function main() {
       globalThis.fetch = (input, options) => {
         const url = typeof input === 'string' ? input : input.url;
         if (url.startsWith('https://api.github.com/')) return Promise.resolve(new Response(JSON.stringify({
-          tag_name: 'v3.1.1', draft: false, prerelease: false, published_at: '2026-11-05T00:00:00Z',
-          html_url: 'https://github.com/MeowSaint/XJTU-PPT-Capture-Extension/releases/tag/v3.1.1',
-          assets: [{name: 'ppt-capture.zip', browser_download_url: 'https://github.com/MeowSaint/XJTU-PPT-Capture-Extension/releases/download/v3.1.1/ppt-capture.zip'}]
+          tag_name: 'v3.1.2', draft: false, prerelease: false, published_at: '2026-11-05T00:00:00Z',
+          html_url: 'https://github.com/MeowSaint/XJTU-PPT-Capture-Extension/releases/tag/v3.1.2',
+          assets: [{name: 'ppt-capture.zip', browser_download_url: 'https://github.com/MeowSaint/XJTU-PPT-Capture-Extension/releases/download/v3.1.2/ppt-capture.zip'}]
         }), {headers: {'Content-Type': 'application/json'}}));
         return fetchFixture(input, options);
       };
