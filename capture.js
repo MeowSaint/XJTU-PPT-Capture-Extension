@@ -1294,14 +1294,24 @@ async function exportRetained(kind, selected = false) {
 $('pdf').onclick = () => exportRetained('pdf'); $('export-zip').onclick = () => exportRetained('zip');
 $('selected-pdf').onclick = () => exportRetained('pdf', true); $('selected-zip').onclick = () => exportRetained('zip', true);
 $('course-zip').onclick = () => exportCourseZIP();
-$('batch-course-zip').onclick = () => exportCourseZIP(batchCourseKey(), 'batch-status');
+$('batch-course-zip').onclick = () => exportCourseZIP(batchCourseKey(), 'batch-status', batchPage);
 $('course-pdf').onclick = () => exportCoursePDF();
-$('batch-course-pdf').onclick = () => exportCoursePDF(batchCourseKey(), 'batch-status');
+$('batch-course-pdf').onclick = () => exportCoursePDF(batchCourseKey(), 'batch-status', batchPage);
 $('course-report').onclick = () => exportCourseReport();
-$('batch-course-report').onclick = () => exportCourseReport(batchCourseKey(), 'batch-status');
-function courseIntegrity(courseKey, course = currentCourseLessons(courseKey), pages = allPages, options = {}) {
-  const batch = savedBatches.find(item => PPTLibrary.courseKey(item.page, item.jobs[0]?.course) === courseKey);
-  return PPTLibrary.integrity({batch, lessons: course, pages, ...options});
+$('batch-course-report').onclick = () => exportCourseReport(batchCourseKey(), 'batch-status', batchPage);
+function courseIntegrity(courseKey, course = currentCourseLessons(courseKey), pages = allPages, {directoryPage = activeLesson?.page || '', ...options} = {}) {
+  const retained = savedBatches.filter(item => PPTLibrary.courseKey(item.page, item.jobs[0]?.course) === courseKey);
+  const selected = retained.find(item => item.page === directoryPage), jobs = new Map((selected?.jobs || []).map(job => [job.id, job]));
+  // Exact-page discovery is authoritative for this action; other known rows cannot disappear.
+  for (const batch of retained) for (const job of batch.jobs) if (!jobs.has(job.id)) jobs.set(job.id, job);
+  const totals = retained.map(batch => batch.discovery?.total).filter(total => Number.isSafeInteger(total) && total >= 0);
+  const total = totals.length ? Math.max(...totals) : undefined;
+  const reconciled = selected?.discovery?.complete === true && selected.discovery.total === jobs.size && total === selected.discovery.total;
+  const discovery = {...selected?.discovery, total,
+    complete: selected?.discovery?.complete === true ? reconciled : selected?.discovery?.complete,
+    failures: reconciled ? selected.discovery.failures || [] : retained.flatMap(batch => batch.discovery?.failures || []),
+  };
+  return PPTLibrary.integrity({batch: {jobs: [...jobs.values()], discovery}, lessons: course, pages, ...options});
 }
 function integrityHint(snapshot) {
   const s = snapshot.summary, unknown = s.directoryUnknown + s.directoryFailures + s.discoveryFailures + s.discoveryUnknown + (snapshot.directory.state === 'incomplete' ? 1 : 0);
@@ -1316,14 +1326,14 @@ async function saveCourseReceipt(courseKey, snapshot) {
   tx.objectStore('settings').put({lastExport: snapshot}, 'courseExport:' + courseKey);
   await new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onerror = tx.onabort = () => reject(tx.error || Error('导出记录未能保存')); });
 }
-async function exportCourseReport(courseKey, statusId = 'status') {
+async function exportCourseReport(courseKey, statusId = 'status', directoryPage) {
   if (busy()) return;
   exportBusy = true; controls();
   try {
     await namingSave; await lessonSave; syncAllPages();
     if (courseKey === undefined) courseKey = currentCourseKey();
     if (!courseKey) throw Error('请先选择课程');
-    const snapshot = courseIntegrity(courseKey), tx = db.transaction('settings'), read = tx.objectStore('settings').get('courseExport:' + courseKey);
+    const snapshot = courseIntegrity(courseKey, undefined, undefined, {directoryPage}), tx = db.transaction('settings'), read = tx.objectStore('settings').get('courseExport:' + courseKey);
     await new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onerror = tx.onabort = () => reject(tx.error || Error('导出记录未能读取')); });
     snapshot.lastExport = read.result?.lastExport || null;
     downloadBlob(new Blob([JSON.stringify(snapshot, null, 2) + '\n'], {type: 'application/json;charset=utf-8'}), '课程完整性报告.json');
@@ -1331,7 +1341,7 @@ async function exportCourseReport(courseKey, statusId = 'status') {
   } catch (e) { const message = '报告导出失败：' + e.message; status(message); if (statusId !== 'status') $(statusId).textContent = message; }
   finally { exportBusy = false; controls(); }
 }
-async function exportCoursePDF(courseKey, statusId = 'status') {
+async function exportCoursePDF(courseKey, statusId = 'status', directoryPage) {
   if (busy()) return;
   const report = message => { status(message); if (statusId !== 'status') $(statusId).textContent = message; };
   const {layout, timestamps} = pdfOptions();
@@ -1349,7 +1359,7 @@ async function exportCoursePDF(courseKey, statusId = 'status') {
     });
     const nonempty = entries.filter(entry => entry.pages.length), total = nonempty.reduce((sum, entry) => sum + entry.pages.length, 0);
     if (!total) throw Error('本课程还没有截图');
-    const snapshot = courseIntegrity(courseKey, course, entries.flatMap(entry => entry.pages), {format: 'pdf'}), empty = snapshot.summary.emptyLessons;
+    const snapshot = courseIntegrity(courseKey, course, entries.flatMap(entry => entry.pages), {format: 'pdf', directoryPage}), empty = snapshot.summary.emptyLessons;
     cache = await PPTDiskCache.create('export'); let count = 0;
     await writeCoursePDF(entries, {title, layout, timestamps, write: cache.write, readImage: async page => {
       report(`正在合并整课 PDF：第 ${++count} / ${total} 页…`); $('progress').value = (count - 1) / total;
@@ -1364,7 +1374,7 @@ async function exportCoursePDF(courseKey, statusId = 'status') {
     report('整课导出失败：' + message);
   } finally { exportBusy = false; controls(); }
 }
-async function exportCourseZIP(courseKey, statusId = 'status') {
+async function exportCourseZIP(courseKey, statusId = 'status', directoryPage) {
   if (busy()) return;
   const report = message => { status(message); if (statusId !== 'status') $(statusId).textContent = message; };
   const options = pdfOptions();
@@ -1378,7 +1388,7 @@ async function exportCourseZIP(courseKey, statusId = 'status') {
     const entries = course.map((lesson, index) => ({name: `${String(index + 1).padStart(3, '0')}-${PPTCourse.filename(lesson.course) || lessonLabel(lesson) + '.pdf'}`, pages: allPages.filter(page => page.lessonId === lesson.id).sort((a, b) => a.order - b.order).map(page => ({...page}))}));
     const nonempty = entries.filter(entry => entry.pages.length), total = nonempty.reduce((sum, entry) => sum + entry.pages.length, 0);
     if (!nonempty.length) throw Error('本课程还没有截图');
-    const snapshot = courseIntegrity(courseKey, course, entries.flatMap(entry => entry.pages), {format: 'zip'}), empty = snapshot.summary.emptyLessons;
+    const snapshot = courseIntegrity(courseKey, course, entries.flatMap(entry => entry.pages), {format: 'zip', directoryPage}), empty = snapshot.summary.emptyLessons;
     cache = await PPTDiskCache.create('export'); let count = 0;
     await writeCourseZIP(entries, {...options, write: cache.write, readImage: async page => {
       report(`正在打包课程 PDF：第 ${++count} / ${total} 页…`); $('progress').value = (count - 1) / total;

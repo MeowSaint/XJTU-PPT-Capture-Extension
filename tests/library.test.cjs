@@ -38,6 +38,24 @@ test('integrity never invents prefix coverage, merges tracks, or promotes legacy
   assert.equal(report.directory.state, 'incomplete'); assert.equal(report.summary.directoryFailures, 1); assert.equal(report.complete, false);
 });
 
+test('integrity rejects historical coverage for a changed known source duration without mutating history or receipts', () => {
+  const item = integrityLesson('duration'), directory = {jobs: [{id: item.id, discovery: {state: 'ready'}}], discovery: {complete: true, total: 1, eligible: 1}};
+  item.source.duration = 10;
+  const pages = [{id: 17, lessonId: item.id, order: 1, sourceTime: 9}], history = structuredClone(item.task);
+  const prior = library.integrity({batch: directory, lessons: [item], pages, exportedAt: '2026-11-08T00:00:00.000Z', format: 'pdf'});
+  assert.equal(prior.complete, true); assert.equal(prior.lessons[0].scan.verified, true);
+  for (const duration of [20, 5, 0]) {
+    item.source.duration = duration;
+    const current = library.integrity({batch: directory, lessons: [item], pages, format: 'zip'});
+    assert.equal(current.lessons[0].scan.verified, false, `current duration ${duration} differs from historical duration`);
+    assert.equal(current.lessons[0].scan.reachedEnd, false); assert.equal(current.complete, false);
+    assert.deepEqual(current.pageIds, [17]); assert.equal(current.lessons[0].scan.checkpoint, 9.95);
+    assert.deepEqual(item.task, history); assert.equal(prior.complete, true, 'a frozen historical receipt is unchanged');
+  }
+  delete item.source.duration;
+  assert.equal(library.integrity({batch: directory, lessons: [item], pages}).complete, true, 'missing legacy duration does not replace valid task evidence');
+});
+
 test('integrity freezes export page order and projects every identity without signed URLs or credentials', () => {
   const item = integrityLesson('safe');
   const secret = 'https://cdn.invalid/private?access_token=hidden&signature=signed';

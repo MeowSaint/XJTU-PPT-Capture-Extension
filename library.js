@@ -62,7 +62,8 @@
       const task = lesson?.task, coverage = task?.coverage, duration = number(task?.duration), source = lesson?.source || {};
       const track = key({sourceKey: source.sourceKey || (source.url ? 'url:' + source.url : ''), sourceName: source.sourceName});
       const validRanges = ranges(coverage?.ranges);
-      const verified = !!(coverage?.version === 1 && duration > 0 && coverage.duration === duration && coverage.sourceKey === key(source)
+      const verified = !!(coverage?.version === 1 && duration > 0 && coverage.duration === duration
+        && (!Number.isFinite(source.duration) || source.duration === duration) && coverage.sourceKey === key(source)
         && coverage.trackKey === track && Array.isArray(coverage.ranges) && validRanges.length === coverage.ranges.length
         && validRanges.every(range => range.end <= duration));
       const merged = verified ? validRanges.reduce((list, range) => mergeRanges(list, range), []) : [];

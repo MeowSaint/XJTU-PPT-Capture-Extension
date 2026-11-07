@@ -106,8 +106,9 @@ async function test(name, body) {
 }
 // Only seek/decode is synthetic: production scan(), save(), encoding and IDB commits remain real.
 async function boundedScanner(duration = 694) {
-  await page.evaluate(duration => {
+  await page.evaluate(async duration => {
     Object.defineProperty(video, 'duration', {configurable: true, value: duration});
+    await bindLesson({...activeLesson.source, duration: video.duration});
     window.longProbe = {seeks: [], commits: [], maximumSignatures: 0, maximumSignatureBytes: 0, estimates: []};
     const seek = PPTScanner.prototype.seek, add = PPTPageStore.add, cache = cacheSignature;
     PPTScanner.prototype.seek = async function(time, signal) {
@@ -1089,6 +1090,124 @@ function zipEntries(bytes) {
         assert.equal(evidence.task.coverage.reachedEnd, false); assert.deepEqual(live, evidence.task);
         assert.match(evidence.status, /Injected coverage checkpoint failure/);
       } finally { await page.evaluate(() => { window.restoreCoveragePut?.(); restoreBoundedScanner(); }); }
+    });
+
+    await test('integrity duration reload retains historical pages and checkpoints but cannot certify the longer source or new receipt', async () => {
+      const base = origin + '/study-capture-courses/42/preview-detail/duration', url = origin + '/' + path.relative(root, fixture).split(path.sep).join('/');
+      const job = {id: 'duration-job', course, url, sourceName: '2-duration.mp4', discovery: {state: 'ready'}};
+      await seed({batches: [{page: base, jobs: [job], discovery: {complete: true, total: 1, eligible: 1}}]});
+      const reload = () => page.evaluate(async ({base, job}) => {
+        coursePage = base; sourceCourse = {...job.course}; sourceCoursePage = base;
+        return loadRemote(job.url, {permissionGranted: true, batchJob: job, sourceName: job.sourceName});
+      }, {base, job});
+      assert.equal(await reload(), true); await boundedScanner(3);
+      try { await page.evaluate(() => fastScan()); } finally { await page.evaluate(() => restoreBoundedScanner()); }
+      const historical = await stored(), savedLesson = historical.lessons[0];
+      assert.equal(savedLesson.task.coverage.reachedEnd, true); assert.equal(savedLesson.task.checkpoint, 2.95);
+      const readReport = async label => {
+        const [download] = await Promise.all([page.waitForEvent('download'), page.locator('#course-report').click()]);
+        const target = path.join(output, label + '.json'); await download.saveAs(target); await idle();
+        return JSON.parse(fs.readFileSync(target, 'utf8'));
+      };
+      const oldReport = await readReport('duration-before-reload'); assert.equal(oldReport.complete, true);
+      await page.locator('#tab-export').click();
+      const [oldPDF] = await Promise.all([page.waitForEvent('download'), page.locator('#course-pdf').click()]);
+      await oldPDF.saveAs(path.join(output, 'duration-before-reload.pdf')); await idle();
+      const priorReceipt = (await readReport('duration-old-receipt')).lastExport; assert.equal(priorReceipt.complete, true);
+      assert.equal(await reload(), true); await settled();
+      const reloaded = await stored(); assert.equal(reloaded.lessons.length, 1); assert.equal(reloaded.lessons[0].source.duration, 6);
+      assert.deepEqual(reloaded.lessons[0].task, savedLesson.task); assert.deepEqual(reloaded.pages, historical.pages); assert.deepEqual(reloaded.assets, historical.assets);
+      const current = await readReport('duration-after-reload');
+      assert.equal(current.lessons[0].scan.verified, false); assert.equal(current.lessons[0].scan.reachedEnd, false); assert.equal(current.complete, false);
+      assert.deepEqual(current.lastExport, priorReceipt, 'the old successful receipt remains a frozen historical snapshot');
+      const [newZIP] = await Promise.all([page.waitForEvent('download'), page.locator('#course-zip').click()]);
+      await newZIP.saveAs(path.join(output, 'duration-after-reload.zip')); await idle();
+      const latest = await readReport('duration-new-receipt');
+      assert.equal(latest.lastExport.complete, false); assert.equal(latest.lastExport.lessons[0].scan.verified, false);
+      assert.deepEqual(latest.lastExport.pageIds, priorReceipt.pageIds); assert.equal(latest.lastExport.export.format, 'zip');
+      assert.deepEqual((await stored()).lessons[0].task, savedLesson.task);
+      await boundedScanner(6); try { await page.evaluate(() => fastScan()); } finally { await page.evaluate(() => restoreBoundedScanner()); }
+      const rescanned = await readReport('duration-rescanned'); assert.equal(rescanned.complete, true);
+      assert.notEqual((await stored()).lessons[0].task.id, savedLesson.task.id); assert.deepEqual(rescanned.lastExport, latest.lastExport);
+      assert(historical.pages.every(old => rescanned.pageIds.includes(old.id)), 'a new compatible full scan retains every historical page');
+    });
+
+    await test('integrity same-course directory pages retain all known rows and explicitly scope current and batch receipts', async () => {
+      const base = origin + '/study-capture-courses/42/preview-detail/a', other = base.replace('/a', '/b');
+      const url = origin + '/' + path.relative(root, fixture).split(path.sep).join('/');
+      const job = {id: 'shared-job', course, url, sourceName: '2-shared.mp4', discovery: {state: 'ready'}};
+      const missing = {id: 'new-unscanned-job', course, url: url + '?recording=new', sourceName: '2-new.mp4', discovery: {state: 'ready'}};
+      await seed({batches: [{page: base, jobs: [job], discovery: {complete: true, total: 1, eligible: 1}}]});
+      assert.equal(await page.evaluate(async ({base, job}) => {
+        coursePage = base; sourceCourse = {...job.course}; sourceCoursePage = base;
+        return loadRemote(job.url, {permissionGranted: true, batchJob: job, sourceName: job.sourceName});
+      }, {base, job}), true);
+      await boundedScanner(6); try { await page.evaluate(() => fastScan()); } finally { await page.evaluate(() => restoreBoundedScanner()); }
+      const history = await stored(); assert(history.pages.length > 0);
+      await page.evaluate(async ({other, job, missing}) => {
+        const snapshot = {page: other, jobs: [job, missing], discovery: {complete: true, total: 2, eligible: 2}};
+        await PPTLibrary.batch(db, snapshot.page, snapshot.jobs, snapshot.discovery); retainBatch(structuredClone(snapshot));
+        batchPage = other; batchJobs = structuredClone(snapshot.jobs); renderBatchJobs(); controls();
+      }, {other, job, missing});
+      const readReport = async (button, label) => {
+        const [download] = await Promise.all([page.waitForEvent('download'), page.locator(button).click()]);
+        const target = path.join(output, label + '.json'); await download.saveAs(target); await idle();
+        return JSON.parse(fs.readFileSync(target, 'utf8'));
+      };
+      await page.locator('#batch-panel').evaluate(panel => { panel.open = true; });
+      const current = await readReport('#course-report', 'same-course-current'), batchReport = await readReport('#batch-course-report', 'same-course-batch');
+      const checkRows = report => {
+        assert.deepEqual(report.lessons.map(row => row.jobId).sort(), [missing.id, job.id].sort());
+        assert.equal(report.directory.known, 2); assert.equal(report.summary.notReachedEnd, 1); assert.equal(report.complete, false);
+        assert.equal(report.lessons.find(row => row.jobId === job.id).scan.reachedEnd, true);
+        assert.equal(report.lessons.find(row => row.jobId === missing.id).scan.reachedEnd, false);
+      };
+      checkRows(current); checkRows(batchReport);
+      assert.equal(current.directory.total, 2); assert.equal(current.directory.eligible, 1); assert.equal(current.directory.state, 'incomplete');
+      assert.equal(batchReport.directory.total, 2); assert.equal(batchReport.directory.eligible, 2); assert.equal(batchReport.directory.state, 'complete');
+      await page.evaluate(() => { savedBatches.reverse(); });
+      const reordered = await readReport('#batch-course-report', 'same-course-reordered');
+      assert.deepEqual(reordered, batchReport, 'insertion order must not select a different directory');
+      await page.locator('#tab-export').click();
+      const [pdf] = await Promise.all([page.waitForEvent('download'), page.locator('#course-pdf').click()]);
+      await pdf.saveAs(path.join(output, 'same-course-current.pdf')); await idle();
+      const currentReceipt = (await readReport('#course-report', 'same-course-current-receipt')).lastExport;
+      checkRows(currentReceipt); assert.equal(currentReceipt.directory.eligible, 1); assert.equal(currentReceipt.directory.state, 'incomplete'); assert.equal(currentReceipt.export.format, 'pdf');
+      assert.deepEqual(currentReceipt.pageIds, history.pages.map(page => page.id));
+      const [zip] = await Promise.all([page.waitForEvent('download'), page.locator('#batch-course-zip').click()]);
+      await zip.saveAs(path.join(output, 'same-course-batch.zip')); await idle();
+      const batchReceipt = (await readReport('#batch-course-report', 'same-course-batch-receipt')).lastExport;
+      checkRows(batchReceipt); assert.equal(batchReceipt.directory.total, 2); assert.equal(batchReceipt.directory.eligible, 2); assert.equal(batchReceipt.export.format, 'zip');
+      assert.deepEqual(batchReceipt.pageIds, currentReceipt.pageIds); assert.deepEqual((await stored()).pages, history.pages);
+      assert.equal(await page.evaluate(async ({other, missing}) => {
+        coursePage = other; sourceCourse = {...missing.course}; sourceCoursePage = other;
+        return loadRemote(missing.url, {permissionGranted: true, batchJob: missing, sourceName: missing.sourceName});
+      }, {other, missing}), true);
+      await boundedScanner(6); try { await page.evaluate(() => fastScan()); } finally { await page.evaluate(() => restoreBoundedScanner()); }
+      const setHistorical = metadata => page.evaluate(async ({base, metadata}) => {
+        const previous = savedBatches.find(batch => batch.page === base);
+        const snapshot = {...previous, discovery: metadata, jobs: previous.jobs.map(job => ({...job, discovery: {state: 'error', code: 'NETWORK'}}))};
+        await PPTLibrary.batch(db, snapshot.page, snapshot.jobs, snapshot.discovery); retainBatch(snapshot);
+      }, {base, metadata});
+      for (const [label, metadata] of [['unknown', {total: 2}], ['failed', {complete: false, total: 2, failures: [{code: 'NETWORK'}]}]]) {
+        await setHistorical(metadata);
+        const reconciled = await readReport('#batch-course-report', 'same-course-reconciled-' + label);
+        assert.equal(reconciled.complete, true, 'the requested complete listing covers all known IDs/totals despite old ' + label);
+        assert.equal(reconciled.directory.state, 'complete'); assert.equal(reconciled.summary.directoryFailures, 0);
+        assert(reconciled.lessons.every(row => row.scan.reachedEnd && row.discovery.state === 'ready'));
+        assert.deepEqual(reconciled.lastExport, batchReceipt, 'new scans and directory reads do not rewrite a frozen prior receipt');
+      }
+      await page.reload(); await idle();
+      await page.locator('#batch-panel').evaluate(panel => { panel.open = true; });
+      assert.equal(await page.evaluate(() => batchPage), other, 'the requested complete directory is restored with the active lesson');
+      const [completeZIP] = await Promise.all([page.waitForEvent('download'), page.locator('#batch-course-zip').click()]);
+      await completeZIP.saveAs(path.join(output, 'same-course-complete.zip')); await idle();
+      const successful = await readReport('#batch-course-report', 'same-course-complete-receipt'); assert.equal(successful.lastExport.complete, true);
+      assert(successful.lastExport.pageIds.length > batchReceipt.pageIds.length);
+      await setHistorical({complete: false, total: 26, failures: [{code: 'NETWORK'}]});
+      const larger = await readReport('#batch-course-report', 'same-course-larger-total');
+      assert.equal(larger.directory.total, 26); assert.equal(larger.directory.known, 2); assert.equal(larger.directory.state, 'incomplete');
+      assert.equal(larger.complete, false); assert.equal(larger.summary.directoryFailures, 1); assert.deepEqual(larger.lastExport, successful.lastExport);
     });
 
     await test('integrity report buttons isolate A and B, export freezes after pending saves and retains only successful receipts', async () => {
