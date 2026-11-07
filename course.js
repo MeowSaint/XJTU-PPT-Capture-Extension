@@ -66,7 +66,7 @@
       if (recordScope) entity = 'record';
       if (courseScope) entity = 'course';
       const captureId = fields.capturecode ?? fields.captureid ?? fields.recordid ?? fields.lessonid;
-      const checks = [[ids.course, fields.courseid], [ids.capture, captureId]];
+      const checks = [[ids.course, fields.courseid], [ids.capture, entity === 'course' ? null : captureId]];
       const entityDetails = recordScope || courseScope || /^(?:data|result|info|details?|payload)$/.test(scope);
       if (entityDetails && entity === 'record' && captureId == null && (fields.code != null || fields.id != null)) checks.push([ids.capture, fields.code ?? fields.id]);
       if (entityDetails && entity === 'course' && fields.id != null) checks.push([ids.course, fields.id]);
@@ -74,7 +74,8 @@
         if (expected && actual != null && String(actual) !== expected) return;
         if (expected && actual != null) score += 10;
       }
-      if (captureId != null) entity = 'record';
+      // A course's capture pointer identifies a related record, not the course's own time.
+      if (captureId != null && entity !== 'course') entity = 'record';
       const info = {};
       for (const key of ['coursename', 'coursetitle', 'teachingcoursename', 'subjectname', '课程名称']) {
         if (cleanName(fields[key])) { info.name = cleanName(fields[key]); break; }

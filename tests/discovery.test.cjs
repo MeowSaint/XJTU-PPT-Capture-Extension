@@ -173,6 +173,46 @@ test('API recording time wins over DOM and generic course opening fallback is re
   finally { directory.events.pagehide(); }
 });
 
+test('course endpoint context rejects opening times with a capture pointer through response envelopes', async () => {
+  for (const wrap of [value => value, value => ({data: value}), value => ({data: {data: value}})]) {
+    const calls = [], url = 'https://video.invalid/a.mp4';
+    const h = contentHarness(async path => {
+      calls.push(path);
+      return response(path.endsWith('/captures/a') ? {capture_code: 'a', urls: [url]} : wrap({id: 42, name: 'A', capture_code: 'a', start_time: '2026-09-14 00:00'}));
+    });
+    try {
+      const result = await h.send({type: 'PPT_DISCOVER'});
+      assert.deepEqual(calls, ['/api/v1/rms-service/study-capture-courses/42', '/api/v1/rms-service/study-capture-courses/42/captures/a']);
+      assert.deepEqual([...result.urls], [url]);
+      assert.deepEqual(JSON.parse(JSON.stringify(result.course)), {name: 'A'});
+    } finally { h.events.pagehide(); }
+  }
+});
+
+for (const fixture of [
+  {label: 'explicit latest pointer differs from last schedule', capture: {start_time: '2026-09-15 16:40'}, matching: true, expected: {name: 'A', date: '2026-09-15', start: '16:40:00'}},
+  {label: 'matched schedule supplies missing capture time', capture: {}, matching: true, expected: {name: 'A', date: '2026-09-15', start: '16:40:00'}},
+  {label: 'no matching schedule retains capture time', capture: {start_time: '2026-09-15 16:40'}, matching: false, expected: {name: 'A', date: '2026-09-15', start: '16:40:00'}},
+  {label: 'no matching schedule leaves missing fields absent', capture: {}, matching: false, expected: {name: 'A'}},
+  {label: 'no matching schedule cannot fill a missing date', capture: {start_time: '16:40'}, matching: false, expected: {name: 'A', start: '16:40:00'}}
+]) test(`directory probe binds selected media to its recording metadata: ${fixture.label}`, async () => {
+  const calls = [], url = 'https://video.invalid/a.mp4';
+  const schedules = [
+    ...(fixture.matching ? [{courseId: 42, capture_code: 'a', start_time: '2026-09-15 16:40', status: 'SUCCESS'}] : []),
+    {courseId: 42, capture_code: 'b', start_time: '2026-09-16 09:00', status: 'SUCCESS'}
+  ];
+  const h = contentHarness(async path => {
+    calls.push(path);
+    return response(path.endsWith('/captures/a') ? {capture_code: 'a', ...fixture.capture, urls: [url]} : {courseId: 42, courseName: 'A', latest_capture_code: 'a', schedules});
+  });
+  try {
+    const result = await h.send({type: 'PPT_DISCOVER'});
+    assert.deepEqual(calls, ['/api/v1/rms-service/study-capture-courses/42', '/api/v1/rms-service/study-capture-courses/42/captures/a']);
+    assert.deepEqual([...result.urls], [url], 'the discovered media must belong to the explicitly selected recording A');
+    assert.deepEqual(JSON.parse(JSON.stringify(result.course)), fixture.expected, 'recording B cannot supply any missing date/time field');
+  } finally { h.events.pagehide(); }
+});
+
 test('content discovery starts immediately, joins request IDs, cancels fetch and rejects stale requests', async () => {
   let cancelledFetches = 0, detailStarted = false;
   const h = contentHarness(async (path, {signal}) => {

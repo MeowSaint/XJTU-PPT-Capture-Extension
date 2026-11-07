@@ -44,7 +44,7 @@
     if (!courseId) return;
     const base = `/api/v1/rms-service/study-capture-courses/${encodeURIComponent(courseId)}`;
     try {
-      let courseData = null, latest = null, captureData = null;
+      let courseData = null, latest = null, captureData = null, resolvedCode = captureCode;
       if (captureCode) {
         captureData = await api(`${base}/captures/${encodeURIComponent(captureCode)}`, {signal});
       } else {
@@ -58,21 +58,25 @@
         ].filter(item => item && typeof item === 'object' && (item.capture_code || item.captureCode || item.code));
         const eligible = globalThis.PPTBatch ? list.filter(PPTBatch.eligible) : [];
         const pool = (eligible.length ? eligible : list).sort((a, b) => String(a.start_time || a.startTime || '').localeCompare(String(b.start_time || b.startTime || '')));
-        latest = pool.at(-1) || null;
-        const resolvedCode = detail?.capture_code || detail?.captureCode || detail?.latest_capture_code || detail?.latestCaptureCode
+        const lastSchedule = pool.at(-1);
+        resolvedCode = detail?.capture_code || detail?.captureCode || detail?.latest_capture_code || detail?.latestCaptureCode
           || detail?.latest_capture?.capture_code || detail?.latest_capture?.captureCode || detail?.latest_capture?.code
           || detail?.latestCapture?.capture_code || detail?.latestCapture?.captureCode || detail?.latestCapture?.code
-          || latest?.capture_code || latest?.captureCode || latest?.code || '';
+          || lastSchedule?.capture_code || lastSchedule?.captureCode || lastSchedule?.code || '';
+        latest = pool.filter(item => String(item.capture_code || item.captureCode || item.code) === String(resolvedCode)).at(-1) || null;
         if (resolvedCode) captureData = await api(`${base}/captures/${encodeURIComponent(resolvedCode)}`, {signal}).catch(() => null);
       }
       if (location.href !== currentPage || signal.aborted) return;
-      for (const [payload, entity] of [[courseData, ''], [captureData, 'capture'], [latest, 'schedule']]) {
+      // Directory metadata must be filtered against the recording whose media was selected.
+      const metadataPage = new URL(currentPage);
+      if (resolvedCode) metadataPage.searchParams.set('captureCode', resolvedCode);
+      for (const [payload, entity] of [[courseData, 'course'], [captureData, 'capture'], [latest, 'schedule']]) {
         if (!payload) continue;
         if (core.extractUrls) core.extractUrls(payload, currentPage).forEach(url => add(url));
         if (globalThis.PPTCourse) {
           // Only capture/schedule endpoints give generic start_time a lesson meaning.
           const value = entity ? {[entity]: payload} : payload;
-          apiCourse = {...apiCourse, ...PPTCourse.fromJSON(value, currentPage)};
+          apiCourse = {...apiCourse, ...PPTCourse.fromJSON(value, metadataPage.href)};
         }
       }
       const urls = [...found].slice(-150);

@@ -49,6 +49,17 @@ test('course opening dates never become recording dates through JSON or DOM fall
     assert.deepEqual(course.fromJSON({courseId: 16220, courseName: 'A', [field]: '2026-09-14 00:00'}, page), {name: 'A'});
   }
 });
+test('explicit course and subject entities keep opening times out despite capture pointers and envelopes', () => {
+  const route = 'https://local.invalid/study-capture-courses/42/preview-detail/a';
+  const detail = {id: 42, name: 'A', capture_code: 'a', start_time: '2026-09-14 00:00'};
+  const envelopes = [value => value, value => ({data: value}), value => ({data: {data: value}}), value => ({result: {details: value}})];
+  for (const entity of ['course', 'subject']) for (const wrap of envelopes) {
+    assert.deepEqual(course.fromJSON({[entity]: wrap(detail)}, route), {name: 'A'});
+    assert.deepEqual(course.fromJSON(wrap({[entity]: detail}), route), {name: 'A'});
+    assert.deepEqual(course.fromJSON({[entity]: wrap({...detail, capture_code: 'b'})}, route), {name: 'A'}, 'a related-record pointer is not the course identity');
+    assert.deepEqual(course.fromJSON({[entity]: wrap({...detail, lesson_start_time: '2026-09-15 16:40'})}, route), {name: 'A', date: '2026-09-15', start: '16:40:00'});
+  }
+});
 test('recording entities and explicit lesson fields retain matched nested metadata on my and study routes', () => {
   const wanted = {name: 'A', date: '2026-09-15', start: '16:40:00'};
   for (const route of [page, page.replace('/my-', '/study-'), page.replace('/my-', '/#/study-')]) {
