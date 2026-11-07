@@ -6,7 +6,7 @@ const {spawnSync} = require('node:child_process');
 const {dependency, browserOptions} = require('./runtime.cjs');
 const {chromium} = dependency('playwright'), sharp = dependency('sharp');
 const {PDFDocument, PDFName} = dependency('pdf-lib');
-const root = path.resolve(__dirname, '..'), scratch = path.join(root, '.test-output', 'v3.1.1');
+const root = path.resolve(__dirname, '..'), scratch = path.join(root, '.test-output', 'v3.1.2');
 fs.mkdirSync(scratch, {recursive: true});
 const output = fs.mkdtempSync(path.join(scratch, 'library-'));
 const fixture = path.join(output, 'library-video.mp4'), moving = path.join(output, 'library-moving.mp4'), continuity = path.join(output, 'library-continuity.mp4');
@@ -263,6 +263,21 @@ function zipEntries(bytes) {
       await view('empty').click(); await count(0); assert.equal(await page.locator('#suspect-ranges .suspect-range').count(), 1);
       assert.deepEqual((await stored()).pages, before.pages); assert.deepEqual((await stored()).assets, before.assets);
       assert.equal(await page.evaluate(() => sourceReady), false);
+    });
+
+    await test('saved zero-track batch exposes pending crop and manual preparation without loading media', async () => {
+      const batchPage = origin + '/study-capture-courses/72/preview-detail/zero';
+      const job = {id: 'pending-zero', course: {...course, name: '待框选课程'}, url: origin + '/0-zero.mp4', sourceName: '0-' + '待确认的完整课堂录像名称'.repeat(5) + '.mp4',
+        requiresCrop: true, cropConfirmed: false, state: 'needs-crop', selected: false, options: []};
+      await seed({lessons: [lesson('zero-unloaded')], batches: [{page: batchPage, jobs: [job]}], pages: []});
+      assert.match(await page.locator('#batch-panel > summary').textContent(), /待框选 1 节/);
+      await page.locator('#batch-panel > summary').click();
+      assert.match(await page.locator('#batch-course-context').textContent(), /待框选课程/);
+      assert.equal(await page.locator('[data-job-id="pending-zero"] .batch-manual').isVisible(), true);
+      assert.match(await page.locator('[data-job-id="pending-zero"] .batch-state').textContent(), /框选/);
+      assert.equal(await page.locator('#batch-start').isDisabled(), true);
+      assert.equal(await page.evaluate(() => sourceReady || video.hasAttribute('src')), false);
+      assert.equal(await page.locator('#batch-panel').evaluate(panel => panel.getBoundingClientRect().width > 850), true);
     });
 
     await test('suspect confirmation removes exactly one record write-first, retries failures and survives reload without video', async () => {

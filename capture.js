@@ -136,6 +136,7 @@ function renderLibrary() {
     row.append(seek, scan, dismiss); list.append(row);
   }
   $('suspects-count').textContent = `待复核时间段 · ${activeLesson?.suspects?.length || 0}`;
+  syncWorkspace();
 }
 async function dismissSuspect(range) {
   if (busy() || !activeLesson?.suspects?.includes(range)) return;
@@ -264,16 +265,37 @@ function syncWorkspace() {
   $('ledger-source').textContent = source; $('ledger-source').title = source;
   $('preview-empty').hidden = sourceReady || !!stream;
   document.body.classList.toggle('has-pages', pages.length > 0);
+  $('current-lesson').textContent = '当前整理 · ' + (activeLesson ? lessonLabel({course: namingInfo(), source: activeLesson.source}) : '尚未选择课次');
+  $('export-scope').textContent = `本节全部 · ${pages.length} 页`;
+  $('current-course-context').textContent = '当前课次所属课程 · ' + (activeLesson?.course?.name || namingInfo().name || '尚未选择');
+  $('batch-course-context').textContent = '批量列表课程 · ' + (batchJobs[0]?.course?.name || (batchPage ? '未命名课程' : '尚未读取'));
+  const selectedJobs = batchJobs.filter(job => PPTBatch.automatic(job) && job.selected && job.state !== 'done').length;
+  const manualJobs = batchJobs.filter(job => job.requiresCrop && !PPTBatch.automatic(job) && job.state !== 'done').length;
+  $('batch-count').textContent = batchJobs.length ? `共 ${batchJobs.length} 节 · 已选自动 ${selectedJobs} 节${manualJobs ? ` · 待框选 ${manualJobs} 节` : ''}` : '未读取';
+  const options = pdfOptions();
+  $('export-options-summary').textContent = [options.layout === 'handout' ? 'A4 讲义 · 每页两张' : '原始页面 · 每页一张', options.timestamps ? '视频时间' : '', options.bookmarks ? '页码书签' : ''].filter(Boolean).join(' · ');
 }
 const settingTabs = [...document.querySelectorAll('.setting-tabs [role="tab"]')];
 function activateTab(id, focus = false) {
+  const previous = settingTabs.findIndex(tab => tab.getAttribute('aria-selected') === 'true');
+  const next = settingTabs.findIndex(tab => tab.id === id), marker = $('tab-marker');
   for (const tab of settingTabs) {
-    const active = tab.id === id;
+    const active = tab.id === id, panel = $(tab.getAttribute('aria-controls'));
     tab.setAttribute('aria-selected', String(active)); tab.tabIndex = active ? 0 : -1;
-    $(tab.getAttribute('aria-controls')).hidden = !active;
+    panel.hidden = !active;
+    if (!active) PPTMotion.cancel(panel);
     if (active && focus) tab.focus();
   }
+  if (next !== previous) {
+    marker.style.transform = `translateX(${next * 100}%)`;
+    PPTMotion.reveal(marker, {x: (previous - next) * marker.offsetWidth, y: 0, duration: 160});
+    PPTMotion.reveal($(settingTabs[next].getAttribute('aria-controls')), {x: Math.sign(next - previous) * 6, y: 0, duration: 160});
+  }
 }
+$('export-settings').onclick = () => { activateTab('tab-export'); $('course-name').focus(); };
+$('go-source').onclick = () => activateTab('tab-source', true);
+$('go-extraction').onclick = () => activateTab('tab-extraction', true);
+$('go-results').onclick = () => $('pages').focus({preventScroll: false});
 settingTabs.forEach((tab, index) => {
   tab.onclick = () => activateTab(tab.id);
   tab.onkeydown = event => {
@@ -550,10 +572,13 @@ function updateSelection() {
   $('selected-count').textContent = `已选 ${selectedPages.size} 页`;
   $('select-all').checked = pages.length > 0 && selectedPages.size === pages.length;
   $('select-all').indeterminate = selectedPages.size > 0 && selectedPages.size < pages.length;
+  const changed = [];
   document.querySelectorAll('#pages article').forEach(card => {
     const selected = selectedPages.has(Number(card.dataset.pageId));
+    if (card.classList.contains('selected') !== selected && thumbnailStates.get(card.querySelector('img'))?.visible) changed.push(card);
     card.classList.toggle('selected', selected); card.querySelector('.page-select').checked = selected;
   });
+  revealCards(changed, {y: 0, duration: 140});
 }
 function seekPage(page) {
   if (busy()) return;
@@ -571,7 +596,7 @@ function seekPage(page) {
   }
   status(message); if ($('lightbox').open) $('lightbox-status').textContent = message;
 }
-function updatePreview() {
+function updatePreview(direction = 0) {
   if (!$('lightbox').open) return;
   const index = pages.findIndex(page => page.id === previewPageId), page = pages[index];
   if (!page) { $('lightbox').close(); return; }
@@ -579,9 +604,13 @@ function updatePreview() {
   $('lightbox-img').alt = `第 ${index + 1} 页放大预览`;
   if (previewLoadingId !== page.id) {
     previewLoadingId = page.id; const revision = ++previewRevision;
+    PPTMotion.cancel($('lightbox-img'));
     if (previewURL) URL.revokeObjectURL(previewURL); previewURL = null; $('lightbox-img').removeAttribute('src');
     PPTPageStore.asset(db, page.id).then(record => {
       if (revision !== previewRevision || !$('lightbox').open) return;
+      $('lightbox-img').onload = () => {
+        if (revision === previewRevision && $('lightbox').open) PPTMotion.reveal($('lightbox-img'), {x: Math.sign(direction) * 10, y: 0, duration: 160});
+      };
       previewURL = URL.createObjectURL(record.image); $('lightbox-img').src = previewURL;
     }).catch(e => { if (revision === previewRevision) $('lightbox-status').textContent = '图片读取失败：' + e.message; });
   }
@@ -598,7 +627,7 @@ function openPreview(page) {
 function movePreview(delta) {
   if (busy()) return;
   const index = pages.findIndex(page => page.id === previewPageId), page = pages[index + delta];
-  if (page) { previewPageId = page.id; $('lightbox-status').textContent = ''; updatePreview(); }
+  if (page) { previewPageId = page.id; $('lightbox-status').textContent = ''; updatePreview(delta); }
 }
 $('select-all').onchange = () => { if (busy()) return; selectedPages = new Set($('select-all').checked ? pages.map(page => page.id) : []); updateSelection(); controls(); };
 $('clear-selection').onclick = () => { if (busy()) return; selectedPages.clear(); selectionAnchor = null; updateSelection(); controls(); };
@@ -614,6 +643,7 @@ $('lightbox-select').onclick = () => {
 };
 $('lightbox-close').onclick = () => $('lightbox').close();
 $('lightbox').addEventListener('close', () => {
+  PPTMotion.cancel($('lightbox')); PPTMotion.cancel($('lightbox-img')); $('lightbox-img').onload = null;
   previewRevision++; previewLoadingId = null;
   if (previewURL) URL.revokeObjectURL(previewURL); previewURL = null; $('lightbox-img').removeAttribute('src');
   const previous = previewReturn; previewReturn = null;
@@ -786,16 +816,29 @@ function addCard(page, index) {
   $('pages').append(article); thumbnailObserver.observe(image);
   return article;
 }
-function render() {
+function revealCards(cards, options) {
+  if (!cards.length) return;
+  const root = $('pages').getBoundingClientRect();
+  let revealed = 0;
+  for (const card of cards) {
+    const rect = card.getBoundingClientRect();
+    if (rect.bottom <= root.top || rect.top >= root.bottom || rect.right <= root.left || rect.left >= root.right) continue;
+    PPTMotion.reveal(card, options);
+    if (++revealed === 12) break;
+  }
+}
+function render({revealNew = false} = {}) {
   const container = $('pages'), scrollTop = container.scrollTop;
   const existing = new Map([...container.children].map(card => [Number(card.dataset.pageId), card]));
   const retained = new Set(pages.map(page => page.id));
   for (const [id, card] of existing) if (!retained.has(id)) {
     const image = card.querySelector('img'); thumbnailObserver.unobserve(image); thumbnailQueue.delete(image);
-    releaseThumbnail(image); thumbnailStates.delete(image); card.remove();
+    PPTMotion.cancel(card); releaseThumbnail(image); thumbnailStates.delete(image); card.remove();
   }
+  const added = [];
   pages.forEach((page, index) => {
     const card = existing.get(page.id) || addCard(page, index), image = card.querySelector('img'), label = card.querySelector('.slide-time');
+    if (revealNew && !existing.has(page.id)) added.push(card);
     image.alt = `第 ${index + 1} 页`; image.setAttribute('aria-label', `放大第 ${index + 1} 页`);
     label.textContent = `${index + 1} · ${Number.isFinite(page.sourceTime) ? timecode(page.sourceTime) : new Date(page.time).toLocaleTimeString()}`;
     label.setAttribute('aria-label', `回看第 ${index + 1} 页${Number.isFinite(page.sourceTime) ? ' ' + timecode(page.sourceTime) : ''}`);
@@ -805,6 +848,7 @@ function render() {
   $('count').textContent = `共 ${pages.length} 页`;
   container.scrollTop = scrollTop; $('review-notice').hidden = !pages.length;
   updateSelection(); renderLibrary(); controls();
+  revealCards(added);
 }
 function bounds() {
   const width = video.clientWidth, height = video.clientHeight;
@@ -861,6 +905,7 @@ async function setComparisonRegion(nextCrop, nextIgnore, message, confirmCrop = 
     const relatedBatch = confirmCrop && activeBatchJob?.requiresCrop ? jobBatch() : null;
     await persistLesson(activeLesson, relatedBatch);
     status(message + (cleared ? ' 裁剪已变化，旧忽略区已清除，请重新设置。' : ''));
+    PPTMotion.reveal($('status'), {y: 3, duration: 160});
   } catch (error) {
     crop = previous.crop; ignoreRect = previous.ignoreRect;
     if (activeLesson && previous.lesson) {
@@ -948,7 +993,7 @@ async function save(f, context = null) {
   else page.order = 1024;
   page.id = await writePage(page, asset); cacheSignature(context, page.id, f.sig);
   pages.splice(insertAt, 0, page); syncAllPages(); forgetUndo(); last = f.sig;
-  render(); return true;
+  render({revealNew: true}); return true;
 }
 async function releaseSource() {
   releaseDedupeContext(); cancelSelection();

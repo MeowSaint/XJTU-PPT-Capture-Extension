@@ -394,6 +394,10 @@ async function test(name, run) { await run(); passed++; console.log('PASS ' + na
         return originals;
       });
       await idle(); assert(await page.locator('#selected-pdf').isDisabled());
+      assert.match(await page.locator('#current-lesson').textContent(), /当前整理.*Synthetic A/);
+      assert.match(await page.locator('#current-course-context').textContent(), /当前课次所属课程.*Synthetic A/);
+      assert.match(await page.locator('#batch-course-context').textContent(), /批量列表课程.*Synthetic B/);
+      assert.match(await page.locator('#export-scope').textContent(), /本节全部.*3 页/);
       const all = await download('#pdf', 'default-all'); assert(!all.name.includes('-selected'));
       await inspectPDF(all.bytes, [images[2], images[0], images[1]]);
       await page.locator('#tab-export').click();
@@ -620,7 +624,8 @@ async function test(name, run) { await run(); passed++; console.log('PASS ' + na
           return request;
         };
       });
-      await page.locator('#tab-export').click(); await page.locator('#course-name').fill('中文😀 (课程) / 标题');
+      await page.locator('#tab-export').click();
+      await page.locator('#course-name').fill('中文😀 (课程) / 标题');
       await page.waitForFunction(() => !!window.releaseNaming);
       const event = page.waitForEvent('download');
       try {

@@ -7,7 +7,7 @@ const {dependency, browserOptions} = require('./runtime.cjs');
 const {chromium} = dependency('playwright'), sharp = dependency('sharp');
 const {PDFDocument} = dependency('pdf-lib');
 const root = path.resolve(__dirname, '..');
-const scratch = path.join(root, '.test-output', 'v3.1.1');
+const scratch = path.join(root, '.test-output', 'v3.1.2');
 fs.mkdirSync(scratch, {recursive: true});
 const output = fs.mkdtempSync(path.join(scratch, 'review-'));
 const fixture = path.join(output, 'review-video.mp4');
@@ -108,6 +108,7 @@ async function load(file) {
   await page.waitForFunction(() => sourceReady && !busy() && document.querySelector('#video').seekable.length > 0);
 }
 async function test(name, body) {
+  if (process.env.PPT_TEST_FILTER && !new RegExp(process.env.PPT_TEST_FILTER).test(name)) return;
   await body(); results.push(name); console.log('PASS ' + name);
 }
 function zipEntries(bytes) {
@@ -161,6 +162,88 @@ function zipEntries(bytes) {
     await page.locator('#terms-decline').click(); await page.keyboard.press('Escape');
     assert.equal(await page.locator('#terms-dialog').isVisible(), true, 'decline and Escape keep the workspace locked');
     await page.locator('#terms-agree').check(); await page.locator('#terms-accept').click(); await count(0);
+
+    if (!process.argv.includes('--motion-only')) await test('source, batch and export scopes are discoverable in desktop and narrow workspaces', async () => {
+      assert.equal(await page.locator('#batch-panel').evaluate(panel => !!panel.closest('.workspace-sheet') && !panel.closest('.setting-panel')), true, 'batch work has a permanent wide workspace entry');
+      assert.equal(await page.locator('#pdf, #export-zip, #selected-pdf, #selected-zip, #filename-preview, #export-settings').evaluateAll(nodes => nodes.length === 6 && nodes.every(node => node.closest('#results'))), true, 'scope, filename and settings shortcut are beside results');
+      assert.match(await page.locator('#export-scope').textContent(), /本节全部.*0.*页/);
+      assert.match(await page.locator('#current-lesson').textContent(), /当前整理/);
+      assert.match(await page.locator('#batch-course-context').textContent(), /批量列表/);
+      await page.locator('#export-settings').click();
+      assert.equal(await page.locator('#tab-export').getAttribute('aria-selected'), 'true');
+      assert.equal(await page.locator('#course-name').evaluate(input => input === document.activeElement), true, 'shortcut immediately focuses editable naming');
+      await page.locator('#tab-source').click();
+      const name = '0-' + '光电传感与机器视觉课堂录像完整来源名称'.repeat(5) + '.mp4';
+      await page.evaluate(({origin, name}) => { sources = [{name, url: origin + '/0-long-source.mp4', source: '合成来源'}]; updateSources(); }, {origin, name});
+      await page.locator('#sources').selectOption(origin + '/0-long-source.mp4');
+      assert.equal(await page.locator('#selected-source-name').textContent(), name);
+      assert.match(await page.locator('#source-track-hint').textContent(), /0 路.*框选/);
+      for (const [width, height] of [[1440, 900], [390, 844]]) {
+        await page.setViewportSize({width, height});
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, 'long source names never cause horizontal overflow');
+        assert.equal(await page.locator('#selected-source-name').evaluate(node => node.scrollWidth <= node.clientWidth && getComputedStyle(node).whiteSpace !== 'nowrap'), true, 'full selected name wraps instead of truncating');
+        await page.locator('#batch-panel > summary').click();
+        const batch = await page.locator('#batch-panel').boundingBox(); assert(batch.width > (width === 390 ? 340 : 850), 'batch controls use workspace width');
+        await page.locator('#batch-panel > summary').click();
+      }
+      await page.setViewportSize({width: 1440, height: 900});
+    });
+    await test('rapid tab reversal, immediate typing and preview close remain usable during motion; live reduce cancels it', async () => {
+      assert.equal(await page.evaluate(() => typeof window.PPTMotion?.reveal), 'function', 'shared motion layer is loaded');
+      await page.emulateMedia({reducedMotion: 'no-preference'});
+      await page.locator('#tab-source').focus();
+      for (const key of ['ArrowRight', 'ArrowLeft', 'End', 'ArrowLeft', 'End']) await page.keyboard.press(key);
+      assert.equal(await page.locator('[role="tabpanel"]:visible').count(), 1);
+      await page.locator('#export-settings').click(); await page.keyboard.type('motion input');
+      assert.equal(await page.locator('#course-name').inputValue(), 'motion input', 'typing is not deferred until panel motion finishes');
+      await page.locator('#tab-source').focus(); await page.keyboard.press('ArrowRight');
+      const beforeReverse = await page.locator('#tab-marker').boundingBox();
+      await page.keyboard.press('ArrowLeft');
+      const afterReverse = await page.locator('#tab-marker').boundingBox();
+      assert(Math.abs(afterReverse.x - beforeReverse.x) < beforeReverse.width * .65, 'reversal continues from its rendered position instead of snapping to a tab endpoint');
+      await page.keyboard.press('ArrowRight');
+      assert(await page.evaluate(() => document.getAnimations().some(animation => animation.playState === 'running')), 'normal mode provides local feedback');
+      await page.emulateMedia({reducedMotion: 'reduce'});
+      await page.waitForFunction(() => document.getAnimations().every(animation => animation.playState !== 'running'));
+      assert.equal(await page.locator('#panel-extraction').evaluate(node => getComputedStyle(node).transform), 'none', 'live reduce leaves no spatial offset');
+      await seed([{id: 1}, {id: 2, image: 1}]); await page.emulateMedia({reducedMotion: 'no-preference'});
+      await page.locator('#pages article img').first().focus(); await page.keyboard.press('Enter');
+      await page.waitForFunction(() => previewURL !== null);
+      await page.keyboard.press('Escape');
+      await page.waitForFunction(() => !$('lightbox').open && previewURL === null && !$('lightbox-img').hasAttribute('src'));
+      assert.equal(await page.locator('#pages article img').first().evaluate(image => image === document.activeElement), true, 'closing during entry restores the original focus');
+      assert.equal(await page.locator('#lightbox').evaluate(dialog => dialog.getAnimations({subtree: true}).length), 0, 'closed preview has no residual motion');
+      await page.emulateMedia({reducedMotion: 'reduce'}); await seed([]);
+    });
+    await test('committed new pages animate only twelve visible cards and ordinary renders preserve their nodes and scroll', async () => {
+      await seed([]); await page.emulateMedia({reducedMotion: 'no-preference'}); await page.setViewportSize({width: 1920, height: 2000});
+      const result = await page.evaluate(async () => {
+        await bindLesson({kind: 'file', sourceKey: 'motion-cards', sourceName: '合成动效课次', page: ''});
+        const canvas = document.createElement('canvas'); canvas.width = 320; canvas.height = 180;
+        const context = canvas.getContext('2d'); context.fillStyle = '#e9e4dc'; context.fillRect(0, 0, 320, 180);
+        const asset = await PPTPageStore.encode(canvas);
+        for (let i = 0; i < 32; i++) {
+          const metadata = {lessonId: activeLesson.id, w: 320, h: 180, time: 1, order: (i + 1) * 1024};
+          metadata.id = await PPTPageStore.add(db, metadata, asset); pages.push(metadata);
+        }
+        syncAllPages(); render({revealNew: true});
+        const cards = [...$('pages').children], rect = $('pages').getBoundingClientRect();
+        const visible = cards.filter(card => { const r = card.getBoundingClientRect(); return r.top < rect.bottom && r.bottom > rect.top; }).length;
+        const animated = cards.filter(card => card.getAnimations().length).length;
+        PPTMotion.cancelAll(); $('pages').scrollTop = 50; const scroll = $('pages').scrollTop;
+        render();
+        return {visible, animated, reused: cards.every((card, i) => card === $('pages').children[i]), preservedScroll: $('pages').scrollTop === scroll,
+          residual: $('pages').getAnimations({subtree: true}).length};
+      });
+      assert(result.visible > 12, 'fixture has enough visible cards to exercise the budget'); assert.equal(result.animated, 12);
+      assert.equal(result.reused && result.preservedScroll, true); assert.equal(result.residual, 0);
+      await page.setViewportSize({width: 1440, height: 900}); await page.emulateMedia({reducedMotion: 'reduce'}); await seed([]);
+    });
+    if (process.argv.includes('--ui-only') || process.argv.includes('--motion-only')) {
+      assert.deepEqual(errors, []); assert.deepEqual(blocked, []);
+      fs.writeFileSync(path.join(output, 'results.json'), JSON.stringify({passed: results, errors, blocked, output, focused: true}, null, 2));
+      console.log(`${results.length} focused UI groups passed. Evidence: ${output}`); return;
+    }
 
     await test('three accessible setting tabs and desktop first layout', async () => {
       assert.equal(await page.locator('[role="tab"][aria-selected="true"]').getAttribute('id'), 'tab-source');
@@ -470,7 +553,7 @@ function zipEntries(bytes) {
             actions: ['pdf', 'export-zip', 'run', 'stop', 'shot', 'clear', 'clean-similar', 'undo'].map(rect)};
         });
         assert(measured.documentWidth <= width && measured.documentHeight <= height, JSON.stringify(measured));
-        assert.equal(measured.tools.width, 240); assert(measured.video.right < measured.results.x, 'video is beside the review pane');
+        assert(measured.tools.width >= 260 && measured.tools.width <= 280, 'inspector has readable width'); assert(measured.video.right < measured.results.x, 'video is beside the review pane');
         assert(measured.pages.bottom <= height && measured.pages.height > 250 && measured.scrollHeight > measured.scrollClient);
         measured.actions.forEach(action => assert(action.x >= 0 && action.y >= 0 && action.right <= width && action.bottom <= height));
         await page.locator('#pages').evaluate(sheet => { sheet.scrollTop = sheet.scrollHeight; });
@@ -480,6 +563,47 @@ function zipEntries(bytes) {
         await page.screenshot({path: path.join(output, `desktop-${width}x${height}.png`)}); geometry.push(measured);
       }
       fs.writeFileSync(path.join(output, 'geometry.json'), JSON.stringify(geometry, null, 2));
+    });
+    await test('real workspace screenshots cover narrow stacking, wide batch, dark, contrast and reduced motion', async () => {
+      const settleLayout = () => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      assert.equal(await page.locator('.app-shell').count(), 1);
+      await page.setViewportSize({width: 1440, height: 900}); await page.locator('#tab-source').click();
+      await page.evaluate(() => {
+        batchPage = location.origin + '/study-capture-courses/72/preview-detail/list';
+        const course = {name: '机器学习 · 批量课程', date: '2026-11-07', start: '10:00:00'};
+        batchJobs = [
+          {id: 'visual-auto', course, sourceName: '2-第二节课堂录像.mp4', url: location.origin + '/2-fixture.mp4', selected: true, state: 'pending', requiresCrop: false, options: []},
+          {id: 'visual-zero', course, sourceName: '0-第三节课堂录像（待确认 PPT 区域）.mp4', url: location.origin + '/0-fixture.mp4', selected: false, state: 'needs-crop', requiresCrop: true, cropConfirmed: false, options: []}
+        ]; renderBatchJobs();
+        sources = [{name: '0-' + '光电传感与机器视觉课堂录像完整来源名称'.repeat(5) + '.mp4', url: location.origin + '/0-long-source.mp4', source: '合成课程页'}]; updateSources();
+      });
+      await page.locator('#sources').selectOption(origin + '/0-long-source.mp4');
+      await page.locator('#batch-panel > summary').click();
+      await page.screenshot({path: path.join(output, 'batch-wide-1440x900.png')});
+      await page.locator('#batch-panel > summary').click();
+      await page.setViewportSize({width: 390, height: 844}); await settleLayout();
+      const narrow = await page.evaluate(() => ({documentWidth: document.documentElement.scrollWidth, width: innerWidth,
+        inspectorBottom: $('workspace-tools').getBoundingClientRect().bottom, workspaceTop: document.querySelector('.workspace-sheet').getBoundingClientRect().top,
+        resultsTop: $('results').getBoundingClientRect().top, videoBottom: $('panel-capture').getBoundingClientRect().bottom}));
+      assert(narrow.documentWidth <= narrow.width && narrow.workspaceTop >= narrow.inspectorBottom && narrow.resultsTop >= narrow.videoBottom);
+      fs.writeFileSync(path.join(output, 'narrow-geometry.json'), JSON.stringify(narrow, null, 2));
+      await page.screenshot({path: path.join(output, 'stacked-390x844.png')});
+      await page.locator('#results').scrollIntoViewIfNeeded();
+      await page.screenshot({path: path.join(output, 'results-390x844.png')});
+      await page.locator('#export-settings').click();
+      assert.equal(await page.locator('#course-name').evaluate(input => input === document.activeElement), true);
+      assert.equal(await page.locator('#panel-export').evaluate(panel => { const r = panel.getBoundingClientRect(); return r.top >= 0 && r.top < innerHeight; }), true, 'narrow export shortcut brings its focused fields into view');
+      await page.locator('#tab-source').click(); await page.setViewportSize({width: 1440, height: 900});
+      await page.evaluate(() => scrollTo(0, 0)); await settleLayout();
+      await page.emulateMedia({colorScheme: 'dark', reducedMotion: 'no-preference'}); await settleLayout();
+      await page.waitForFunction(() => document.getAnimations().every(animation => animation.playState !== 'running'));
+      await page.screenshot({path: path.join(output, 'dark-1440x900.png')});
+      await page.emulateMedia({contrast: 'more'});
+      await page.screenshot({path: path.join(output, 'contrast-dark-1440x900.png')});
+      await page.emulateMedia({colorScheme: 'light', contrast: 'no-preference', reducedMotion: 'reduce'});
+      await page.locator('#tab-export').click();
+      assert.equal(await page.evaluate(() => document.getAnimations().filter(animation => animation.playState === 'running').length), 0);
+      await page.screenshot({path: path.join(output, 'reduce-1440x900.png')});
     });
     assert.deepEqual(errors, [], 'no browser script errors'); assert.deepEqual(blocked, [], 'no external network requests');
     fs.writeFileSync(path.join(output, 'results.json'), JSON.stringify({passed: results, errors, blocked, output}, null, 2));

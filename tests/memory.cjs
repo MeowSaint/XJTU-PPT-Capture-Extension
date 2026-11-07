@@ -7,7 +7,7 @@ const crypto = require('node:crypto');
 const {dependency, browserOptions} = require('./runtime.cjs');
 const {chromium} = dependency('playwright');
 const root = path.resolve(__dirname, '..');
-const output = path.join(root, '.test-output', `memory-${Date.now()}`);
+const output = path.join(root, '.test-output', 'v3.1.2', `memory-${Date.now()}`);
 fs.mkdirSync(output, {recursive: true});
 const report = {node: process.version, platform: process.platform, results: [], errors: [], heap: {}, evidence: [],
   scope: 'Fresh Chromium contexts, localhost, synthetic images, injected failures, 256 MiB generated stream; JSHeapUsedSize is not RSS.'};
@@ -17,10 +17,12 @@ const contexts = new Set();
 function instrument() {
   const live = new Map(), revoked = [];
   const create = URL.createObjectURL.bind(URL), revoke = URL.revokeObjectURL.bind(URL);
+  const animate = Element.prototype.animate, animatedCards = [];
+  Element.prototype.animate = function(...args) { if (this.matches('#pages article')) animatedCards.push(this.dataset.pageId); return animate.apply(this, args); };
   URL.createObjectURL = blob => { const url = create(blob); live.set(url, {size: blob.size, type: blob.type}); return url; };
   URL.revokeObjectURL = url => { live.delete(url); revoked.push(url); return revoke(url); };
   window.__memory = {
-    live, revoked,
+    live, revoked, animatedCards,
     async files() {
       const files = [];
       async function walk(directory, prefix) {
@@ -236,6 +238,8 @@ async function workspace() {
         return {count: pages.length, records: metadata.length, assets, metadataOnly: [...pages, ...metadata].every(row => !('data' in row) && !('sig' in row) && !forbidden(row)), order: [pages[0].id, pages.at(-1).id], cards: $('pages').children.length};
       });
       assert.deepEqual(result, {count: 1000, records: 1000, assets: 1000, metadataOnly: true, order: [1000, 1], cards: 1000});
+      assert.equal(await page.evaluate(() => matchMedia('(prefers-reduced-motion: reduce)').matches), false, 'restore is checked with normal motion enabled');
+      assert.deepEqual(await page.evaluate(() => __memory.animatedCards), [], '1000 restored cards never get entry animation');
       return {...result, ...fixture, syntheticImagesRepeat: true};
     }, page);
     if (!fixture || !(await page.evaluate(() => typeof ready !== 'undefined' && ready))) return;
@@ -250,11 +254,14 @@ async function workspace() {
       });
       await page.waitForFunction(() => $('pages').lastElementChild.querySelector('img').hasAttribute('src')); await settleThumbnails(page);
       const result = await page.evaluate(() => {
+        const scroll = $('pages').scrollTop; render();
+        const preservedScroll = $('pages').scrollTop === scroll && scroll > 0;
         const rect = $('pages').getBoundingClientRect(), states = [...thumbnailStates];
         const inside = image => { const r = image.getBoundingClientRect(); return r.bottom >= rect.top - 201 && r.top <= rect.bottom + 201 && r.right >= rect.left && r.left <= rect.right; };
-        return {maxReads: __thumbMetrics.max, activeURLs: states.filter(([, state]) => state.url).length, allowedImages: states.filter(([image]) => inside(image)).length,
+        return {preservedScroll, animations: __memory.animatedCards.length, maxReads: __thumbMetrics.max, activeURLs: states.filter(([, state]) => state.url).length, allowedImages: states.filter(([image]) => inside(image)).length,
           bounded: states.every(([image, state]) => !state.url || inside(image)), oldRevoked: __oldURLs.every(url => __memory.revoked.includes(url) && !__memory.live.has(url)), reused: __cards.every((card, index) => $('pages').children[index] === card)};
       });
+      assert.equal(result.preservedScroll, true); assert.equal(result.animations, 0);
       assert.equal(result.maxReads, 2); assert.equal(result.bounded && result.oldRevoked && result.reused, true); assert.ok(result.activeURLs > 0 && result.activeURLs <= result.allowedImages && result.activeURLs < 100);
       return result;
     }, page);
