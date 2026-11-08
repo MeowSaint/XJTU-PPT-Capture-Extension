@@ -1,7 +1,7 @@
 # Native seek frame readiness implementation plan
 
 **Goal:** prevent capture of an old frame after native seek, resolve real CI library670 without weakening its pixel/time assertions, and deliver a verified3.1.3 package.
-**Architecture:** strengthen the existing scanner seek owner using bounded native frame evidence; retain old scanner/capture APIs and source-aware cancellation. Adapt only the explicit synthetic Canvas seek adapter to the same API contract. One fresh implementer, one fresh highest Task+complete-stage review from the pre-plan b1375dd baseline; no reopening previous closed stages.
+**Architecture:** strengthen the existing scanner seek owner using bounded native frame evidence; retain old scanner/capture APIs and source-aware cancellation. Task1 and its complete b1375dd-stage review plus scoped I1 fix are locally closed at33450411. Task2 corrects the independently observed review-driver synchronization boundary only. Use a fresh implementer per task; Task2 gets one fresh highest task+new-delta review from33450411, with byte guards and real full CI, without duplicating already reviewed unchanged runtime.
 **Tech Stack:** MV3/native JavaScript, Node20+, existing Playwright/FFmpeg/Chromium, current release builder.
 **Spec:** `docs/superpowers/specs/2026-11-08-seek-frame-readiness-design.md` (binding).
 
@@ -29,3 +29,15 @@ The four Global Constraints in the binding spec apply verbatim; prepend them to 
 4. Freeze final runtime/adapter inputs and execute the spec's nine checks serially once, preserving failed epochs and exact stdout/stderr/exit. Use already installed browser via PPT_TEST_BROWSER, no installation or unrelated environment changes. Explain any dependency-based reuse after fixture-only edits.
 5. Run current release builder, preserving old canonical ZIP through its safe backup. Independently verify35 members/CRC/source bytes/version/SHA; only scanner/capture runtime resources may differ from baseline. No main-worktree ZIP changes. Self-review API/callers/assertion inventory/cancel/cleanup and source input map.
 6. Stage only the seven allowed source/test paths actually changed; commit `fix: confirm video frame readiness across load and seek`. Write complete own report with actual results/limits/raw/package hash and source commit; commit report separately, avoid self-referential final hash. Collect all owned jobs and close contexts/browser/server before DONE (callback<=15lines). No delegation or remote operations.
+
+### Task 2: synchronize the review file-load driver with actual readiness
+
+**Files:** Modify only `tests/review.cjs`; own report `.superpowers/sdd/2026-11-08-seek-frame-readiness/task-2-report.md`. Generated raw `.test-output/seek-frame-readiness/task-2/` allowed. No runtime, other fixture, package, dependency, permission or version edits.
+**Consumes:** Task1/current33450411 actual frame-promise/operation ownership; capture.js448,796–799,883,1522–1538; review.cjs99–109/378–400; ONE completed diagnostic summary/closure and exact CI log. Actual source remainsbf6 and current35-member packageD05.
+**Produces:** same native review scenarios with a driver that selects only when enabled/idle and confirms the requested source actually bound, genuine controlled RED/GREEN, all original19 groups preserved and a final FULL review/input map.
+**Review Focus:** clock/currentTime is not operation settlement; old sourceReady must not count as the selected file. Preserve path-file metadata and same-file reload; keep waits bounded and all controls/hooks owned. Do not turn the local diagnostic into a claim about the unobserved CI cause.
+
+1. Read binding Task2 and named callers, record actual hashes and all original assertions/groups. Add one deterministic meaningful driver regression that fails the original helper; preserve command/stdout/stderr/numeric exit. No repeated native diagnostic or pixel fabrication.
+2. Make the smallest private review-helper synchronization and intended-file verification change. Preserve every original scenario/assertion and fixed bounds; no runtime edits, sleeps/retries or weaker equality.
+3. Run focused GREEN/control and original native same-name source case, then freeze final inputs and run FULL review once using existing Chromium. Reuse unaffected suites only with exact input maps, preserving old failures and qualification. Restore hooks, collect all owned jobs and close browser/context/server.
+4. Self-review original assertions/callers/cleanup, verify all35 runtime resources, other fixtures and packageD05 unchanged. Stage only the allowed file and commit `test: wait for review file-load ownership`; write complete own report and commit it separately without a self-referential hash. DONE callback<=15lines; no delegation/remote operations.
