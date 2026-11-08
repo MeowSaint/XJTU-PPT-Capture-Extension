@@ -26,6 +26,7 @@
 - 新页已存但lesson写失败不能保留陈旧“已核验”：Task2证据集合不符回退测试。
 - raw/learning、当前/批量、所选/全部与异步命名/导出快照不能串：Task2各入口PDF/image/ZIP及报告交叉测试。
 - 版本的当前值与历史升级比较、lock依赖版本不能盲目全替换；ZIP须含新增资源：Task3真实打包/源字节/版本一致性测试。
+- 展开批量时新增学习按钮不能被低高度图库裁掉：Task3最终review已给出真实RED（卡片205.5625px高、图库170px高）；仅在既有CSS布局中补足完整卡片空间，保有限图库、外层工作区滚动、Stop与两种页面按钮可达，维持原完整几何/命中/原生拖放及1000卡片资源断言。
 
 ---
 
@@ -89,7 +90,7 @@ assert.equal(report.lessons.find(l=>l.lessonId===partialId).scan.reachedEnd, fal
 
 ### Task 3: 统一3.1.3并生成可验证的本地安装包
 
-**Files:** Modify `manifest.json`, `package.json`, `package-lock.json`, `capture.html`, `README.md`, `tests/README.md`, `scripts/release.cjs`, `tests/release.test.cjs`, `tests/features.cjs`, `tests/integration.cjs`, `tests/improvements.cjs`, `tests/library.cjs`, `tests/memory.cjs`, `tests/review.cjs`；Create `docs/superpowers/plans/2026-11-07-v3.1.3-validation.md`，仅记录实际最终证据。禁止把旧归档设计/审计中的3.1.1/3.1.2历史改成新版本。
+**Files:** Modify `manifest.json`, `package.json`, `package-lock.json`, `capture.html`, `style.css`, `README.md`, `tests/README.md`, `scripts/release.cjs`, `tests/release.test.cjs`, `tests/features.cjs`, `tests/integration.cjs`, `tests/improvements.cjs`, `tests/library.cjs`, `tests/memory.cjs`, `tests/review.cjs`；Create `docs/superpowers/plans/2026-11-07-v3.1.3-validation.md`，仅记录实际最终证据。`style.css`仅追加修复最终19-review证明的低高度完整卡片/学习按钮裁切；不扩大其他产品行为或修复Core M1。禁止把旧归档设计/审计中的3.1.1/3.1.2历史改成新版本。
 
 **Interfaces:**
 - Consumes所有已审功能、media模块明确打包资源、用户最终版本3.1.3。
@@ -100,5 +101,6 @@ assert.equal(report.lessons.find(l=>l.lessonId===partialId).scan.reachedEnd, fal
 - [ ] **Step 1: 写失败测试**。release测试断言目标3.1.3及lock不一致拒绝（历史版本比较样例原样）；features的current release mock和界面值同当前版本。原release fixture无lock先补匹配lock以保留旧安全测试意义，不能删/弱化原安全断言。
 - [ ] **Step 2: RED**。Run `npm run test:release`，记录版本/lock校验缺失失败；不为纯文案写无意义新单测。
 - [ ] **Step 3: 精确同步版本与当前说明**。先grep直接引用；版本标签/当前mock/当期报告路径更新到3.1.3，历史tag/升级排序输入保留。README覆盖目录错误重试/取消、页数与配额、视频轨适用范围、学习版与完整性证据、原文件未知限制；保留原使用/权限约定。
+- [ ] **Step 3b: 修复实际低高度布局RED**。保留19-review原始失败/geometry/截图，依据既有外层工作区滚动和完整卡片预留设计，最小修改`style.css`，让1280×720、1440×900与390×844展开批量时完整卡片、勾选、时间、排除/恢复和删除均在有限图库内可命中。保桌面文档无溢出、图库不越结果区/动作行、Stop可达、1000卡片与缩略图预算，不通过隐藏控件、放宽原606–613或无限高图库绕过。测量中明确包括两种页面按钮。旧19是修改前真实RED，不重造失败；修后必要完整review及所有实际消费CSS的浏览器套件重跑，保存新执行依赖SHA；未消费CSS且输入未变的Node/bridge/release只能据真实依赖信用，不能称旧全树SHA与新树相同。最终ZIP必须使用修后CSS重新生成/核验。
 - [ ] **Step 4: 最终GREEN和打包**。顺序运行 `npm test`、`npm run test:release`、`npm run test:bridge`、`npm run test:integration`、`npm run test:review`、`npm run test:features`、`npm run test:memory`、`npm run test:library`、`npm run test:improvements`。只用已装PPT_TEST_BROWSER，不下载依赖/浏览器。修复因功能协议改变而过时的测试producer/consumer需要具体证据并守原业务断言；超出文件范围先报告。然后 `npm run release`，读取ZIP内manifest，逐资源核对CRC/源码字节，验证source/ZIP版本一致并计算SHA256。已有同代码测试可引用，但最终元数据影响的套件按本任务矩阵执行，不重复无新风险的成功运行。
-- [ ] **Step 5: 自审并提交**。Commit `chore: prepare verified 3.1.3 local release`；validation文档明确当前HEAD测试与早先commits测试来源、环境/最低版本/真实课程未测范围，保存report。控制器随后执行c8aaafb..HEAD最高模型整体审查与规定修复波次，若源文件有修复则刷新受影响测试/包/hash/文档，最终保留隔离分支交付。
+- [ ] **Step 5: 自审并提交**。Commit `fix: prepare 3.1.3 with reachable gallery controls`；validation文档明确当前HEAD测试与早先commits测试来源、环境/最低版本/真实课程未测范围，保存report。控制器随后执行c8aaafb..HEAD最高模型整体审查与规定修复波次，若源文件有修复则刷新受影响测试/包/hash/文档，最终保留隔离分支交付。
