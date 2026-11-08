@@ -104,8 +104,23 @@ async function atTime(time) {
 }
 async function load(file) {
   await page.locator('#tab-source').click();
-  await page.locator('#file').setInputFiles(file);
-  await page.waitForFunction(() => sourceReady && !busy() && document.querySelector('#video').seekable.length > 0);
+  await page.waitForFunction(() => ready && !busy() && !document.querySelector('#file').disabled);
+  const selection = await page.locator('#file').evaluateHandle(input => {
+    const selected = {input, sourceKey: null};
+    // Capture Playwright's actual File metadata before the runtime clears the input.
+    selected.listen = () => { const file = input.files[0]; if (file) selected.sourceKey = 'file:' + JSON.stringify([file.name, file.size, file.lastModified]); };
+    input.addEventListener('change', selected.listen, {once: true, capture: true});
+    return selected;
+  });
+  try {
+    await page.locator('#file').setInputFiles(file);
+    const sourceKey = await selection.evaluate(selected => selected.sourceKey);
+    assert.equal(typeof sourceKey, 'string', 'file selection supplies the requested source fingerprint');
+    await page.waitForFunction(expected => sourceReady && !busy() && loadedIdentity?.sourceKey === expected && document.querySelector('#video').seekable.length > 0, sourceKey);
+  } finally {
+    try { await selection.evaluate(selected => selected.input.removeEventListener('change', selected.listen, true)); }
+    finally { await selection.dispose(); }
+  }
 }
 async function test(name, body) {
   if (process.env.PPT_TEST_FILTER && !new RegExp(process.env.PPT_TEST_FILTER).test(name)) return;
@@ -373,6 +388,62 @@ function zipEntries(bytes) {
       await page.keyboard.press('Enter'); await page.keyboard.press('Delete'); await count(0);
       assert.equal(await page.locator('#lightbox').evaluate(dialog => dialog.open), false);
       await page.waitForFunction(() => document.activeElement === document.querySelector('#pages'));
+    });
+
+    await test('synthetic driver protocol waits for ownership and rejects old-source readiness', async () => {
+      const workspace = page, protocol = await context.newPage();
+      try {
+        await protocol.goto(origin + '/fixture.html');
+        await protocol.setContent('<button id="tab-source">Source</button><input id="file" type="file" disabled><video id="video"></video>');
+        await protocol.evaluate(() => {
+          window.ready = true; window.pending = true; window.sourceReady = true;
+          window.busy = () => pending; window.loadedIdentity = {sourceKey: 'file:old'};
+          window.selections = []; window.phase = 'operation';
+          Object.defineProperty(document.querySelector('#video'), 'seekable', {get: () => ({length: 1})});
+          document.querySelector('#file').onchange = event => {
+            const input = event.target, file = input.files[0];
+            selections.push({ignored: busy() || input.disabled, name: file.name, size: file.size, lastModified: file.lastModified});
+            if (!busy() && !input.disabled) phase = 'binding';
+            input.value = '';
+          };
+        });
+        // Synthetic protocol gates only: no native decoder, frame or seek success is asserted here.
+        page = new Proxy(protocol, {get(target, key) {
+          if (key === 'waitForFunction') return async (predicate, argument, ...options) => {
+            const state = await target.evaluate(() => ({phase, selections}));
+            if (state.phase === 'operation') {
+              assert.deepEqual(state.selections, [], 'the driver must not select while another operation owns the disabled input');
+              assert.equal(await target.evaluate(predicate, argument), false, 'pending ownership cannot satisfy readiness');
+              await target.evaluate(() => { pending = false; });
+              assert.equal(await target.evaluate(predicate, argument), false, 'idle alone cannot satisfy a disabled input');
+              await target.evaluate(() => { document.querySelector('#file').disabled = false; });
+            } else {
+              assert.equal(await target.evaluate(predicate, argument), false, 'an idle seekable old source cannot satisfy the requested file');
+              await target.evaluate(() => {
+                const file = selections[0];
+                loadedIdentity = {sourceKey: 'file:' + JSON.stringify([file.name, file.size, file.lastModified])};
+              });
+            }
+            return target.waitForFunction(predicate, argument, ...options);
+          };
+          const value = Reflect.get(target, key); return typeof value === 'function' ? value.bind(target) : value;
+        }});
+        await load(wrong);
+        const selected = await protocol.evaluate(() => selections);
+        assert.equal(selected.length, 1, 'the path is selected once after ownership is released');
+        assert.equal(selected[0].ignored, false);
+        assert.equal(selected[0].name, path.basename(wrong)); assert.equal(selected[0].size, fs.statSync(wrong).size);
+        assert.equal(await protocol.locator('#file').inputValue(), '', 'metadata survives the handler clearing its input');
+      } finally { page = workspace; await protocol.close(); }
+    });
+
+    await test('native file driver preserves path metadata and same-file reload identity', async () => {
+      await seed([]); await load(fixture);
+      const identity = await page.evaluate(() => loadedIdentity), metadata = fs.statSync(fixture);
+      assert.equal(identity.sourceKey, 'file:' + JSON.stringify([path.basename(fixture), metadata.size, Math.trunc(metadata.mtimeMs)]));
+      await load(fixture);
+      assert.deepEqual(await page.evaluate(() => loadedIdentity), identity, 'selecting the same path again retains its original File identity');
+      assert.equal(await page.locator('#file').inputValue(), '');
     });
 
     await test('seek requires matching persisted source identity, rejects same-name files, other course/batch and legacy identity', async () => {
@@ -832,5 +903,7 @@ function zipEntries(bytes) {
   } finally {
     if (context) await context.close(); if (browser) await browser.close();
     if (server?.listening) await new Promise(resolve => server.close(resolve));
+    fs.writeFileSync(path.join(output, 'cleanup.json'), JSON.stringify({contextClosed: !context || context.pages().length === 0,
+      browserDisconnected: !browser || !browser.isConnected(), serverClosed: !server?.listening}, null, 2));
   }
 })();
