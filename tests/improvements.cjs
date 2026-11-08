@@ -80,17 +80,41 @@ async function test(name, run) { if (process.env.PPT_TEST_FILTER && !new RegExp(
       try {
         await localPage.goto(origin + '/capture.html'); await localPage.waitForFunction(() => ready);
         await localPage.locator('#terms-agree').check(); await localPage.locator('#terms-accept').click();
+        const evidenceRoot = process.env.PPT_TEST_OUTPUT || path.join(root, '.test-output', 'learning-task-1'); fs.mkdirSync(evidenceRoot, {recursive: true});
+        const output = fs.mkdtempSync(path.join(evidenceRoot, 'canvas-'));
+        await localPage.exposeFunction('recordLocalDetailInput', packet => {
+          packet.frames.forEach((f, i) => {
+            fs.writeFileSync(path.join(output, `input-${i}.rgba`), Buffer.from(f.sig));
+            fs.writeFileSync(path.join(output, `input-${i}.jpg`), Buffer.from(f.image));
+            fs.writeFileSync(path.join(output, `input-${i}.png`), Buffer.from(f.png.split(',')[1], 'base64'));
+          });
+          delete packet.frames;
+          fs.writeFileSync(path.join(output, 'input.json'), JSON.stringify(packet, null, 2) + '\n');
+          console.log('Local detail input: ' + JSON.stringify(packet));
+          console.log('Local detail evidence: ' + output);
+        });
+        await localPage.exposeFunction('recordLocalDetailCleanup', state => {
+          fs.writeFileSync(path.join(output, 'cleanup.json'), JSON.stringify(state, null, 2) + '\n');
+          console.log('Local detail cleanup: ' + JSON.stringify(state));
+          assert(Object.values(state).every(Boolean), 'local detail resources restore even on input failure');
+        });
         const result = await localPage.evaluate(async () => {
           // Synthetic seek events drive the real scanner; frame still crops and resizes actual Canvas pixels.
           const canvas = document.createElement('canvas'); canvas.width = 710; canvas.height = 378;
           const ctx = canvas.getContext('2d'), drawImage = CanvasRenderingContext2D.prototype.drawImage;
           let paint = () => {}, clock = 0, duration = 6;
+          // Signature-cell geometry keeps these tiny glyphs observable without system-font rasterization.
+          const glyph = (rows, x, baseline) => {
+            const sx = canvas.width / 192, sy = canvas.height / 108;
+            const left = Math.round(x / sx), top = Math.round(baseline / sy) - rows.length;
+            rows.forEach((row, y) => [...row].forEach((ink, x) => { if (ink === '1') ctx.fillRect((left + x) * sx, (top + y) * sy, sx, sy); }));
+          };
           const paintStage = time => {
             const stage = Math.floor(time); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, 710, 378);
             ctx.fillStyle = '#000'; ctx.font = '28px serif'; ctx.fillText('E = mc     x     Data:', 50, 100);
-            if (stage >= 1) { ctx.font = '12px serif'; ctx.fillText('2', 161, 80); }
-            if (stage >= 2) { ctx.font = 'bold 14px serif'; ctx.fillText('i', 183, 110); }
-            if (stage >= 3) { ctx.font = '12px serif'; ctx.fillText('1', 331, 100); }
+            if (stage >= 1) glyph(['011', '010', '110'], 161, 80);
+            if (stage >= 2) glyph(['1', '0', '1'], 183, 110);
+            if (stage >= 3) glyph(['010', '110', '111'], 331, 100);
             // Exact 48/8 signature-pixel controls are tested separately below.
             if (stage >= 4) { ctx.font = '22px serif'; ctx.fillText('+ C', 360, 100); }
             if (stage >= 5) { ctx.fillStyle = '#d00000'; ctx.fillRect(400, 140, 20, 8); }
@@ -112,11 +136,30 @@ async function test(name, run) { if (process.env.PPT_TEST_FILTER && !new RegExp(
           };
           try {
             await reset('knowledge'); paint = paintStage; paint(0);
-            const distances = [], expected = [];
+            const distances = [], expected = [], inputFrames = [], preconditions = [];
             for (let stage = 0; stage < 6; stage++) {
               paint(stage); const f = frame(stage + .25), encoded = await PPTPageStore.encode(f.canvas);
               expected.push({sig: f.sig, image: [...new Uint8Array(await encoded.image.arrayBuffer())]});
+              inputFrames.push({sig: [...f.sig], image: expected[stage].image, png: f.canvas.toDataURL()});
               if (stage) distances.push(PPTCore.frameDistance(expected[stage - 1].sig, f.sig));
+              if (stage >= 1 && stage <= 3) {
+                const previous = expected[stage - 1].sig, pixels = f.sig.length / 4, bias = [0, 0, 0], raw = [], strong = [];
+                for (let at = 0; at < f.sig.length; at += 4) for (let c = 0; c < 3; c++) bias[c] += previous[at + c] - f.sig[at + c];
+                for (let c = 0; c < 3; c++) bias[c] = Math.abs(bias[c] / pixels) <= 8 ? bias[c] / pixels : 0;
+                for (let at = 0; at < f.sig.length; at += 4) {
+                  const delta = [0, 1, 2].map(c => previous[at + c] - f.sig[at + c]);
+                  const pixel = {pixel: at / 4, before: [...previous.slice(at, at + 4)], after: [...f.sig.slice(at, at + 4)]};
+                  if (Math.max(...delta.map(Math.abs)) >= 48) raw.push(pixel);
+                  if (Math.max(...delta.map((n, c) => Math.abs(n - bias[c]))) >= 48) strong.push(pixel);
+                }
+                preconditions.push({stage, raw, strong, bias, distance: distances.at(-1), local: PPTCore.hasLocalChange(previous, f.sig)});
+              }
+            }
+            await window.recordLocalDetailInput({userAgent: navigator.userAgent, dpr: devicePixelRatio, canvas: [710, 378], signature: [192, 108], frames: inputFrames, preconditions});
+            for (const p of preconditions) {
+              if (!(p.raw.length >= 1 && p.raw.length < 8 && p.strong.length >= 1 && p.strong.length < 8 && p.distance.changed < 1.2 && p.distance.mean < .6 && p.local)) {
+                throw Error('Tiny glyph input precondition failed before scanner: ' + JSON.stringify(p));
+              }
             }
             paint(0); const scan = await fastScan(), saved = [];
             for (let i = 0; i < pages.length; i++) {
@@ -162,10 +205,11 @@ async function test(name, run) { if (process.env.PPT_TEST_FILTER && !new RegExp(
                 imageEqual: JSON.stringify(before) === JSON.stringify(after), count: pages.length});
             }
             return {saved, scan, distances, knowledgeVersion, detailCandidate, controls, manualIds, duplicateCandidate, manualAfter, resumes};
-          } finally { closeSimilar(); releaseDedupeContext(); CanvasRenderingContext2D.prototype.drawImage = drawImage; sourceReady = false; }
+          } finally {
+            closeSimilar(); releaseDedupeContext(); CanvasRenderingContext2D.prototype.drawImage = drawImage; sourceReady = false;
+            await window.recordLocalDetailCleanup({drawImageRestored: CanvasRenderingContext2D.prototype.drawImage === drawImage, dedupeReleased: dedupeContext === null, reviewClosed: similarReview === null, sourceReleased: !sourceReady});
+          }
         });
-        const evidenceRoot = process.env.PPT_TEST_OUTPUT || path.join(root, '.test-output', 'learning-task-1'); fs.mkdirSync(evidenceRoot, {recursive: true});
-        const output = fs.mkdtempSync(path.join(evidenceRoot, 'canvas-'));
         result.saved.forEach((p, i) => {
           fs.writeFileSync(path.join(output, `knowledge-${i}-${p.id}.jpg`), Buffer.from(p.image));
           fs.writeFileSync(path.join(output, `knowledge-${i}-${p.id}.rgba`), Buffer.from(p.signature)); delete p.image; delete p.signature;
@@ -861,5 +905,9 @@ async function test(name, run) { if (process.env.PPT_TEST_FILTER && !new RegExp(
     });
     assert.deepEqual(errors, []); await exportContext.close();
     assert.deepEqual(blocked, []); console.log(`${passed} focused improvement groups passed; no external requests.`);
-  } finally { await browser?.close(); if (server) await new Promise(resolve => server.close(resolve)); }
+  } finally {
+    try { await browser?.close(); } finally { if (server) await new Promise(resolve => server.close(resolve)); }
+    const cleanup = {browserClosed: !browser?.isConnected(), contextsClosed: !browser?.contexts().length, serverClosed: !server?.listening};
+    console.log('Improvement cleanup: ' + JSON.stringify(cleanup)); assert(Object.values(cleanup).every(Boolean));
+  }
 })().catch(error => { console.error(error); process.exitCode = 1; });
