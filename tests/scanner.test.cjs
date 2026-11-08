@@ -645,6 +645,20 @@ test('native fractional setter normalization preserves requested labels and conf
   assert.equal((await f.scanner.seek(requested)).requested, requested); assert.equal(f.sets, 1); f.clean();
 });
 
+test('new scanners reuse the confirmed native fractional position without losing its raw label', async t => {
+  const requested = 4 / 3, f = presentedVideo({normalize: value => Math.trunc(value * 1e6) / 1e6});
+  t.after(() => { if (f.timers.size) f.timeout(); f.clean(); });
+  const first = f.scanner.seek(requested); f.seeked(); f.frame({mediaTime: 1.3}); await first;
+  const nativeTime = f.v.currentTime, proof = f.Seek.frames.get(f.v).proof; f.clean();
+  for (const argument of [nativeTime, requested]) {
+    const pending = new f.Seek(f.v, f.scanner.capture).seek(argument); pending.catch(() => {});
+    assert.equal(f.sets, 1, 'a confirmed exact position must not set the paused native clock again'); f.clean();
+    assert.deepEqual(await pending, {requested: argument, nativeTime, pixel: 'red'});
+    assert.equal(f.Seek.frames.get(f.v).proof, proof, 'cache hits preserve the original raw/native association'); f.clean();
+  }
+  assert.deepEqual(f.captures.map(frame => frame.requested), [requested, nativeTime, requested]);
+});
+
 test('a different native seek terminates the superseded request without waiting for its deadline', async () => {
   for (const stage of ['before-events', 'after-frame', 'after-seeked']) {
     const f = presentedVideo(), pending = f.scanner.seek(4);

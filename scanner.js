@@ -78,7 +78,7 @@ class PPTScanner {
     // Exact paused reuse needs confirmed presentation provenance from this source
     // generation, whether established by its load owner or a prior scanner seek.
     const reuse = framed && previous && v.paused && !v.seeking && v.readyState >= 2 &&
-      previous.time === time && previous.nativeTime === v.currentTime && previous.source.every((value, i) => value === source[i]) && counts && counts.every((value, i) => value === previous.counts?.[i]);
+      (previous.time === time || previous.nativeTime === time) && previous.nativeTime === v.currentTime && previous.source.every((value, i) => value === source[i]) && counts && counts.every((value, i) => value === previous.counts?.[i]);
     delete state.proof;
     if (!reuse && (framed || Math.abs(v.currentTime - time) > 0.015 || v.readyState < 2 || v.getVideoPlaybackQuality && !v.getVideoPlaybackQuality().totalVideoFrames)) {
       await new Promise((resolve, reject) => {
@@ -125,7 +125,7 @@ class PPTScanner {
     }
     if (!sameSource() || v.currentTime !== nativeTime || v.seeking) throw failure();
     signal?.throwIfAborted();
-    if (framed) state.proof = {time, nativeTime: v.currentTime, source, counts: PPTScanner.quality(v)};
+    if (framed) state.proof = reuse ? previous : {time, nativeTime: v.currentTime, source, counts: PPTScanner.quality(v)};
     return this.capture(time);
   }
   async scan({step = 0.5, threshold, dedupe, signal, save, progress, previous = [], isDuplicate, compare = PPTCore.similar,
