@@ -728,7 +728,7 @@ function zipEntries(bytes, {utf8 = true} = {}) {
       await page.locator('#shot').click(); await count(1); const saved = await stored();
       await page.locator('#release-cache').click(); await idle(); await load(source); await settled();
       assert.equal((await stored()).activeId, before.activeId); assert.deepEqual((await stored()).assets, saved.assets);
-      await page.locator('#video-only').uncheck(); await page.evaluate(async () => { await mediaRecoverySave; }); await page.reload(); await idle();
+      await page.locator('#tab-source').click(); await page.locator('#video-only').uncheck(); await page.evaluate(async () => { await mediaRecoverySave; }); await page.reload(); await idle();
       assert.equal(await page.locator('#video-only').isChecked(), false); await load(source);
       assert.equal(await page.evaluate(() => mediaContext.audioOmitted), false); assert.equal((await stored()).activeId, before.activeId);
     });
@@ -819,7 +819,7 @@ function zipEntries(bytes, {utf8 = true} = {}) {
     await test('media invalid video initialization never binds while valid black frames remain usable', async () => {
       await seed({lessons: [lesson('media-video-keep')], pages: [{lessonId: 'media-video-keep', sourceKey: fileKey}]});
       const before = await stored();
-      await page.locator('#video-only').uncheck(); await page.evaluate(() => mediaRecoverySave);
+      await page.locator('#tab-source').click(); await page.locator('#video-only').uncheck(); await page.evaluate(() => mediaRecoverySave);
       await page.evaluate(() => {
         window.invalidInitEvents = []; window.invalidInitListeners = ['loadstart', 'loadedmetadata', 'loadeddata', 'seeking', 'seeked', 'error', 'emptied'].map(type => {
           const fn = () => { const q = video.getVideoPlaybackQuality(); invalidInitEvents.push({type, now: performance.now(), time: video.currentTime, readyState: video.readyState, seeking: video.seeking, width: video.videoWidth, height: video.videoHeight, error: video.error?.code, total: q.totalVideoFrames, dropped: q.droppedVideoFrames}); };

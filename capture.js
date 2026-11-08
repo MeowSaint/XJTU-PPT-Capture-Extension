@@ -333,9 +333,6 @@ function activateTab(id, focus = false) {
   }
 }
 $('export-settings').onclick = () => { activateTab('tab-export'); $('course-name').focus(); };
-$('go-source').onclick = () => activateTab('tab-source', true);
-$('go-extraction').onclick = () => activateTab('tab-extraction', true);
-$('go-results').onclick = () => $('pages').focus({preventScroll: false});
 settingTabs.forEach((tab, index) => {
   tab.onclick = () => activateTab(tab.id);
   tab.onkeydown = event => {

@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>课程 PPT 截取</title>
   <link rel="icon" type="image/png" href="icons/icon-32.png">
+  <script src="appearance.js"></script>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -13,16 +14,18 @@
       <div class="brand-block">
         <img class="app-mark" src="icons/icon-32.png" width="28" height="28" alt="">
         <h1>课程 PPT 截取</h1>
-        <span class="version">3.1.3</span>
-        <button id="check-updates" class="button-quiet" type="button">检查更新</button>
-        <button id="terms-open" class="button-quiet" type="button">使用约定</button>
+        <span class="version">3.1.4</span>
       </div>
       <p id="current-lesson" class="current-lesson">当前整理 · 尚未选择课次</p>
-      <nav class="workflow-nav" aria-label="整理流程">
-        <button id="go-source" type="button">1 来源</button>
-        <button id="go-extraction" type="button">2 提取</button>
-        <button id="go-results" type="button">3 整理与导出</button>
-      </nav>
+      <div class="header-tools">
+        <button id="check-updates" class="button-quiet" type="button">检查更新</button>
+        <button id="terms-open" class="button-quiet" type="button">使用约定</button>
+        <button id="theme-toggle" class="theme-toggle" type="button" role="switch" aria-checked="false" aria-label="深色模式" title="切换深色模式">
+          <svg class="theme-sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/></svg>
+          <span class="theme-track" aria-hidden="true"><span></span></span>
+          <svg class="theme-moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4 8.5 8.5 0 1 0 20 14.5Z"/></svg>
+        </button>
+      </div>
     </header>
 
     <div class="editor-layout">
@@ -66,6 +69,7 @@
             <span>本地视频</span>
             <input id="file" type="file" accept="video/*,.mp4,.m4v,.webm,.mov">
           </label>
+          <label class="check video-option" title="支持的 MP4 可跳过音轨，重新加载视频后生效"><input id="video-only" type="checkbox" checked><span>仅使用视频轨</span></label>
           <div class="secondary-tools">
             <details class="drawer">
               <summary>手动视频地址</summary>
@@ -123,13 +127,15 @@
             <input id="page-limit" type="number" min="100" max="20000" step="1" value="5000" aria-describedby="page-limit-note">
           </label>
           <p id="page-limit-note" class="note">可设置 100–20000 页，默认 5000 页。达到上限后保留截图和进度，调高上限即可继续；本机剩余空间不足时也会暂停。</p>
-          <p class="note pane-note">2 秒、8 秒粗采样可能漏掉短暂翻页。精细采样也可能漏过短于采样间隔或稳定确认窗口的画面；漏页时可细查对应时间段。</p>
+          <details class="drawer secondary-tools">
+            <summary>采样与漏页</summary>
+            <div class="drawer-body"><p class="note">2 秒、8 秒粗采样可能漏掉短暂翻页。精细采样也可能漏过短于采样间隔或稳定确认窗口的画面；漏页时可细查对应时间段。动画过渡帧可在“清理相似页”中逐对确认后删除。</p></div>
+          </details>
           <div class="bar">
             <button id="ignore-select" type="button" aria-pressed="false" disabled>框选忽略区</button>
             <button id="ignore-clear" type="button" disabled>清除忽略区</button>
           </div>
           <p id="ignore-status" class="note" aria-live="polite">未设置忽略区。仅影响画面比较，截图和导出保留完整内容。框选时可用方向键移动，Shift+方向键调整大小，Enter 确认，Esc 取消。</p>
-          <p class="note pane-note">如果截到了动画过渡帧，可点右侧“清理相似页”逐对比较；确认全部选择后才会删除。</p>
         </section>
 
         <section id="panel-export" class="setting-panel" role="tabpanel" aria-labelledby="tab-export" tabindex="0" hidden>
@@ -157,9 +163,13 @@
           </label>
           <label class="check"><input id="pdf-timestamps" type="checkbox"><span>标注视频时间</span></label>
           <label class="check"><input id="pdf-bookmarks" type="checkbox"><span>生成页码书签</span></label>
-          <p class="note pane-note">本节全部导出会包含所有保留页；所选导出只包含勾选页。整课导出包含当前课次所属课程的全部保留截图，跳过空课次并提示未完成状态。</p>
-          <p class="note pane-note">合并整课 PDF 始终生成“课程 → 课次 → 页码与时间”目录；讲义版式每节从新纸页开始。分课 PDF 包将各节分别保存为 PDF。</p>
-          <p class="note pane-note">笔记讲义为 A4 双联并带手写横线；图片包内为按页序命名的原图 JPEG。</p>
+          <details class="drawer secondary-tools">
+            <summary>导出范围与版式说明</summary>
+            <div class="drawer-body">
+              <p class="note">“本节”包含当前课次的保留页；勾选截图后可只导出所选页。“整课”包含当前课程所有课次，空课次会跳过，未完成课次会提示。</p>
+              <p class="note pane-note">合并 PDF 按“课程 → 课次 → 页码与时间”生成目录；分课包每节一个 PDF。笔记讲义为 A4 每页两张，带手写横线，每节另起一页。图片包保留原图 JPEG，按页序命名。</p>
+            </div>
+          </details>
         </section>
       </aside>
 
@@ -187,7 +197,6 @@
             <p id="ledger-source" class="source-context">等待加载视频</p>
           </div>
           <p id="media-status" class="note" aria-live="polite"></p>
-          <label class="check"><input id="video-only" type="checkbox" checked> 仅使用视频轨（支持的 MP4，重新加载后生效）</label>
           <div class="media-canvas">
             <div id="preview">
               <video id="video" muted controls playsinline preload="metadata"></video>
@@ -362,7 +371,7 @@
   </dialog>
   <dialog id="update-dialog" class="workspace-dialog" aria-labelledby="update-title" aria-describedby="update-status">
     <h2 id="update-title">扩展更新</h2>
-    <p>当前版本 <span id="update-current">3.1.3</span><span id="update-available" hidden> · 新版本 <strong id="update-version"></strong></span></p>
+    <p>当前版本 <span id="update-current">3.1.4</span><span id="update-available" hidden> · 新版本 <strong id="update-version"></strong></span></p>
     <p id="update-status" class="note" role="status" aria-live="polite"></p>
     <div class="dialog-actions">
       <a id="update-release" target="_blank" rel="noopener noreferrer" hidden>查看更新</a>

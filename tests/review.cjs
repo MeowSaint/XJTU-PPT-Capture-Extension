@@ -182,6 +182,95 @@ function zipEntries(bytes) {
     assert.equal(await page.locator('#terms-dialog').isVisible(), true, 'decline and Escape keep the workspace locked');
     await page.locator('#terms-agree').check(); await page.locator('#terms-accept').click(); await count(0);
 
+    if (!process.argv.includes('--motion-only')) await test('appearance: theme follows the system, supports keyboard switching and survives reload', async () => {
+      assert.equal(await page.locator('#go-source, #go-extraction, #go-results, .workflow-nav').count(), 0);
+      await page.evaluate(() => localStorage.removeItem('ppt-capture-theme'));
+      await page.emulateMedia({colorScheme: 'dark'}); await page.reload(); await idle();
+      const theme = page.getByRole('switch', {name: '深色模式'});
+      assert.equal(await theme.getAttribute('aria-checked'), 'true');
+      assert.equal(await page.evaluate(() => getComputedStyle(document.documentElement).colorScheme), 'dark');
+      await page.emulateMedia({colorScheme: 'light'});
+      await page.waitForFunction(() => document.documentElement.dataset.theme === 'light');
+      await theme.focus(); await page.keyboard.press('Space');
+      assert.equal(await theme.getAttribute('aria-checked'), 'true');
+      await page.reload(); await idle();
+      assert.equal(await theme.getAttribute('aria-checked'), 'true', 'manual dark overrides a light system after reload');
+      await theme.focus(); await page.keyboard.press('Enter');
+      await page.emulateMedia({colorScheme: 'dark'});
+      assert.equal(await theme.getAttribute('aria-checked'), 'false', 'manual light overrides a dark system');
+      await page.reload(); await idle();
+      assert.equal(await page.evaluate(() => getComputedStyle(document.documentElement).colorScheme), 'light');
+      await page.screenshot({path: path.join(output, 'appearance-light-empty.png'), fullPage: true});
+      await theme.click();
+      await page.screenshot({path: path.join(output, 'appearance-dark-empty.png'), fullPage: true});
+      for (const [width, height] of [[1280, 720], [1440, 900], [390, 844]]) {
+        await page.setViewportSize({width, height});
+        assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+        const box = await theme.boundingBox(); assert(box.x >= 0 && box.x + box.width <= width);
+        await theme.click(); assert.equal(await theme.getAttribute('aria-checked'), 'false');
+        if (width === 390) await page.screenshot({path: path.join(output, 'appearance-narrow.png'), fullPage: true});
+        await theme.click();
+      }
+      await page.evaluate(() => localStorage.removeItem('ppt-capture-theme'));
+      await page.emulateMedia({colorScheme: 'light'});
+      await page.setViewportSize({width: 1440, height: 900}); await page.reload(); await idle();
+      const blockedPage = await context.newPage();
+      blockedPage.on('pageerror', error => errors.push(error.message));
+      try {
+        await blockedPage.addInitScript(() => {
+          for (const method of ['getItem', 'setItem']) {
+            const original = Storage.prototype[method];
+            Storage.prototype[method] = function(key, ...args) {
+              if (key === 'ppt-capture-theme') throw new DOMException('Blocked fixture', 'SecurityError');
+              return original.call(this, key, ...args);
+            };
+          }
+        });
+        await blockedPage.goto(origin + '/capture.html');
+        const blockedTheme = blockedPage.getByRole('switch', {name: '深色模式'});
+        await blockedPage.waitForFunction(() => !document.querySelector('.app-shell').inert);
+        assert.equal(await blockedTheme.getAttribute('aria-checked'), 'false');
+        await blockedTheme.click();
+        assert.equal(await blockedTheme.getAttribute('aria-checked'), 'true', 'a blocked store still permits switching');
+        assert.match(await blockedTheme.getAttribute('title'), /仅本次生效/);
+      } finally { await blockedPage.close(); }
+    });
+    if (!process.argv.includes('--motion-only')) await test('appearance: scrollbars show during scrolling without changing panel width', async () => {
+      await seed(Array.from({length: 60}, (_, i) => ({id: i + 1, image: i % 3})));
+      const gallery = page.locator('#pages');
+      await gallery.scrollIntoViewIfNeeded();
+      await page.waitForFunction(() => !$('pages').classList.contains('is-scrolling'));
+      const before = await gallery.evaluate(node => ({width: node.clientWidth, color: getComputedStyle(node).scrollbarColor, thumb: getComputedStyle(node, '::-webkit-scrollbar-thumb').backgroundColor}));
+      assert.equal(before.thumb, 'rgba(0, 0, 0, 0)');
+      await gallery.hover(); await page.mouse.wheel(0, 240);
+      await page.waitForFunction(() => $('pages').scrollTop > 0 && $('pages').classList.contains('is-scrolling'));
+      assert.equal(await gallery.evaluate(node => node.clientWidth), before.width);
+      assert.notEqual(await gallery.evaluate(node => getComputedStyle(node, '::-webkit-scrollbar-thumb').backgroundColor), before.thumb);
+      await page.waitForFunction(() => !$('pages').classList.contains('is-scrolling'));
+      assert.equal(await gallery.evaluate(node => getComputedStyle(node).scrollbarColor), before.color);
+      assert.equal(await gallery.evaluate(node => node.clientWidth), before.width);
+      await page.screenshot({path: path.join(output, 'appearance-light-gallery.png'), fullPage: true});
+      await page.getByRole('switch', {name: '深色模式'}).click();
+      await page.screenshot({path: path.join(output, 'appearance-dark-gallery.png'), fullPage: true});
+      await page.getByRole('switch', {name: '深色模式'}).click();
+      await page.setViewportSize({width: 1440, height: 600});
+      await page.locator('#tab-source').click();
+      await page.locator('#panel-source details').evaluateAll(nodes => nodes.forEach(node => { node.open = true; }));
+      const sidebar = page.locator('#panel-source');
+      assert(await sidebar.evaluate(node => node.scrollHeight > node.clientHeight));
+      await sidebar.evaluate(node => { node.scrollTop = node.scrollHeight; });
+      await page.waitForFunction(() => $('panel-source').classList.contains('is-scrolling'));
+      await page.waitForFunction(() => !$('panel-source').classList.contains('is-scrolling'));
+      await page.setViewportSize({width: 390, height: 844});
+      await page.evaluate(() => scrollTo(0, document.documentElement.scrollHeight));
+      await page.waitForFunction(() => document.documentElement.classList.contains('is-scrolling'));
+      await page.waitForFunction(() => !document.documentElement.classList.contains('is-scrolling'));
+      assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+      await page.evaluate(() => localStorage.removeItem('ppt-capture-theme'));
+      await page.setViewportSize({width: 1440, height: 900});
+      await seed([], {course: {name: '', date: '', start: ''}, page: '', manual: false});
+    });
+
     if (!process.argv.includes('--motion-only')) await test('source, batch and export scopes are discoverable in desktop and narrow workspaces', async () => {
       assert.equal(await page.locator('#batch-panel').evaluate(panel => !!panel.closest('.workspace-sheet') && !panel.closest('.setting-panel')), true, 'batch work has a permanent wide workspace entry');
       assert.equal(await page.locator('#pdf, #export-zip, #selected-pdf, #selected-zip, #filename-preview, #export-settings').evaluateAll(nodes => nodes.length === 6 && nodes.every(node => node.closest('#results'))), true, 'scope, filename and settings shortcut are beside results');

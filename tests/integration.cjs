@@ -117,18 +117,18 @@ async function main() {
   try {
     const worker = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker');
     // Worker requests are not intercepted by page routes: mock the public check here.
-    await worker.evaluate(() => {
+    await worker.evaluate(version => {
       const fetchFixture = globalThis.fetch.bind(globalThis);
       globalThis.fetch = (input, options) => {
         const url = typeof input === 'string' ? input : input.url;
         if (url.startsWith('https://api.github.com/')) return Promise.resolve(new Response(JSON.stringify({
-          tag_name: 'v3.1.3', draft: false, prerelease: false, published_at: '2026-11-05T00:00:00Z',
-          html_url: 'https://github.com/MeowSaint/XJTU-PPT-Capture-Extension/releases/tag/v3.1.3',
-          assets: [{name: 'ppt-capture.zip', browser_download_url: 'https://github.com/MeowSaint/XJTU-PPT-Capture-Extension/releases/download/v3.1.3/ppt-capture.zip'}]
+          tag_name: `v${version}`, draft: false, prerelease: false, published_at: '2026-11-05T00:00:00Z',
+          html_url: `https://github.com/MeowSaint/XJTU-PPT-Capture-Extension/releases/tag/v${version}`,
+          assets: [{name: 'ppt-capture.zip', browser_download_url: `https://github.com/MeowSaint/XJTU-PPT-Capture-Extension/releases/download/v${version}/ppt-capture.zip`}]
         }), {headers: {'Content-Type': 'application/json'}}));
         return fetchFixture(input, options);
       };
-    });
+    }, manifest.version);
     const extensionOrigin = worker.url().replace('/background.js', '');
     const courseName = '传感网络与大数据技术', expectedFilename = courseName + '-2026-09-07-15-30-00.pdf';
     // Simulate a pre-v2.3.1 database: migration preserves existing screenshots.
@@ -195,7 +195,15 @@ async function main() {
     assert.equal(await page.locator('#pages article').count(), 1, 'declining consent preserves the migrated legacy screenshot');
     await page.locator('#terms-agree').check(); await page.locator('#terms-accept').click();
     await page.waitForFunction(() => !document.querySelector('.app-shell').inert);
-    await page.locator('#source-show-all').check();
+    await page.locator('#source-show-all').check().catch(async error => {
+      await page.screenshot({path: path.join(output, 'source-checkbox-failure.png'), fullPage: true});
+      console.error('Source checkbox diagnostics:', await page.locator('#source-show-all').evaluate(node => {
+        const rect = node.getBoundingClientRect();
+        return {checked: node.checked, x: rect.x, y: rect.y, hit: document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2)?.outerHTML,
+          sourceCount: document.querySelector('#sources').options.length, status: document.querySelector('#preflight-status').textContent};
+      }));
+      throw error;
+    });
     await page.waitForFunction(() => document.querySelector('#sources').options.length >= 3);
     const badge = await worker.evaluate(async url => {
       const tab = (await chrome.tabs.query({url})).find(tab => tab.url === url);

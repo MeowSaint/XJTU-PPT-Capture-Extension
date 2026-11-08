@@ -4,7 +4,7 @@
 
 把西安交通大学思源学堂课程录播里的幻灯片自动截下来，去重整理后导出成 PDF 或图片包。
 
-当前版本：**3.1.3** · [下载扩展](https://github.com/MeowSaint/XJTU-PPT-Capture-Extension/releases/latest/download/ppt-capture.zip) · [版本记录](https://github.com/MeowSaint/XJTU-PPT-Capture-Extension/releases)
+当前版本：**3.1.4** · [下载扩展](https://github.com/MeowSaint/XJTU-PPT-Capture-Extension/releases/latest/download/ppt-capture.zip) · [版本记录](https://github.com/MeowSaint/XJTU-PPT-Capture-Extension/releases)
 
 > [!WARNING]
 > **仅供学习复习，请尊重老师的劳动。**
@@ -25,6 +25,7 @@
 - **自动抓取视频地址**：从思源学堂课程页发现 MP4 / WebM / m3u8 视频，自动过滤掉登录页、接口数据或失效链接；也支持手动粘贴链接或导入本地视频。
 - **快速提取与自动去重**：按时间点跳转扫描，不用从头到尾原速播完；默认每 0.5 秒精细采样，也可选择 2 秒或 8 秒粗采样，支持框选 PPT 区域和比较忽略区。
 - **同屏预览与校对**：左边看视频、右边理页面，支持拖动调序、多选删除、一键撤销、清理相似页、大图预览，点页面时间即可跳回视频对应位置。
+- **明暗切换**：右上角开关切换浅色、深色并记住选择，首次打开跟随系统。滚动条在滚动时显示，停止后自动隐藏。
 - **保存课次与继续提取**：每节分别保留截图、裁剪区域、提取设置和扫描进度；停止或关闭后重新加载原视频，可从上次安全保存的位置继续。
 - **整门课批量提取与导出**：在课程录像列表页读取全部课次，按顺序自动提取；本机课次可随时切换，支持带中文课次目录的合并整课 PDF，也保留各节独立 PDF 的 ZIP 包。
 - **待复核时间段**：记录扫描中跳过的不稳定画面，支持跳转回看，或只对这一小段按 0.5 秒间隔补查。

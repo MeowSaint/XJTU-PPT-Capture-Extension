@@ -5,7 +5,9 @@ const fs = require('node:fs'), path = require('node:path'), os = require('node:o
 const {spawnSync} = require('node:child_process'), {createHash} = require('node:crypto');
 const {dependency, browserOptions} = require('./runtime.cjs');
 const {chromium} = dependency('playwright'), sharp = dependency('sharp');
-const root = path.resolve(__dirname, '..'), reportRoot = process.env.PPT_TEST_OUTPUT || path.join(root, '.test-output', 'v3.1.3');
+const root = path.resolve(__dirname, '..');
+const {version} = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8'));
+const reportRoot = process.env.PPT_TEST_OUTPUT || path.join(root, '.test-output', `v${version}`);
 fs.mkdirSync(reportRoot, {recursive: true});
 const output = fs.mkdtempSync(path.join(reportRoot, 'features-'));
 const github = 'https://api.github.com/repos/MeowSaint/XJTU-PPT-Capture-Extension/releases/latest';
@@ -36,7 +38,7 @@ function sources(phase) {
   return ['video.mp4', 'lecture.m3u8', 'login.mp4', 'data.mp4', 'unknown.mp4'].map(name => `${origin}/initial/${name}`);
 }
 function releaseJSON() {
-  const tag = updateMode === 'prerelease' ? 'v9.0.0-beta.1' : updateMode === 'current' ? 'v3.1.3' : 'v3.10.0';
+  const tag = updateMode === 'prerelease' ? 'v9.0.0-beta.1' : updateMode === 'current' ? `v${version}` : 'v3.10.0';
   return {tag_name: tag, draft: false, prerelease: updateMode === 'prerelease', published_at: '2026-11-05T00:00:00Z',
     html_url: `${repository}/releases/tag/${tag}`, assets: [{name: 'ppt-capture.zip', browser_download_url: `${repository}/releases/download/${tag}/ppt-capture.zip`}]};
 }
@@ -339,7 +341,7 @@ async function closeTools() { for (const page of context.pages()) if (page.url()
       await until(async () => (await Promise.all(tabs.map(tab => tab.locator('#update-dialog').evaluate(node => node.open)))).filter(Boolean).length === 1, 'expected exactly one automatic update dialog');
       assert.equal(updateRequests.length - before, 1, 'background serial queue shares one cached GET');
       const opened = await Promise.all(tabs.map(tab => tab.locator('#update-dialog').evaluate(node => node.open))); page = tabs[opened.indexOf(true)];
-      assert.equal(await page.locator('#update-current').textContent(), '3.1.3'); assert.equal(await page.locator('#update-version').textContent(), '3.10.0');
+      assert.equal(await page.locator('#update-current').textContent(), version); assert.equal(await page.locator('#update-version').textContent(), '3.10.0');
       assert.equal(await page.locator('#update-release').getAttribute('href'), `${repository}/releases/tag/v3.10.0`);
       assert.equal(await page.locator('#update-download').getAttribute('href'), `${repository}/releases/download/v3.10.0/ppt-capture.zip`);
       await screenshots(page, 'update', '#update-dialog');
@@ -436,7 +438,7 @@ async function closeTools() { for (const page of context.pages()) if (page.url()
     const changedDuringRun = Object.keys(copiedHashes).filter(name => copiedHashes[name] !== finalHashes[name]);
     const report = {status: process.exitCode ? 'fail' : 'pass', scope: process.argv.includes('--focus-diagnostic') ? 'focus diagnostic only' : 'full feature suite', output, transport, copiedHashes, finalHashes, changedDuringRun, permissionTest: 'Only the disposable extension grants localhost; faithful UI contains/request shim exercises an already-granted host without a headless native prompt.', results, counters: {mediaAndAPI: requests.length, updateGET: updateRequests.length, initialPeak}, requests, updateRequests, keyboardTrace, cancellation, cleanup, errors, unexpected: [...new Set(unexpected)], failure};
     fs.writeFileSync(path.join(output, 'results.json'), JSON.stringify(report, null, 2));
-    fs.writeFileSync(path.join(reportRoot, 'feature-test-report.md'), `# v3.1.3 independent browser features\n\nStatus: ${report.status}; scope: ${report.scope}\n\nEvidence: ${path.relative(reportRoot, output)}/results.json\n\n${transport}\n\nPermission timing uses a faithful Chrome API stub over an already-granted local test host. All media and retained pages are synthetic local fixtures.\n\n${results.map(result => `- ${result.status.toUpperCase()}: ${result.name}`).join('\n')}\n\nCounters: ${JSON.stringify(report.counters)}\n\nPage errors: ${errors.length}; unexpected external requests: ${report.unexpected.length}.\n${failure ? '\nFailure:\n```\n' + failure + '\n```\n' : ''}`);
+    fs.writeFileSync(path.join(reportRoot, 'feature-test-report.md'), `# v${version} independent browser features\n\nStatus: ${report.status}; scope: ${report.scope}\n\nEvidence: ${path.relative(reportRoot, output)}/results.json\n\n${transport}\n\nPermission timing uses a faithful Chrome API stub over an already-granted local test host. All media and retained pages are synthetic local fixtures.\n\n${results.map(result => `- ${result.status.toUpperCase()}: ${result.name}`).join('\n')}\n\nCounters: ${JSON.stringify(report.counters)}\n\nPage errors: ${errors.length}; unexpected external requests: ${report.unexpected.length}.\n${failure ? '\nFailure:\n```\n' + failure + '\n```\n' : ''}`);
     console.log('Feature evidence: ' + output);
   }
 })();
