@@ -112,3 +112,66 @@ The final full report and final nine-control report each record `contextsRemaini
 Self-review checked the full delta against the clean base, source syntax with `node --check`, whitespace with `git diff --check`, unchanged 16 normal registrations and all previous assertions, exact-source equality with the final run, timer/listener ownership, original failure preservation, native downloads/saveAs, all saved ZIP CRCs/JPEG hashes, release bytes and tracked scope. No runtime fault was observed and no out-of-scope runtime edit was needed.
 
 Fresh independent specification/quality/whole-delta review and the actual remote CI run remain the parent's next gates. Local macOS Node 26 success does not establish repaired Node 20 Linux behavior, resolve the original Linux producer's unrecorded outcome, or validate Chrome 114 specifically. The original final M2 history remains untouched.
+
+## Task2 fix round 1 — I1 primary-error preservation
+
+This append records the authorized I1 correction from clean `FIX_BASE 1f66887e1c83bf2f046edfc328cbcd969a6fdb61`. The preceding 114 lines / 17,370 bytes are retained byte for byte as historical evidence. The independent [Task2 review](task-2-review.md) found that the earlier long-workspace finalizer could replace a primary native-download or producer error when page closure had already detached CDP. That finding corrects the earlier self-review claim about end-to-end primary-error preservation; the initial successful full run remains pre-fix evidence.
+
+The round-one source commit is `d4729176596f3c96de3bc3763b30f7cf01e563a2`. Its exact [source](../../../tests/memory.cjs) is 60,310 bytes, SHA-256 `8e0132b86631878edd4c6b7b06c186fac777a6eb05ffb5dfb7423c5f55e343ff`. The report-only commit immediately follows this source commit and its exact ID is recorded in the round-one raw handoff and parent callback. Only the source and this report change; the formal review, runtime, features fixture, release ZIP, other documentation and historical M2 remain untouched.
+
+The actual `longWorkspace()` caller now runs through `withWorkspaceCleanup(context, action)`, shared with the regression controls. It captures a primary failure without modifying its identity or stack, attempts CDP detach and context disposal independently, and records every secondary cleanup failure in `report.cleanupErrors` with its phase, message, stack and primary stack. When the body succeeds, the first cleanup failure is thrown and every cleanup failure is still recorded. The explicit `primaryFailed` boolean also distinguishes a thrown falsy value from successful completion. A missing CDP session remains a no-op; context disposal is still attempted. The native observer's 180,000 ms producer guard and 30,000 ms post-production native-event budget are unchanged.
+
+### Actual local RED and focused GREEN
+
+The distinct [round-one evidence directory](../../../.test-output/ci-release-task-2/fix-round1) preserves the baseline source/report, the runner, every source epoch and raw command/stdout/stderr/exit quartet. No previous evidence was overwritten. The runner invokes the existing installed Chromium executable and the actual fixture; no browser install, profile, school site, remote CI or alternate runtime was used.
+
+The RED epoch uses the previous finalizer semantics inside the shared cleanup owner that the actual caller also uses. Running `node .test-output/ci-release-task-2/fix-round1/run-fixture.cjs red-cdp cleanup` produced **0/4 controls passing, exit 1, zero browser errors** in [the RED report](../../../.test-output/ci-release-task-2/fix-round1/memory-1794125766265/report.json). With an attached real CDP session, the observer closed the synthetic page on a producer rejection and the caller exposed `cdpSession.detach: Target page, context or browser has been closed` instead of the original `owned native producer failure`. With CDP already detached and a disposal error injected after actual context closure, the disposal error replaced the primary error. Successful-body controls exposed cleanup errors but failed the secondary-diagnostic assertions. These are actual local cleanup regressions; they do not establish the original Linux producer outcome.
+
+After the correction, `node .test-output/ci-release-task-2/fix-round1/run-fixture.cjs green-controls controls` produced **13/13 controls passing, exit 0, zero browser errors** in [the GREEN report](../../../.test-output/ci-release-task-2/fix-round1/memory-1794125790622/report.json). All nine earlier native controls remain enabled. They retain real native downloads, the tiny 100 ms native-event budget, the 2,000 ms bounded producer budget and the dedicated 100 ms producer-timeout case, including timer destruction and exact added-listener cleanup checks.
+
+The four additional controls exercise the shared actual caller cleanup owner with real Chromium/CDP sessions and a 100 ms native / 1,000 ms producer budget for the primary-failure cases:
+
+| Case | Actual observation |
+| --- | --- |
+| Attached CDP, native producer rejection closes page | Original producer Error identity and stack preserved; detach and disposal each attempted once; one secondary CDP diagnostic; 107 ms |
+| Already-detached CDP plus disposal failure after actual context closure | Original producer Error identity and stack preserved; both cleanup attempts once; both secondary failures recorded with primary stack; 116 ms |
+| Successful body, already-detached CDP | Original CDP cleanup Error identity surfaced; disposal still attempted; secondary diagnostic retained; 96 ms |
+| Successful body, disposal failure after actual context closure | Exact injected disposal Error identity surfaced; both cleanup attempts once; secondary diagnostic retained; 111 ms |
+
+All four pages were actually closed. The GREEN report contains five expected cleanup diagnostics from these injected scenarios, with `primaryFailed` true only for the two primary-failure cases. Those expected diagnostics are separate from `report.errors`, which remains empty. Successful cleanup errors are observable failures rather than silently discarded errors.
+
+### Single post-fix full memory run and saved artifacts
+
+After the last source edit, the identical GREEN source was used for exactly one post-fix full execution: `node .test-output/ci-release-task-2/fix-round1/run-fixture.cjs full-memory full`. The runner explicitly set `PPT_TEST_NATIVE_CONTROLS=0` and an empty test filter. It completed in 21,206 ms, **16/16 passing, exit 0, zero browser errors and zero unexpected cleanup errors**. The [post-fix full report](../../../.test-output/ci-release-task-2/fix-round1/memory-1794125838310/report.json) is authoritative for this round. Node remains v26.13.0 on darwin and Chromium remains 156.0.8078.4. No unrelated suite or second full run was executed in this round.
+
+All existing assertion-bearing source lines and normal test registrations remain present and unchanged. The single full run retains the old 1,000-page cases, both migrations and rollback, OPFS recovery/leases, 1,001-item learning cases, thumbnail/signature/preview limits, 256 MiB streaming/quota/cancellation cases, failed export and shared undo leases, and the complete 2,000-page restore/export/retention/incremental-render case.
+
+| Native download | Native event from subscription | Producer completion from subscription | Observation completion |
+| --- | ---: | ---: | ---: |
+| 1,000 pages | 1,255 ms | 1,264 ms | 1,264 ms |
+| 2,000 pages | 2,957 ms | 2,963 ms | 2,963 ms |
+
+Both producers fulfilled. These durations are actual local macOS observations; neither phase approached its guard in this run. The original Linux event timeout still does not reveal whether its producer was slow, failed or stalled.
+
+The actual native `saveAs` artifacts are retained in the post-fix full report directory. Independent Python standard-library verification read every entry, checked every CRC, and checked all 1,000 / 2,000 JPEGs against the same 75,006-byte fixture and SHA-256 `20ba850012ee83785e07c8558e5968e3954f4ac82353b94b58ce25dbcc93c0d1`:
+
+| Artifact | ZIP entries / bytes | ZIP SHA-256 |
+| --- | --- | --- |
+| [1,000-page ZIP](../../../.test-output/ci-release-task-2/fix-round1/memory-1794125838310/synthetic-1000-slides.zip) | 1,000 / 75,114,024 | `d51f41e81877e55cc7a40a6b69bf118f2bd5992e2ecdb07f24073391168984ab` |
+| [2,000-page ZIP](../../../.test-output/ci-release-task-2/fix-round1/memory-1794125838310/synthetic-2000-slides.zip) | 2,000 / 150,230,024 | `51fac114e5658902e52f2dd17f198caab7e0f3f9641376ea9a410fac5b3ffb33` |
+
+The 2,000-page export still records `{active: 0, max: 1, reads: 2000}`; sampled JS heap rose from 5,202,428 to 5,366,596 bytes, a 164,168-byte delta below the unchanged 64 MiB assertion. Thumbnail reads remained at most two with 11 live/allowed URLs. The unchanged 60,001 ms retention cleanup passed, preserving thumbnail URLs. Appending page 2,001 added exactly one card, removed none, and preserved scrolling, existing card identities and selection. These are sampled Chromium JS heap values, not RSS or a measured peak; the synthetic fixture repeats the same JPEG.
+
+### Round-one provenance, cleanup and self-review
+
+| Execution | Raw quartet |
+| --- | --- |
+| CDP RED, exit 1 | [command](../../../.test-output/ci-release-task-2/fix-round1/red-cdp.command.json), [stdout](../../../.test-output/ci-release-task-2/fix-round1/red-cdp.stdout.log), [stderr](../../../.test-output/ci-release-task-2/fix-round1/red-cdp.stderr.log), [exit](../../../.test-output/ci-release-task-2/fix-round1/red-cdp.exit.json) |
+| 13-control GREEN, exit 0 | [command](../../../.test-output/ci-release-task-2/fix-round1/green-controls.command.json), [stdout](../../../.test-output/ci-release-task-2/fix-round1/green-controls.stdout.log), [stderr](../../../.test-output/ci-release-task-2/fix-round1/green-controls.stderr.log), [exit](../../../.test-output/ci-release-task-2/fix-round1/green-controls.exit.json) |
+| Post-fix FULL16, exit 0 | [command](../../../.test-output/ci-release-task-2/fix-round1/full-memory.command.json), [stdout](../../../.test-output/ci-release-task-2/fix-round1/full-memory.stdout.log), [stderr](../../../.test-output/ci-release-task-2/fix-round1/full-memory.stderr.log), [exit](../../../.test-output/ci-release-task-2/fix-round1/full-memory.exit.json) |
+
+The [final integrity evidence](../../../.test-output/ci-release-task-2/fix-round1/final-integrity.json) records source equality across GREEN/full/current source, unchanged baseline assertion lines and normal registrations, saved ZIP CRC/JPEG results, baseline-report prefix preservation and immutable input fingerprints. The original release ZIP remains 1,303,886 bytes / 35 entries / SHA-256 `37563515b543dafea4581ecb42f041eb7134543b853ada18b50d789e480172ec`, and all 35 current packaged runtime files remain byte-identical. Both supplied remote logs retain the exact sizes and hashes recorded earlier in this report.
+
+RED, GREEN and post-fix full reports all record `contextsRemaining: 0`, `browserConnected: false`, `serverListening: false`. Managed full job `bash-e1f2761b831c4d7d` completed exit 0 and was collected with `job_output`; no MCP browser was opened. Self-review checked only I1 and newly introduced breakage, the entire round-one diff, shared caller ownership, primary identity/stack, successful-body cleanup failures, independent cleanup attempts, expected diagnostic separation, source syntax, whitespace, source-epoch identity, unchanged assertions and the two-path tracked scope. The report's original byte prefix is preserved.
+
+The correction is locally verified and awaits the parent's fresh scoped review. Repaired remote Node 20 / Linux CI has not been run, Chrome 114 is not validated, and no L1/L2 or original Linux producer cause is proven. No runtime fault or scope expansion was needed; publication, branch merging/cleanup and remote CI remain parent-owned.
