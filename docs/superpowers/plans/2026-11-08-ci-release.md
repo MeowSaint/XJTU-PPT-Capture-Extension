@@ -10,7 +10,7 @@
 ## Global Constraints
 
 - Chrome114+/Node20+, existing dependencies only; no installs or real school/profile access.
-- Only tests/features.cjs plus the own task report; runtime, version, assets, permissions and IDB unchanged.
+- Only the explicitly named owning fixture per task (Task1 tests/features.cjs; Task2 tests/memory.cjs) plus its own report; runtime, version, assets, permissions and IDB unchanged.
 - Preserve all11 business cases and native click/cancel/stale-result assertions; no sleep or count relaxation to pass.
 - Preserve real RED/failures, actual inputs/results/cleanup; original final M2 remains disclosed.
 
@@ -31,3 +31,13 @@
 - [ ] Preserve a deterministic old-boundary observation if practicable; do not call a passing diagnostic RED or invent Linux reproduction.
 - [ ] Run one final FULL features using existing PPT_TEST_BROWSER; capture actualstdout/stderr/exit, request boundary evidence, hashes and close all owned resources. No other full local suites.
 - [ ] Verify test-only scope/unchanged ZIP and commit fix; write a complete own report with limitations. Fresh independent review full task range before push/CI.
+
+### Task 2: Separate ZIP production from bounded native download observation
+
+**Files:** Modify tests/memory.cjs only. Create own .superpowers/sdd/2026-11-08-ci-release/task-2-report.md.
+**Interfaces:** Consumes unchanged exportRetained('zip') Promise and native Playwright download; produces the same16-case memory suite and actual2k native ZIP proof. Task1features fixture must not change.
+- [ ] Read named remote-job.log1126–1146, memory350–486/538–571 and directexport helper; record supplied Linux timeout RED, not a local reproduction.
+- [ ] Establish bounded event/producer ownership; subscribe before producer, handle rejection immediately, preserve early event, apply30000ms to missing native event after producer completes, fail/cleanup on producer error. Keep a meaningful bounded producer/progress guard instead of unbounded waiting or blind timeout enlargement.
+- [ ] Exercise meaningful boundary controls using a small budget without replaying heavy suites; preserve actual native saveAs and every original ZIP/image/read/heap/cache/thumbnail/retention/append assertion. Observe relevant durations/status, no product/policy changes.
+- [ ] Run final FULL16 memory once on final fixture with existing browser; capture quartets/inputs/native producer-event timings/full2000-file integrity and all resources closed. No unaffected features or other suite repeats.
+- [ ] Verify exacttest+ownreport and unchanged35runtime/ZIP, self-review, source+report commits; fresh independent spec/quality/whole new-delta review before push and actual remoteCI.
