@@ -1318,11 +1318,28 @@ async function awaitVideo(signal) {
   if (!decoded()) {
     // loadeddata can come from audio before any video is decoded, even with track dimensions.
     const start = video.currentTime, time = Number.isFinite(video.duration) && video.duration > 0 ? Math.min(0.1, video.duration / 2) : 0.1;
-    const scanner = new PPTScanner(video, () => {}, mediaContext);
+    // Preserve the decoder-health decision at native seek completion. The positive
+    // presentation fence may finish later; no-video failure must not wait for it.
+    const checkDecoded = () => { if (!decoded()) throw Object.assign(mediaFailure('MEDIA_NO_VIDEO', 'load', '浏览器尚未解码出可用的视频画面，只有轨道尺寸信息。请检查文件或使用受支持的编码。'), {time}); };
+    const checkNativeDecoded = () => {
+      const quality = video.getVideoPlaybackQuality?.();
+      if (Number.isFinite(quality?.totalVideoFrames) && Number.isFinite(quality?.droppedVideoFrames) || Number.isFinite(video.webkitDecodedFrameCount)) checkDecoded();
+    };
+    const scanner = new PPTScanner(video, () => {}, mediaContext, checkNativeDecoded);
     await scanner.seek(time, signal); signal?.throwIfAborted();
-    if (!decoded()) throw Object.assign(mediaFailure('MEDIA_NO_VIDEO', 'load', '浏览器尚未解码出可用的视频画面，只有轨道尺寸信息。请检查文件或使用受支持的编码。'), {time});
+    checkDecoded();
     await scanner.seek(start, signal); signal?.throwIfAborted();
   }
+}
+async function attachVideo(attach, signal) {
+  const initial = PPTScanner.prime(video, signal, mediaContext);
+  try {
+    attach();
+    await awaitVideo(signal);
+    await initial.ready;
+    initial.verify();
+    signal?.throwIfAborted();
+  } finally { initial.dispose(); }
 }
 function mediaFailure(code, phase, message, cause) { return Object.assign(Error(message, cause ? {cause} : undefined), {code, phase}); }
 // The deadline is per operation. A slow but progressing movie has no lifetime limit.
@@ -1473,12 +1490,12 @@ async function loadRemote(raw, options = {}) {
       hls = new Hls({enableWorker: false, maxBufferLength: 8, maxMaxBufferLength: 15, backBufferLength: 0, xhrSetup: xhr => { xhr.withCredentials = true; }});
       hls.on(Hls.Events.ERROR, (_, data) => { if (data.fatal) { (task || controller).abort(Error('HLS 加载失败：' + data.details + '，请检查分片域名权限或导入本地 MP4')); } });
       mediaContext = {local: false, audioOmitted: false};
-      hls.loadSource(info.url); hls.attachMedia(video); await awaitVideo(controller.signal);
+      await attachVideo(() => { hls.loadSource(info.url); hls.attachMedia(video); }, controller.signal);
     } else {
       // A Blob URL gives an origin-clean canvas even if the CDN omits CORS headers.
       const original = await fetchVideo(info.url, controller.signal);
       const blob = await prepareMedia(original, controller.signal);
-      controller.signal.throwIfAborted(); objectURL = URL.createObjectURL(blob); video.src = objectURL; await awaitVideo(controller.signal);
+      controller.signal.throwIfAborted(); objectURL = URL.createObjectURL(blob); await attachVideo(() => { video.src = objectURL; }, controller.signal);
     }
     if (!(video.duration > 0) || !Number.isFinite(video.duration)) throw Error('视频没有可用的完整时长，无法快速扫描');
     controller.signal.throwIfAborted(); loadedIdentity = identity;
@@ -1512,7 +1529,7 @@ $('file').onchange = async () => {
     await releaseSource(); controller.signal.throwIfAborted(); sourceName = identity.sourceName;
     if (activeLesson?.source?.sourceKey === sourceKey) { coursePage = activeLesson.source.page || ''; sourceCourse = {...activeLesson.course}; sourceCoursePage = coursePage; }
     const blob = await prepareMedia(file, controller.signal);
-    controller.signal.throwIfAborted(); objectURL = URL.createObjectURL(blob); video.src = objectURL; await awaitVideo(controller.signal);
+    controller.signal.throwIfAborted(); objectURL = URL.createObjectURL(blob); await attachVideo(() => { video.src = objectURL; }, controller.signal);
     if (!(video.duration > 0) || !Number.isFinite(video.duration)) throw Error('本地视频时长无效');
     controller.signal.throwIfAborted(); loadedIdentity = {...identity, coursePage, batchJobId: ''};
     await bindLesson({kind: 'file', ...loadedIdentity, page: coursePage, duration: video.duration}, sourceCourse, controller.signal); controller.signal.throwIfAborted(); sourceReady = true; frame(0); draw(); $('progress').value = 0;

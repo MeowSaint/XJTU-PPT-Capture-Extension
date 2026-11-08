@@ -119,10 +119,24 @@ async function test(name, run) { if (process.env.PPT_TEST_FILTER && !new RegExp(
             if (stage >= 4) { ctx.font = '22px serif'; ctx.fillText('+ C', 360, 100); }
             if (stage >= 5) { ctx.fillStyle = '#d00000'; ctx.fillRect(400, 140, 20, 8); }
           };
+          const properties = ['readyState', 'videoWidth', 'videoHeight', 'duration', 'seeking', 'currentTime', 'requestVideoFrameCallback', 'cancelVideoFrameCallback'];
+          const descriptors = properties.map(name => Object.getOwnPropertyDescriptor(video, name)), callbacks = new Map();
+          let callbackId = 0, render, seeking = false, presentedFrames = 0;
           Object.defineProperties(video, {
             readyState: {configurable: true, get: () => 2}, videoWidth: {configurable: true, get: () => canvas.width}, videoHeight: {configurable: true, get: () => canvas.height},
-            duration: {configurable: true, get: () => duration}, seeking: {configurable: true, get: () => false},
-            currentTime: {configurable: true, get: () => clock, set: time => { clock = time; paint(time); queueMicrotask(() => video.dispatchEvent(new Event('seeked'))); }}
+            duration: {configurable: true, get: () => duration}, seeking: {configurable: true, get: () => seeking},
+            requestVideoFrameCallback: {configurable: true, value: callback => { const id = ++callbackId; callbacks.set(id, callback); return id; }},
+            cancelVideoFrameCallback: {configurable: true, value: id => callbacks.delete(id)},
+            currentTime: {configurable: true, get: () => clock, set: time => {
+              clock = time; seeking = true;
+              render = requestAnimationFrame(() => {
+                render = undefined; paint(time); seeking = false; presentedFrames++;
+                const metadata = {presentationTime: performance.now(), mediaTime: time, presentedFrames, width: canvas.width, height: canvas.height};
+                video.dispatchEvent(new Event('seeked'));
+                const pending = [...callbacks.values()]; callbacks.clear();
+                for (const callback of pending) callback(performance.now(), metadata);
+              });
+            }}
           });
           CanvasRenderingContext2D.prototype.drawImage = function(source, ...args) { return drawImage.call(this, source === video ? canvas : source, ...args); };
           const reset = async (name, dedupe = true) => {
@@ -207,7 +221,10 @@ async function test(name, run) { if (process.env.PPT_TEST_FILTER && !new RegExp(
             return {saved, scan, distances, knowledgeVersion, detailCandidate, controls, manualIds, duplicateCandidate, manualAfter, resumes};
           } finally {
             closeSimilar(); releaseDedupeContext(); CanvasRenderingContext2D.prototype.drawImage = drawImage; sourceReady = false;
-            await window.recordLocalDetailCleanup({drawImageRestored: CanvasRenderingContext2D.prototype.drawImage === drawImage, dedupeReleased: dedupeContext === null, reviewClosed: similarReview === null, sourceReleased: !sourceReady});
+            if (render !== undefined) cancelAnimationFrame(render); callbacks.clear();
+            properties.forEach((name, i) => { if (descriptors[i]) Object.defineProperty(video, name, descriptors[i]); else delete video[name]; });
+            await window.recordLocalDetailCleanup({drawImageRestored: CanvasRenderingContext2D.prototype.drawImage === drawImage, dedupeReleased: dedupeContext === null, reviewClosed: similarReview === null, sourceReleased: !sourceReady,
+              videoRestored: properties.every((name, i) => JSON.stringify(Object.getOwnPropertyDescriptor(video, name)) === JSON.stringify(descriptors[i])), callbacksReleased: callbacks.size === 0});
           }
         });
         result.saved.forEach((p, i) => {

@@ -276,7 +276,7 @@ function mediaHarness(extra = {}) {
   const video = Object.assign(new EventTarget(), {readyState: 0, error: null, duration: 8, videoWidth: 640, videoHeight: 360, currentTime: 0, getVideoPlaybackQuality: () => ({totalVideoFrames: 1, droppedVideoFrames: 0})});
   const sandbox = {PPTCore: core, DOMException, AbortController, Blob, URL, setTimeout, clearTimeout, video,
     status: () => {}, $: id => { if (!nodes.has(id)) nodes.set(id, {}); return nodes.get(id); },
-    PPTScanner: class { async seek(time, signal) { signal?.throwIfAborted(); video.currentTime = time; } },
+    PPTScanner: class { static prime(_video, signal) { signal?.throwIfAborted(); return {ready: Promise.resolve(), verify() {}, dispose() {}}; } async seek(time, signal) { signal?.throwIfAborted(); video.currentTime = time; } },
     videoCache: null, mediaContext: {}, mediaRecovery: {omitAudio: true},
     PPTDiskCache: {create: async () => { const chunks = []; return {write: async chunk => { chunks.push(chunk); }, finish: async () => new Blob(chunks), remove: async () => {}}; }}, ...extra};
   vm.createContext(sandbox);
@@ -334,6 +334,44 @@ test('awaitVideo rejects late loadeddata on abort and guards duration only for o
   h.mediaContext = {audioOmitted: true, inspection: {videoDuration: 8, movieTimescale: 1000}};
   await assert.rejects(h.awaitVideo(), error => error.code === 'MEDIA_DURATION_MISMATCH');
   h.mediaContext.audioOmitted = false; await h.awaitVideo();
+});
+
+test('attachment primes before src, awaits old readiness and presentation, and always disposes', async () => {
+  for (const mode of ['success', 'attach-error', 'duration', 'abort', 'presentation-error', 'native-error']) {
+    const calls = [], primary = Error(mode), controller = new AbortController(); let complete, reject, disposed = 0, settled = false;
+    const ready = new Promise((resolve, fail) => { complete = resolve; reject = fail; }); ready.catch(() => {});
+    const h = mediaHarness({PPTScanner: class { static prime(video, signal) {
+      assert.equal(video.readyState, 0); assert.equal(signal, controller.signal); calls.push('prime');
+      return {ready, verify() { calls.push('verify'); }, dispose() { disposed++; reject(new DOMException('stopped', 'AbortError')); }};
+    } }});
+    if (mode === 'duration') h.mediaContext = {audioOmitted: true, inspection: {videoDuration: 7, movieTimescale: 1000}};
+    const pending = h.attachVideo(() => {
+      calls.push('attach'); if (mode === 'attach-error') throw primary;
+      if (mode !== 'native-error') h.video.readyState = 2;
+    }, controller.signal);
+    pending.then(() => { settled = true; }, () => {});
+    assert.deepEqual(calls, ['prime', 'attach']); await Promise.resolve(); assert.equal(settled, false);
+    if (mode === 'native-error') { h.video.error = {code: 3}; h.video.dispatchEvent(new Event('error')); }
+    if (mode === 'presentation-error') reject(primary);
+    if (mode === 'abort') { complete(); controller.abort(); }
+    if (mode === 'success') { complete(); await pending; assert.equal(settled, true); assert.deepEqual(calls, ['prime', 'attach', 'verify']); }
+    else await assert.rejects(pending, error => mode.endsWith('-error') && mode !== 'native-error' ? error === primary : mode === 'duration' ? error.code === 'MEDIA_DURATION_MISMATCH' : mode === 'native-error' ? error.phase === 'load' : error.name === 'AbortError');
+    assert.equal(disposed, 1, mode); assert.equal(require('node:events').getEventListeners(controller.signal, 'abort').length, 0);
+  }
+});
+
+test('load health checks distinguish explicit no-video evidence from unknown counters and delayed presentation', async () => {
+  for (const mode of ['zero', 'positive', 'unknown']) {
+    let counts = mode === 'unknown' ? {} : {totalVideoFrames: 0, droppedVideoFrames: 0}, seeks = 0;
+    const h = mediaHarness({PPTScanner: class {
+      constructor(_video, _capture, _context, onSeeked) { this.check = onSeeked; }
+      async seek() { seeks++; if (mode === 'positive') counts = {totalVideoFrames: 1, droppedVideoFrames: 0}; this.check();
+        if (mode === 'unknown') counts = {totalVideoFrames: 1, droppedVideoFrames: 0}; }
+    }});
+    h.video.readyState = 2; h.video.getVideoPlaybackQuality = () => counts;
+    if (mode === 'zero') { await assert.rejects(h.awaitVideo(), error => error.code === 'MEDIA_NO_VIDEO' && error.phase === 'load' && error.time === .1); assert.equal(seeks, 1); }
+    else { await h.awaitVideo(); assert.equal(seeks, 2); }
+  }
 });
 
 test('native loadeddata without a decoded video track cannot become ready', async () => {

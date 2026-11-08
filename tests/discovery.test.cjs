@@ -229,6 +229,7 @@ async function selectedVMBinding(reply, url) {
     lastAcquisitionFailure: '', sourceName: '', sourceReady: false, loadedIdentity: null, objectURL: null,
     $: id => nodes[id], controls: noop, status: noop, invalidateUndo: noop, releaseSource: async () => {}, setCourseReferrer: async () => {},
     fetchVideo: async () => new Blob(['synthetic video']), prepareMedia: async file => file, awaitVideo: async () => {}, applyBatchCrop: async () => {},
+    mediaContext: {}, PPTScanner: {prime(_video, signal) { signal?.throwIfAborted(); return {ready: Promise.resolve(), verify: noop, dispose: noop}; }},
     video: {duration: 6, videoWidth: 640, videoHeight: 360, pause: noop}, frame: noop, draw: noop, timecode: String,
     originPattern: raw => new URL(raw).origin + '/*', namingInfo: () => reply.course, scanSettings: () => ({step: .5}),
     syncAllPages: noop, forgetUndo: noop, applyLesson: noop, render: noop, renderLibrary: noop,
@@ -236,7 +237,7 @@ async function selectedVMBinding(reply, url) {
     PPTLibrary: {...require('../library.js'), bind: async (_db, lesson) => saved.push(structuredClone(lesson))}});
   for (const file of ['media.js', 'course.js']) vm.runInContext(fs.readFileSync(require.resolve('../' + file), 'utf8'), context);
   const source = fs.readFileSync(require.resolve('../capture.js'), 'utf8');
-  for (const [start, end] of [['async function bindLesson(', 'async function switchLesson('], ['async function loadRemote(', "$('load').onclick"]]) {
+  for (const [start, end] of [['async function bindLesson(', 'async function switchLesson('], ['async function attachVideo(', 'function mediaFailure('], ['async function loadRemote(', "$('load').onclick"]]) {
     const first = source.indexOf(start), last = source.indexOf(end, first);
     assert(first >= 0 && last > first, 'exercise actual source loading and binding functions'); vm.runInContext(source.slice(first, last), context);
   }

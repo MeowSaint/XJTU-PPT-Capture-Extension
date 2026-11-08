@@ -630,9 +630,9 @@ function zipEntries(bytes, {utf8 = true} = {}) {
       try {
         await probe.goto(origin + '/fixture.html');
         for (const name of ['media.js', 'scanner.js', 'mp4-recovery.js']) await probe.addScriptTag({url: origin + '/' + name});
-        const decode = (file, prepare = false) => probe.evaluate(async ({url, prepare}) => {
+        const decode = (file, prepare = false) => probe.evaluate(async ({url, prepare, initial}) => {
           const original = await (await fetch(url)).blob(), v = document.createElement('video'); v.muted = true; v.preload = 'auto'; document.body.append(v);
-          let objectURL, timer, listeners = [], inspection, mode = 'original';
+          let objectURL, timer, initialPresentation, listeners = [], inspection, mode = 'original';
           const result = {nativeFailed: false, decoded: false, reachedEnd: false, slidePixels: [], sourceTimes: []};
           try {
             let blob = original;
@@ -646,21 +646,45 @@ function zipEntries(bytes, {utf8 = true} = {}) {
                }
              }
             Object.assign(result, {mode, inspection}); if (!blob) return result;
+            initialPresentation = PPTScanner.prime(v, undefined, {local: true});
             await new Promise((resolve, reject) => {
               const done = () => resolve(), fail = () => reject(PPTCore.mediaError(v.error));
               listeners = [['loadeddata', done], ['error', fail]]; listeners.forEach(([type, fn]) => v.addEventListener(type, fn, {once: true}));
               timer = setTimeout(() => reject(Error('native probe timeout')), 5000);
               objectURL = URL.createObjectURL(blob); v.src = objectURL;
             }).finally(() => { clearTimeout(timer); listeners.forEach(([type, fn]) => v.removeEventListener(type, fn)); listeners = []; });
-            const canvas = document.createElement('canvas'); canvas.width = 1; canvas.height = 1;
-            const scanner = new PPTScanner(v, time => { canvas.getContext('2d').drawImage(v, 320, 180, 1, 1, 0, 0, 1, 1); return {pixel: [...canvas.getContext('2d').getImageData(0, 0, 1, 1).data], time, nativeTime: v.currentTime}; });
-            for (const time of [.1, 4, 7.9]) { const frame = await scanner.seek(time, new AbortController().signal); result.slidePixels.push(frame.pixel); result.sourceTimes.push([frame.time, frame.nativeTime]); }
+            result.initialPresentation = await initialPresentation.ready; initialPresentation.verify();
+             const canvas = document.createElement('canvas'); canvas.width = 1; canvas.height = 1;
+            const readPixel = () => { canvas.getContext('2d').drawImage(v, 320, 180, 1, 1, 0, 0, 1, 1); return [...canvas.getContext('2d').getImageData(0, 0, 1, 1).data]; };
+            result.frameEvidence = [];
+            const observeSeeked = () => result.frameEvidence.push({event: 'seeked', now: performance.now(), nativeTime: v.currentTime, pixel: readPixel()});
+            v.addEventListener('seeked', observeSeeked); listeners.push(['seeked', observeSeeked]);
+            const requestFrame = v.requestVideoFrameCallback.bind(v), cancelFrame = v.cancelVideoFrameCallback.bind(v), callbacks = new Set();
+            v.requestVideoFrameCallback = callback => {
+              const id = requestFrame((now, metadata) => { callbacks.delete(id); result.frameEvidence.push({event: 'frame', now, metadata, nativeTime: v.currentTime, seeking: v.seeking, pixel: readPixel()}); callback(now, metadata); });
+              callbacks.add(id); return id;
+            };
+            v.cancelVideoFrameCallback = id => { callbacks.delete(id); cancelFrame(id); };
+            const scanner = new PPTScanner(v, time => { const frame = {pixel: readPixel(), time, nativeTime: v.currentTime}; result.frameEvidence.push({event: 'capture', now: performance.now(), ...frame}); return frame; });
+            try {
+              if (initial) {
+                const q = v.getVideoPlaybackQuality();
+                result.initialState = {time: v.currentTime, paused: v.paused, seeking: v.seeking, quality: {totalVideoFrames: q.totalVideoFrames, droppedVideoFrames: q.droppedVideoFrames}, pixel: readPixel()};
+                result.frameEvidence.push({event: 'initial-request', time: v.currentTime, now: performance.now()});
+                result.initialFrame = await scanner.seek(v.currentTime, new AbortController().signal);
+              }
+              for (const time of [.1, 4, 7.9]) { result.frameEvidence.push({event: 'request', time, now: performance.now()}); v.requestVideoFrameCallback(() => {}); const frame = await scanner.seek(time, new AbortController().signal); result.slidePixels.push(frame.pixel); result.sourceTimes.push([frame.time, frame.nativeTime]); }
+              const repeated = await scanner.seek(7.9, new AbortController().signal);
+              if (JSON.stringify(repeated.pixel) !== JSON.stringify(result.slidePixels[2]) || repeated.time !== 7.9 || repeated.nativeTime !== 7.9) throw Error('same-time paused frame changed');
+            } finally { for (const id of callbacks) { cancelFrame(id); callbacks.delete(id); } result.pendingFrameCallbacks = callbacks.size; delete v.requestVideoFrameCallback; delete v.cancelVideoFrameCallback; }
             result.decoded = v.videoWidth > 0 && result.slidePixels.every(pixel => pixel[3] === 255); result.reachedEnd = Math.abs(v.currentTime - 7.9) < .05; result.duration = v.duration;
           } catch (error) { result.nativeFailed = true; result.error = {message: error.message, nativeCode: v.error?.code || null}; }
-          finally { clearTimeout(timer); listeners.forEach(([type, fn]) => v.removeEventListener(type, fn)); v.pause(); v.removeAttribute('src'); v.load(); v.remove(); if (objectURL) URL.revokeObjectURL(objectURL); }
+          finally { initialPresentation?.dispose(); clearTimeout(timer); listeners.forEach(([type, fn]) => v.removeEventListener(type, fn)); v.pause(); v.removeAttribute('src'); v.load(); v.remove(); if (objectURL) URL.revokeObjectURL(objectURL); }
           return result;
-        }, {url: origin + '/' + path.relative(root, file).split(path.sep).join('/'), prepare});
+        }, {url: origin + '/' + path.relative(root, file).split(path.sep).join('/'), prepare, initial: file === media.av && !prepare});
         results.cleanControl = await decode(media.av); assert.equal(results.cleanControl.decoded, true);
+        assert.deepEqual(results.cleanControl.initialFrame.pixel, results.cleanControl.initialState.pixel);
+        assert.equal(results.cleanControl.initialFrame.time, 0); assert.equal(results.cleanControl.initialFrame.nativeTime, 0);
         // Establish the original result before asking the parser to prepare the SAME deterministic bad AAC bytes.
         results.originalBadAudio = await decode(media.badAudio);
         results.preparedBadAudio = await decode(media.badAudio, true);
@@ -796,7 +820,21 @@ function zipEntries(bytes, {utf8 = true} = {}) {
       await seed({lessons: [lesson('media-video-keep')], pages: [{lessonId: 'media-video-keep', sourceKey: fileKey}]});
       const before = await stored();
       await page.locator('#video-only').uncheck(); await page.evaluate(() => mediaRecoverySave);
-      await page.locator('#file').setInputFiles(path.join(output, 'media-bad-video.mp4')); await page.waitForFunction(() => !busy());
+      await page.evaluate(() => {
+        window.invalidInitEvents = []; window.invalidInitListeners = ['loadstart', 'loadedmetadata', 'loadeddata', 'seeking', 'seeked', 'error', 'emptied'].map(type => {
+          const fn = () => { const q = video.getVideoPlaybackQuality(); invalidInitEvents.push({type, now: performance.now(), time: video.currentTime, readyState: video.readyState, seeking: video.seeking, width: video.videoWidth, height: video.videoHeight, error: video.error?.code, total: q.totalVideoFrames, dropped: q.droppedVideoFrames}); };
+          video.addEventListener(type, fn); return [type, fn];
+        });
+      });
+      try { await page.locator('#file').setInputFiles(path.join(output, 'media-bad-video.mp4')); await page.waitForFunction(() => !busy()); }
+      finally {
+        const diagnostic = await page.evaluate(() => {
+          const q = video.getVideoPlaybackQuality(), state = PPTScanner.frames.get(video);
+          for (const [type, fn] of invalidInitListeners) video.removeEventListener(type, fn);
+          return {events: invalidInitEvents, time: video.currentTime, readyState: video.readyState, seeking: video.seeking, width: video.videoWidth, height: video.videoHeight, error: video.error?.code, total: q.totalVideoFrames, dropped: q.droppedVideoFrames, observing: !!state?.dispose, proof: state?.proof, sourceReady, busy: busy()};
+        });
+        fs.writeFileSync(path.join(output, 'media-invalid-init.json'), JSON.stringify(diagnostic, null, 2));
+      }
       assert.equal(await page.evaluate(() => sourceReady), false); assert.equal(await page.evaluate(() => objectURL), null);
       assert.deepEqual(await stored(), before); assert.match(await page.locator('#status').textContent(), /视频画面|格式|解码/);
       const black = path.join(output, 'media-black.mp4');
