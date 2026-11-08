@@ -7,7 +7,7 @@ const crypto = require('node:crypto');
 const {dependency, browserOptions} = require('./runtime.cjs');
 const {chromium} = dependency('playwright');
 const root = path.resolve(__dirname, '..');
-const output = path.join(process.env.PPT_TEST_OUTPUT || path.join(root, '.test-output', 'v3.1.2'), `memory-${Date.now()}`);
+const output = path.join(process.env.PPT_TEST_OUTPUT || path.join(root, '.test-output', 'v3.1.3'), `memory-${Date.now()}`);
 fs.mkdirSync(output, {recursive: true});
 const report = {node: process.version, platform: process.platform, results: [], errors: [], heap: {}, evidence: [],
   scope: 'Fresh Chromium contexts, localhost, synthetic images, injected failures, 256 MiB generated stream; JSHeapUsedSize is not RSS.'};

@@ -6,7 +6,7 @@ const {dependency, browserOptions} = require('./runtime.cjs');
 const {chromium} = dependency('playwright');
 const sharp = dependency('sharp');
 const {PDFDocument} = dependency('pdf-lib');
-const root = path.resolve(__dirname, '..'), output = path.join(root, '.test-output');
+const root = path.resolve(__dirname, '..'), output = process.env.PPT_TEST_OUTPUT || path.join(root, '.test-output');
 function command(exe, args) {
   const r = spawnSync(exe, args, {encoding: 'utf8'});
   if (r.status !== 0) throw Error(exe + ': ' + (r.stderr || r.error));
@@ -122,9 +122,9 @@ async function main() {
       globalThis.fetch = (input, options) => {
         const url = typeof input === 'string' ? input : input.url;
         if (url.startsWith('https://api.github.com/')) return Promise.resolve(new Response(JSON.stringify({
-          tag_name: 'v3.1.2', draft: false, prerelease: false, published_at: '2026-11-05T00:00:00Z',
-          html_url: 'https://github.com/MeowSaint/XJTU-PPT-Capture-Extension/releases/tag/v3.1.2',
-          assets: [{name: 'ppt-capture.zip', browser_download_url: 'https://github.com/MeowSaint/XJTU-PPT-Capture-Extension/releases/download/v3.1.2/ppt-capture.zip'}]
+          tag_name: 'v3.1.3', draft: false, prerelease: false, published_at: '2026-11-05T00:00:00Z',
+          html_url: 'https://github.com/MeowSaint/XJTU-PPT-Capture-Extension/releases/tag/v3.1.3',
+          assets: [{name: 'ppt-capture.zip', browser_download_url: 'https://github.com/MeowSaint/XJTU-PPT-Capture-Extension/releases/download/v3.1.3/ppt-capture.zip'}]
         }), {headers: {'Content-Type': 'application/json'}}));
         return fetchFixture(input, options);
       };
@@ -347,8 +347,15 @@ async function main() {
       assert.deepEqual(nativeSourceStart, {id: String(originalOrder[0]), trusted: true}, 'native drag starts on the original first card');
       console.log('Native drag source:', JSON.stringify(nativeSourceStart));
       await lastCard.scrollIntoViewIfNeeded();
-      const lastBox = await lastCard.boundingBox();
-      await page.mouse.move(lastBox.x + lastBox.width - 4, lastBox.y + 12, {steps: 10});
+      const lastBox = await lastCard.boundingBox(), galleryBox = await page.locator('#pages').boundingBox(), viewport = page.viewportSize();
+      const left = Math.max(lastBox.x + lastBox.width / 2, galleryBox.x, 0), right = Math.min(lastBox.x + lastBox.width, galleryBox.x + galleryBox.width, viewport.width);
+      const top = Math.max(lastBox.y, galleryBox.y, 0), bottom = Math.min(lastBox.y + lastBox.height, galleryBox.y + galleryBox.height, viewport.height);
+      assert(right - left > 8 && bottom - top > 8, 'the last card has a visible right-half drop area inside the gallery and viewport');
+      const dropPoint = {x: Math.floor(right - 4), y: Math.floor((top + bottom) / 2)};
+      assert(dropPoint.x > left && dropPoint.x < right && dropPoint.y > top && dropPoint.y < bottom, 'rounded native drop coordinates stay inside that area');
+      assert.equal(await page.evaluate(({x, y}) => document.elementFromPoint(x, y)?.closest('#pages article')?.dataset.pageId, dropPoint), String(originalOrder.at(-1)), 'native drop point hits the intended last card');
+      console.log('Native drag target:', JSON.stringify({id: originalOrder.at(-1), point: dropPoint, visible: {left, right, top, bottom}}));
+      await page.mouse.move(dropPoint.x, dropPoint.y, {steps: 10});
     } finally {
       await page.mouse.up(); await page.evaluate(() => { delete window.__integrationFirstDrag; });
     }

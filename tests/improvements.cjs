@@ -474,7 +474,7 @@ async function test(name, run) { if (process.env.PPT_TEST_FILTER && !new RegExp(
     const errors = []; page.on('pageerror', error => errors.push(error.message));
     await page.goto(origin + '/capture.html'); await page.waitForFunction(() => ready);
     await page.locator('#terms-agree').check(); await page.locator('#terms-accept').click();
-    const scratch = process.env.PPT_TEST_OUTPUT || path.join(root, '.test-output', 'v3.1.2'); fs.mkdirSync(scratch, {recursive: true});
+    const scratch = process.env.PPT_TEST_OUTPUT || path.join(root, '.test-output', 'v3.1.3'); fs.mkdirSync(scratch, {recursive: true});
     const output = fs.mkdtempSync(path.join(scratch, 'task4-')); console.log('Task4 artifacts: ' + output);
     const idle = () => page.waitForFunction(() => ready && !busy());
     const download = async (selector, label) => {

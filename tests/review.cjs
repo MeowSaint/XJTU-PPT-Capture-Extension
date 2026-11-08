@@ -7,7 +7,7 @@ const {dependency, browserOptions} = require('./runtime.cjs');
 const {chromium} = dependency('playwright'), sharp = dependency('sharp');
 const {PDFDocument} = dependency('pdf-lib');
 const root = path.resolve(__dirname, '..');
-const scratch = path.join(root, '.test-output', 'v3.1.2');
+const scratch = process.env.PPT_TEST_OUTPUT || path.join(root, '.test-output', 'v3.1.3');
 fs.mkdirSync(scratch, {recursive: true});
 const output = fs.mkdtempSync(path.join(scratch, 'review-'));
 const fixture = path.join(output, 'review-video.mp4');
@@ -129,7 +129,11 @@ function zipEntries(bytes) {
     const video = spawnSync(process.env.PPT_TEST_FFMPEG || 'ffmpeg', ['-y', '-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=duration=4:size=640x360:rate=10', '-an', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', fixture], {encoding: 'utf8'});
     assert.equal(video.status, 0, video.stderr || video.error?.message);
     const wrong = path.join(output, 'other', path.basename(fixture)); fs.mkdirSync(path.dirname(wrong));
-    fs.writeFileSync(wrong, Buffer.concat([fs.readFileSync(fixture), Buffer.from('different file with the same name')]));
+    const differentPayload = Buffer.from('different file with the same name');
+    const freeBox = Buffer.alloc(8 + differentPayload.length);
+    freeBox.writeUInt32BE(freeBox.length, 0); freeBox.write('free', 4, 4, 'ascii'); differentPayload.copy(freeBox, 8);
+    fs.writeFileSync(wrong, Buffer.concat([fs.readFileSync(fixture), freeBox]));
+    assert.notDeepEqual(fs.readFileSync(wrong), fs.readFileSync(fixture), 'same-name source fixture has different file bytes');
     images = await Promise.all(['#24354a', '#9e2437', '#596779'].map(async (color, index) => {
       const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360"><rect width="640" height="360" fill="#ffffff"/><rect x="35" y="35" width="570" height="70" fill="${color}"/><text x="55" y="82" font-family="sans-serif" font-size="30" fill="white">Review slide ${index + 1}</text><path d="M55 160h480M55 210h400M55 260h450" stroke="${color}" stroke-width="16"/></svg>`;
       return 'data:image/jpeg;base64,' + (await sharp(Buffer.from(svg)).jpeg({quality: 95}).toBuffer()).toString('base64');
@@ -166,7 +170,8 @@ function zipEntries(bytes) {
     if (!process.argv.includes('--motion-only')) await test('source, batch and export scopes are discoverable in desktop and narrow workspaces', async () => {
       assert.equal(await page.locator('#batch-panel').evaluate(panel => !!panel.closest('.workspace-sheet') && !panel.closest('.setting-panel')), true, 'batch work has a permanent wide workspace entry');
       assert.equal(await page.locator('#pdf, #export-zip, #selected-pdf, #selected-zip, #filename-preview, #export-settings').evaluateAll(nodes => nodes.length === 6 && nodes.every(node => node.closest('#results'))), true, 'scope, filename and settings shortcut are beside results');
-      assert.match(await page.locator('#export-scope').textContent(), /本节全部.*0.*页/);
+      assert.equal(await page.locator('#export-view').inputValue(), 'raw', 'a fresh workspace defaults to raw export');
+      assert.equal(await page.locator('#export-scope').textContent(), '原始全部 · 0 / 0 页', 'raw scope reports both retained and total counts');
       assert.match(await page.locator('#current-lesson').textContent(), /当前整理/);
       assert.match(await page.locator('#batch-course-context').textContent(), /批量列表/);
       await page.locator('#export-settings').click();
@@ -273,10 +278,10 @@ function zipEntries(bytes) {
       await page.keyboard.press('Control+z'); assert.equal(await page.evaluate(() => window.inputUndoPrevented), false, 'Ctrl+Z in input is not intercepted');
       await page.locator('#undo').click(); await count(4); assert.deepEqual(await stored(), original);
       await page.reload(); await count(4); assert.deepEqual(await ids(), [41, 7, 99, 13]);
-      await abortNextReview(); await page.locator('#pages article button').first().click();
+      await abortNextReview(); await page.locator('#pages article').getByRole('button', {name: '删除', exact: true}).first().click();
       await page.waitForFunction(() => document.querySelector('#status').textContent.includes('删除失败'));
       await count(4); assert.deepEqual(await stored(), original, 'aborted delete changes neither pages nor naming');
-      await page.locator('#pages article button').nth(1).click(); await count(3);
+      await page.locator('#pages article').getByRole('button', {name: '删除', exact: true}).nth(1).click(); await count(3);
       const afterDelete = await stored(); await abortNextReview(); await page.locator('#undo').click();
       await page.waitForFunction(() => document.querySelector('#status').textContent.includes('撤销失败'));
       await count(3); assert.deepEqual(await stored(), afterDelete, 'aborted Undo changes neither pages nor naming');
@@ -286,16 +291,16 @@ function zipEntries(bytes) {
 
     await test('last-page deletion retains lesson naming, Undo is atomic and clear invalidates history', async () => {
       await seed([{id: 12, order: 8128}], {...naming, course: {...naming.course, name: '删除前命名'}});
-      const original = await stored(); await page.locator('#pages article button').click(); await count(0);
+      const original = await stored(); await page.locator('#pages article').getByRole('button', {name: '删除', exact: true}).click(); await count(0);
       assert.equal(await page.locator('#course-name').inputValue(), '删除前命名');
       const empty = await stored(); assert.deepEqual(empty.naming, original.naming); assert.deepEqual(empty.lesson, original.lesson);
       await page.reload(); await count(0); assert.equal(await page.locator('#course-name').inputValue(), '删除前命名');
       assert.deepEqual(await stored(), empty, 'empty lesson naming persists after reload');
       await seed([{id: 12, order: 8128}], {...naming, course: {...naming.course, name: '删除前命名'}});
-      await page.locator('#pages article button').click(); await count(0);
+      await page.locator('#pages article').getByRole('button', {name: '删除', exact: true}).click(); await count(0);
       await page.locator('#pages').focus(); await page.keyboard.press(modifier + '+z'); await count(1);
       assert.deepEqual(await stored(), original); await page.reload(); await count(1); assert.deepEqual(await stored(), original);
-      await seed([{id: 1}, {id: 2, image: 1}]); await page.locator('#pages article button').first().click(); await count(1);
+      await seed([{id: 1}, {id: 2, image: 1}]); await page.locator('#pages article').getByRole('button', {name: '删除', exact: true}).first().click(); await count(1);
       page.once('dialog', dialog => dialog.accept()); await page.locator('#clear').click(); await count(0);
       assert.equal(await page.locator('#undo').isDisabled(), true); assert.equal((await stored()).pages.length, 0);
     });
@@ -316,7 +321,7 @@ function zipEntries(bytes) {
       });
       await idle(); assert.deepEqual(await ids(), [40, 20, 30, 10]);
       await check(10).click({modifiers: ['Shift']}); assert.deepEqual(await selected(), [20, 30, 10]);
-      await page.locator('#pages article[data-page-id="20"] button').click(); await count(3);
+      await page.locator('#pages article[data-page-id="20"]').getByRole('button', {name: '删除', exact: true}).click(); await count(3);
       await check(40).click({modifiers: ['Shift']}); assert.deepEqual(await selected(), [40, 30, 10]);
       await page.locator('#clear-selection').click(); await check(10).click({modifiers: ['Shift']}); assert.deepEqual(await selected(), [10]);
       page.once('dialog', dialog => dialog.accept()); await page.locator('#clear').click(); await count(0);
@@ -462,9 +467,9 @@ function zipEntries(bytes) {
     await test('similar review reevaluates nontransitive candidates and preserves pages on read or commit failure', async () => {
       await seed([1, 2, 3].map(id => ({id, sourceTime: id, sourceKey: 'file:chain'})));
       await page.evaluate(async () => {
-        const signatures = [0, .5, 1].map(percent => {
+        const signatures = [0, 2, 4].map(percent => {
           const sig = new Uint8ClampedArray(192 * 108 * 4);
-          for (let i = 0; i < Math.floor(192 * 108 * percent / 100); i++) sig.fill(255, i * 4, i * 4 + 3);
+          for (let i = 0; i < Math.floor(192 * 108 * percent / 100); i++) sig.fill(30, i * 4, i * 4 + 3);
           return sig;
         });
         if (!PPTCore.similar(signatures[0], signatures[1], 3) || !PPTCore.similar(signatures[1], signatures[2], 3) || PPTCore.similar(signatures[0], signatures[2], 3)) throw Error('Invalid nontransitive fixture');
@@ -563,7 +568,8 @@ function zipEntries(bytes) {
           return regions;
         };
         const card = document.querySelector('#pages article'), sheet = $('pages'), bounds = rect(sheet);
-        const controls = [card, card.querySelector('.page-select'), card.querySelector('.slide-time'), card.querySelector('button')].map(node => {
+        const controls = [card, card.querySelector('.page-select'), card.querySelector('.slide-time'), card.querySelector('.learning-toggle'),
+          [...card.querySelectorAll('button')].find(button => button.textContent.trim() === '删除')].map(node => {
           const r = rect(node), points = [[r.x + 3, r.y + 3], [r.right - 3, r.y + 3], [r.x + 3, r.bottom - 3], [r.right - 3, r.bottom - 3], [r.x + r.width / 2, r.y + r.height / 2]];
           return {name: node.className || node.tagName, rect: r, clips: clips(node), hits: points.map(([x, y]) => {
             const target = document.elementFromPoint(x, y); return target === node || node.contains(target);
@@ -576,7 +582,8 @@ function zipEntries(bytes) {
         return {width: innerWidth, height: innerHeight, documentWidth: document.documentElement.scrollWidth, documentHeight: document.documentElement.scrollHeight,
           windowScroll: scrollY, batchOpen: $('batch-panel').open, batchJobs: batchJobs.length, busy: busy(), task: !!task,
           workspace: {...rect(workspace), scrollTop: workspace.scrollTop, clientHeight: workspace.clientHeight, scrollHeight: workspace.scrollHeight, overflow: getComputedStyle(workspace).overflowY},
-          results: rect($('results')), pages: {...bounds, clientHeight: sheet.clientHeight, scrollHeight: sheet.scrollHeight, scrollTop: sheet.scrollTop},
+          results: rect($('results')), exportRows: [...document.querySelectorAll('.result-export > .export-row')].map(rect),
+          pages: {...bounds, clientHeight: sheet.clientHeight, scrollHeight: sheet.scrollHeight, scrollTop: sheet.scrollTop},
           stop: rect($('stop')), actionRow: rect($('stop').parentElement), controls,
           thumbnails: {loaded: thumbs.filter(t => t.loaded).length, allowed: thumbs.filter(t => t.allowed).length, outside: thumbs.filter(t => t.loaded && !t.allowed).map(t => t.id)}};
       });
@@ -758,6 +765,7 @@ function zipEntries(bytes) {
             scrollHeight: document.querySelector('#pages').scrollHeight, scrollClient: document.querySelector('#pages').clientHeight,
             actions: ['pdf', 'export-zip', 'run', 'stop', 'shot', 'clear', 'clean-similar', 'undo'].map(rect)};
         });
+        fs.writeFileSync(path.join(output, 'geometry-progress.json'), JSON.stringify([...geometry, measured], null, 2));
         assert(measured.documentWidth <= width && measured.documentHeight <= height, JSON.stringify(measured));
         assert(measured.tools.width >= 260 && measured.tools.width <= 280, 'inspector has readable width'); assert(measured.video.right < measured.results.x, 'video is beside the review pane');
         assert(measured.pages.bottom <= height && measured.pages.height > 250 && measured.scrollHeight > measured.scrollClient);

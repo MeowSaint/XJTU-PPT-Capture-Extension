@@ -207,6 +207,12 @@ function release(rootArgument) {
   const packageFile = path.join(root, 'package.json');
   checkFile(packageFile, root);
   if (parseJson(fs.readFileSync(packageFile)).version !== manifest.version) throw new Error('manifest.json and package.json versions differ');
+  const lockFile = path.join(root, 'package-lock.json');
+  checkFile(lockFile, root);
+  const lock = parseJson(fs.readFileSync(lockFile));
+  if (lock.version !== manifest.version || lock.packages?.['']?.version !== manifest.version) {
+    throw new Error('manifest.json and package-lock.json versions differ');
+  }
   const history = path.join(root, 'last-release');
   const temporary = path.join(root, 'tmp');
   for (const directory of [history, temporary]) {

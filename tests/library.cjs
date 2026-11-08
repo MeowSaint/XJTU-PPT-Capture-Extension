@@ -7,7 +7,7 @@ const {gzipSync} = require('node:zlib');
 const {dependency, browserOptions} = require('./runtime.cjs');
 const {chromium} = dependency('playwright'), sharp = dependency('sharp');
 const {PDFDocument, PDFName} = dependency('pdf-lib');
-const root = path.resolve(__dirname, '..'), scratch = process.env.PPT_TEST_OUTPUT || path.join(root, '.test-output', 'v3.1.2');
+const root = path.resolve(__dirname, '..'), scratch = process.env.PPT_TEST_OUTPUT || path.join(root, '.test-output', 'v3.1.3');
 fs.mkdirSync(scratch, {recursive: true});
 const output = fs.mkdtempSync(path.join(scratch, 'library-'));
 const fixture = path.join(output, 'library-video.mp4'), moving = path.join(output, 'library-moving.mp4'), continuity = path.join(output, 'library-continuity.mp4');

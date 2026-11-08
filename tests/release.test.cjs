@@ -8,7 +8,7 @@ const { test } = require('node:test');
 
 const project = path.resolve(__dirname, '..');
 const release = path.join(project, 'scripts', 'release.cjs');
-const output = path.join(project, '.test-output');
+const output = process.env.PPT_TEST_OUTPUT || path.join(project, '.test-output');
 if (!fs.existsSync(output)) fs.mkdirSync(output);
 assert.ok(fs.lstatSync(output).isDirectory() && !fs.lstatSync(output).isSymbolicLink());
 assert.equal(fs.realpathSync(output), output, 'test output must stay inside the repository');
@@ -30,14 +30,19 @@ function fixture(label, omitted) {
     fs.mkdirSync(path.dirname(path.join(root, name)), { recursive: true });
     fs.copyFileSync(path.join(project, name), path.join(root, name));
   }
+  if (omitted !== 'package-lock.json') {
+    const {version} = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8'));
+    fs.writeFileSync(path.join(root, 'package-lock.json'), JSON.stringify({version, lockfileVersion: 3, packages: {'': {version}}}));
+  }
   return root;
 }
 
 function setVersion(root, version, name) {
-  for (const file of name ? [name] : ['manifest.json', 'package.json']) {
+  for (const file of name ? [name] : ['manifest.json', 'package.json', 'package-lock.json']) {
     const target = path.join(root, file);
     const data = JSON.parse(fs.readFileSync(target, 'utf8'));
     data.version = version;
+    if (file === 'package-lock.json') data.packages[''].version = version;
     fs.writeFileSync(target, JSON.stringify(data));
   }
 }
@@ -161,6 +166,13 @@ const oldZips = [
   },
 ];
 
+test('current release metadata is 3.1.3 in manifest, package and both lock versions', () => {
+  const manifest = JSON.parse(fs.readFileSync(path.join(project, 'manifest.json'), 'utf8'));
+  const pkg = JSON.parse(fs.readFileSync(path.join(project, 'package.json'), 'utf8'));
+  const lock = JSON.parse(fs.readFileSync(path.join(project, 'package-lock.json'), 'utf8'));
+  assert.deepEqual([manifest.version, pkg.version, lock.version, lock.packages[''].version], ['3.1.3', '3.1.3', '3.1.3', '3.1.3']);
+});
+
 test('packs exactly 35 members with original LICENSE, notices and every resource byte', () => {
   const root = fixture('contents');
   fs.writeFileSync(path.join(root, '.env'), 'must never be packaged');
@@ -252,6 +264,27 @@ test('manifest and package version mismatch leaves every existing ZIP untouched'
   setVersion(root, '9.9.9', 'package.json');
   failedWithoutChangingZips(root, /manifest\.json and package\.json versions differ/);
 });
+
+test('missing lock leaves every existing ZIP untouched', () => {
+  const root = fixture('missing-lock', 'package-lock.json');
+  seedArchives(root);
+  failedWithoutChangingZips(root, /package-lock\.json/);
+});
+
+for (const field of ['root', 'package']) {
+  for (const version of [undefined, '9.9.9']) {
+    test(`rejects ${field} lock version ${JSON.stringify(version)} without changing ZIPs`, () => {
+      const root = fixture('lock-mismatch');
+      seedArchives(root);
+      const target = path.join(root, 'package-lock.json');
+      const lock = JSON.parse(fs.readFileSync(target, 'utf8'));
+      if (field === 'root') lock.version = version;
+      else lock.packages[''].version = version;
+      fs.writeFileSync(target, JSON.stringify(lock));
+      failedWithoutChangingZips(root, /manifest\.json and package-lock\.json versions differ/);
+    });
+  }
+}
 
 for (const version of ['2.5', '2.5.2-beta', '2.5.2\n', 252]) {
   test(`rejects non-x.y.z release version ${JSON.stringify(version)} before changing ZIPs`, () => {

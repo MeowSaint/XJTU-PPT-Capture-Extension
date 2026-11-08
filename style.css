@@ -105,8 +105,8 @@ summary::marker { color: var(--muted); font-size: 11px; }
 #batch-status { margin-top: 10px; }
 .help-drawer .note { line-height: 1.75; }
 
-/* Reserve room for export controls and a complete card; an expanded batch scrolls with the workspace. */
-.workspace-sheet { display: grid; grid-template-columns: minmax(0, .9fr) minmax(380px, 1.1fr); grid-template-rows: max-content minmax(560px, 1fr); gap: 20px; min-width: 0; min-height: 0; overflow: auto; scroll-padding-block: 16px 20px; padding: 16px 20px 20px; background: var(--surface); }
+/* Reserve room for export/learning controls and a complete three-row card; an expanded batch scrolls with the workspace. */
+.workspace-sheet { display: grid; grid-template-columns: minmax(0, .9fr) minmax(380px, 1.1fr); grid-template-rows: max-content minmax(660px, 1fr); gap: 20px; min-width: 0; min-height: 0; overflow: auto; scroll-padding-block: 16px 20px; padding: 16px 20px 20px; background: var(--surface); }
 #batch-panel { grid-column: 1 / -1; min-width: 0; max-height: 42dvh; overflow: auto; border-bottom: 1px solid var(--border); scrollbar-width: thin; }
 #batch-panel > summary { display: list-item; padding: 7px 0 12px; font-size: 14px; }
 #batch-panel > summary > span:first-child { font-weight: 600; }
@@ -147,6 +147,8 @@ progress::-moz-progress-bar { background: var(--accent); }
 .result-export { flex-shrink: 0; padding: 10px 0 0; }
 .export-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 10px; min-width: 0; }
 .scope-label { font-size: 13px; font-weight: 500; }
+/* Keep changing page-count text from taking a row away from the finite gallery. */
+.result-export > .export-row > .export-actions { flex-basis: 100%; }
 .export-actions button { min-height: 32px; padding: 4px 10px; font-size: 13px; }
 #export-settings { flex-shrink: 0; min-height: 28px; padding: 2px 0 2px 6px; color: var(--accent); font-size: 12px; }
 #export-options-summary { flex: 1; min-width: 0; font-size: 12px; }
@@ -279,6 +281,13 @@ progress::-moz-progress-bar { background: var(--accent); }
   .workflow-nav { gap: 0; }
   .workflow-nav button { padding-inline: 5px; }
   .app-header { gap: 12px; }
+}
+/* A collapsed batch uses only the capture column; the results keep the full desktop height. */
+@media (min-width: 1021px) {
+  .workspace-sheet:has(> #batch-panel:not([open])) { grid-template-rows: max-content minmax(0, 1fr); padding-block: 0; }
+  .workspace-sheet:has(> #batch-panel:not([open])) > #batch-panel { grid-column: 1; }
+  .workspace-sheet:has(> #batch-panel:not([open])) > #panel-capture { grid-column: 1; }
+  .workspace-sheet:has(> #batch-panel:not([open])) > #results { grid-column: 2; grid-row: 1 / -1; min-height: 660px; }
 }
 @media (max-width: 1020px) {
   .app-shell { height: auto; min-height: 100dvh; grid-template-rows: auto auto; }
