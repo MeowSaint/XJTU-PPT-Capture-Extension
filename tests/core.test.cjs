@@ -123,9 +123,15 @@ test('local protection uses exact floating bias, RGB maximum, edges and per-pixe
   }
   const uncorrected = a.map((value, index) => index % 4 === 3 ? value : value + 9);
   assert.equal(core.frameDistance(a, uncorrected).changed, 0); assert.equal(core.hasLocalChange(a, uncorrected), false);
+  assert(core.frameDistance(a, uncorrected).mean >= .6, 'brightness control independently reaches the mean threshold');
   assert.equal(core.similar(a, uncorrected), false, 'the old mean threshold still applies above the brightness tolerance');
-  const weak = a.map((value, index) => index % 8 === 0 ? value + 30 : index % 8 === 4 ? value - 30 : value);
-  assert.equal(core.hasLocalChange(a, weak), false); assert.equal(core.similar(a, weak), false, 'global thresholds still apply');
+  const weak = a.slice();
+  for (let p = 0; p < 256; p++) weak[p * 4] += p % 2 ? -30 : 30;
+  const weakDistance = core.frameDistance(a, weak);
+  assert.equal(core.hasLocalChange(a, weak), false);
+  assert(weakDistance.changed >= 1.2, 'weak changes reach the changed-percentage threshold');
+  assert(weakDistance.mean < .6, 'weak changes stay below the independent mean threshold');
+  assert.equal(core.similar(a, weak), false, 'the changed-percentage threshold independently rejects weak changes');
   const alpha = a.slice(); for (let i = 3; i < alpha.length; i += 4) alpha[i] = 0;
   assert.equal(core.similar(a, alpha), true, 'alpha does not affect RGB comparison');
   for (const [x, y, m] of [[null, a], [a, a.slice(4)], [a, a, new Uint8Array(1)], [a, a, new Uint8Array(20736).fill(1)]]) {
