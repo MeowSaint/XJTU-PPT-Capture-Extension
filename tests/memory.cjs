@@ -104,6 +104,119 @@ async function screenshot(page, name) {
   const filename = path.join(output, name); await page.screenshot({path: filename}); report.evidence.push(filename);
 }
 
+// The producer and native event are separate phases; controls below exercise their boundary.
+async function observeNativeDownload(page, produce, {downloadTimeout = 30000, producerTimeout = 180000, timings = {}} = {}) {
+  const start = Date.now();
+  Object.assign(timings, {downloadTimeout, producerTimeout, producerStatus: 'pending'});
+  let timer, resolveDownload, fail;
+  const native = new Promise(resolve => { resolveDownload = resolve; });
+  const failure = new Promise((resolve, reject) => { fail = reject; });
+  const onDownload = download => { timings.nativeEventMilliseconds = Date.now() - start; resolveDownload(download); };
+  const onClose = () => fail(new Error('Page closed during ZIP download'));
+  const onCrash = () => fail(new Error('Page crashed during ZIP download'));
+  page.once('download', onDownload); page.once('close', onClose); page.once('crash', onCrash);
+  try {
+    // Node wall-clock guard: bound sequential OPFS production independently of the page's fake retention clock.
+    timer = setTimeout(() => fail(new Error(`ZIP producer exceeded ${producerTimeout}ms`)), producerTimeout);
+    // Install both rejection owners before invoking the producer, including synchronous throws and early page closure.
+    const producer = Promise.resolve().then(produce).then(() => {
+      timings.producerMilliseconds = Date.now() - start; timings.producerStatus = 'fulfilled';
+    }, error => {
+      timings.producerMilliseconds = Date.now() - start; timings.producerStatus = 'rejected'; throw error;
+    });
+    await Promise.race([producer, failure]); clearTimeout(timer);
+    timer = setTimeout(() => fail(new Error(`Native download missing after production (${downloadTimeout}ms)`)), downloadTimeout);
+    return await Promise.race([native, failure]);
+  } catch (error) {
+    timings.error = error.message;
+    // A page evaluation has no cancellation API; stop its producer before this fixture can continue.
+    await page.close().catch(cleanup => { timings.closeError = cleanup.message; });
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    page.off('download', onDownload); page.off('close', onClose); page.off('crash', onCrash);
+    timings.observationMilliseconds = Date.now() - start;
+  }
+}
+
+async function nativeDownloadControls() {
+  const {createHook} = require('node:async_hooks');
+  const budget = 100, producerBudget = 2000;
+  const delay = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
+  const emit = page => page.evaluate(() => {
+    const link = document.createElement('a'); link.href = URL.createObjectURL(new Blob(['native boundary control']));
+    link.download = 'native-control.txt'; link.click(); URL.revokeObjectURL(link.href);
+  });
+  const cases = [
+    ['early event survives production longer than native budget', async (page, options) => {
+      const observed = new Promise(resolve => page.once('download', resolve));
+      const download = await observeNativeDownload(page, async () => { await emit(page); await observed; await delay(3 * budget); }, options);
+      assert.equal(download.suggestedFilename(), 'native-control.txt');
+      assert(options.timings.nativeEventMilliseconds < options.timings.producerMilliseconds);
+    }],
+    ['slow producer can emit after the old native deadline', async (page, options) => {
+      const download = await observeNativeDownload(page, async () => { await delay(3 * budget); await emit(page); }, options);
+      assert.equal(download.suggestedFilename(), 'native-control.txt');
+      assert(options.timings.producerMilliseconds >= 3 * budget);
+    }],
+    ['native event after producer completion is observed', async (page, options) => {
+      const running = observeNativeDownload(page, async () => {}, options);
+      await delay(budget / 4); await emit(page);
+      assert.equal((await running).suggestedFilename(), 'native-control.txt');
+      assert(options.timings.nativeEventMilliseconds >= options.timings.producerMilliseconds);
+    }],
+    ['missing event gets its budget after slow production', async (page, options) => {
+      const start = Date.now();
+      await assert.rejects(observeNativeDownload(page, () => delay(3 * budget), options), /Native download missing after production/);
+      assert(Date.now() - start >= 4 * budget - 10);
+    }],
+    ['immediate producer rejection is owned', async (page, options) => {
+      const failure = new Error('immediate producer rejection');
+      await assert.rejects(observeNativeDownload(page, () => Promise.reject(failure), options), error => error === failure);
+    }],
+    ['synchronous producer throw is owned', async (page, options) => {
+      const failure = new Error('synchronous producer throw');
+      await assert.rejects(observeNativeDownload(page, () => { throw failure; }, options), error => error === failure);
+    }],
+    ['producer failure is preserved even after an early event', async (page, options) => {
+      const failure = new Error('synthetic producer failure');
+      await assert.rejects(observeNativeDownload(page, async () => { await emit(page); throw failure; }, options), error => error === failure);
+    }],
+    ['bounded producer guard owns a later rejection', async (page, options) => {
+      let rejectProducer;
+      const producer = new Promise((resolve, reject) => { rejectProducer = reject; });
+      await assert.rejects(observeNativeDownload(page, () => producer, {...options, producerTimeout: budget}), /ZIP producer exceeded/);
+      rejectProducer(new Error('late producer failure after guard'));
+      await new Promise(resolve => setImmediate(resolve));
+    }],
+    ['page closure fails pending observation immediately', async (page, options) => {
+      await assert.rejects(observeNativeDownload(page, () => page.close(), options), /Page closed during ZIP download/);
+    }]
+  ];
+  for (const [name, action] of cases) {
+    await test('native control: ' + name, async () => {
+      const {context, page} = await fresh(), timings = {};
+      const events = ['download', 'close', 'crash'], before = events.map(event => page.listeners(event));
+      const timers = new Set(); let timersCreated = 0;
+      const hook = createHook({
+        init(id, type) {
+          if (type === 'Timeout' && new Error().stack.includes('observeNativeDownload')) { timers.add(id); timersCreated++; }
+        },
+        destroy(id) { timers.delete(id); }
+      });
+      hook.enable();
+      try {
+        await action(page, {downloadTimeout: budget, producerTimeout: producerBudget, timings});
+        events.forEach((event, index) => assert(page.listeners(event).every(listener => before[index].includes(listener)), 'all observation listeners are removed'));
+        await new Promise(resolve => setImmediate(resolve));
+        assert(timersCreated > 0, 'timer cleanup control observes actual helper timers');
+        assert.equal(timers.size, 0, 'all observation timers are cleared');
+        return {nativeBudgetMilliseconds: budget, producerBudgetMilliseconds: producerBudget, timings, listenersAfter: events.map(event => page.listenerCount(event)), timersCreated, timersRemaining: timers.size};
+      } finally { hook.disable(); await dispose(context); }
+    });
+  }
+}
+
 async function migration(version) {
   const {context, page} = await fresh();
   try {
@@ -363,8 +476,9 @@ async function workspace() {
     }, page);
     await test('1000-page ZIP downloads byte-correct JPEGs and releases its file after the retention timer', async () => {
       await page.clock.install(); report.heap.exportBefore = await heap(cdp);
-      const pending = page.waitForEvent('download'); await page.evaluate(() => exportRetained('zip'));
-      const download = await pending, filename = path.join(output, 'synthetic-1000-slides.zip'); await download.saveAs(filename); assert.equal(await download.failure(), null);
+      const timings = {pages: 1000}; (report.nativeDownloads ||= []).push(timings);
+      const download = await observeNativeDownload(page, () => page.evaluate(() => exportRetained('zip')), {timings});
+      const filename = path.join(output, 'synthetic-1000-slides.zip'); await download.saveAs(filename); assert.equal(await download.failure(), null);
       const result = zipSummary(filename, fixture.sha256); assert.equal(result.entries, 1000); assert.equal(result.imageBytes, fixture.imageSize * 1000); assert.equal(result.first, '001-01-23-15.jpg'); assert.equal(result.last, '1000-00-00-00.jpg');
       const retained = await page.evaluate(() => __memory.files()); assert.equal(retained.length, 1); assert.equal(retained[0].size, result.size);
       report.heap.exportFinished = await heap(cdp); await page.clock.fastForward(60001); await page.waitForFunction(async () => (await __memory.files()).length === 0 && downloadURLs.size === 0);
@@ -412,7 +526,7 @@ async function workspace() {
 }
 
 async function longWorkspace() {
-  const {context, page} = await fresh();
+  const {context, page} = await fresh(); let cdp;
   try {
     const fixture = await page.evaluate(async () => {
       const fixture = await __memory.fixture(), db = await PPTPageStore.open(), sig = new Uint8ClampedArray(192 * 108 * 4).fill(23);
@@ -423,7 +537,7 @@ async function longWorkspace() {
     await page.goto(origin + '/capture.html'); await page.waitForFunction(() => ready);
     await page.locator('#terms-agree').check(); await page.locator('#terms-accept').click(); await page.waitForFunction(() => studyAccepted && !busy());
     await settleThumbnails(page);
-    const cdp = await context.newCDPSession(page); await cdp.send('Performance.enable');
+    cdp = await context.newCDPSession(page); await cdp.send('Performance.enable');
     report.heap.metadata2000 = await heap(cdp);
     const restored = await page.evaluate(async () => ({pages: pages.length, cards: $('pages').children.length, assets: await __memory.count(db, 'assets'),
       metadataOnly: pages.every(row => !('data' in row) && !('sig' in row) && !Object.values(row).some(value => value instanceof Blob || ArrayBuffer.isView(value))),
@@ -460,8 +574,9 @@ async function longWorkspace() {
         try { return await imageBytes(...args); } finally { longExport.active--; } };
     });
     await page.clock.install(); report.heap.export2000Before = await heap(cdp);
-    const pending = page.waitForEvent('download'); await page.evaluate(() => exportRetained('zip'));
-    const download = await pending, filename = path.join(output, 'synthetic-2000-slides.zip'); await download.saveAs(filename); assert.equal(await download.failure(), null);
+    const timings = {pages: 2000}; (report.nativeDownloads ||= []).push(timings);
+    const download = await observeNativeDownload(page, () => page.evaluate(() => exportRetained('zip')), {timings});
+    const filename = path.join(output, 'synthetic-2000-slides.zip'); await download.saveAs(filename); assert.equal(await download.failure(), null);
     const zip = zipSummary(filename, fixture.sha256), reads = await page.evaluate(() => longExport);
     assert.equal(zip.entries, 2000); assert.equal(zip.imageBytes, fixture.imageSize * 2000); assert.deepEqual(reads, {active: 0, max: 1, reads: 2000});
     report.heap.export2000Finished = await heap(cdp); report.heap.export2000SampledDelta = report.heap.export2000Finished - report.heap.export2000Before;
@@ -481,9 +596,9 @@ async function longWorkspace() {
         reused: longCards.every((card, i) => container.children[i] === card), selectionPreserved: selectedPages.has(id) && selectedPages.size === 1};
     });
     assert.deepEqual(append, {pages: 2001, cards: 2001, added: 1, removed: 0, scrollPreserved: true, reused: true, selectionPreserved: true});
-    await cdp.detach(); report.evidence.push(filename);
+    report.evidence.push(filename);
     return {restored, cache, thumbnails, zip, reads, append, cleanup: true, syntheticImagesRepeat: true, measurement: 'sampled Chromium JS heap, not process RSS or a measured peak'};
-  } finally { await dispose(context); }
+  } finally { try { await cdp?.detach(); } finally { await dispose(context); } }
 }
 
 async function learningMemory() {
@@ -550,6 +665,7 @@ async function main() {
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve)); origin = `http://127.0.0.1:${server.address().port}`;
   try {
     browser = await chromium.launch(browserOptions()); report.browser = browser.version();
+    if (process.env.PPT_TEST_NATIVE_CONTROLS === '1') { await nativeDownloadControls(); return; }
     await test('v1 migration preserves image bytes, signatures, metadata, order and naming', () => migration(1));
     await test('v2 migration preserves JPEG/PNG/WebP and converts non-JPEG images when exporting', () => migration(2));
     await test('failed migration rolls back the full upgrade and keeps the v2 database intact', failedMigration);
@@ -559,9 +675,10 @@ async function main() {
     await test('2000 pages restore with bounded caches, thumbnails and byte-correct streaming ZIP', longWorkspace);
   } catch (error) { report.errors.push(error.stack || String(error)); }
   finally {
-    for (const context of contexts) await context.close().catch(error => report.errors.push(error.message));
+    for (const context of contexts) await dispose(context).catch(error => report.errors.push(error.message));
     if (browser) await browser.close().catch(error => report.errors.push(error.message));
     await new Promise(resolve => server.close(resolve));
+    report.cleanup = {contextsRemaining: contexts.size, browserConnected: browser?.isConnected() || false, serverListening: server.listening};
     const filename = path.join(output, 'report.json'); fs.writeFileSync(filename, JSON.stringify(report, null, 2));
     console.log('REPORT', filename); console.log('HEAP_JS_BYTES', JSON.stringify(report.heap));
     if (report.errors.length || report.results.some(result => !result.pass)) process.exitCode = 1;
