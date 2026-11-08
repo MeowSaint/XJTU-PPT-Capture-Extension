@@ -182,3 +182,49 @@ SOURCE 提交：`b133057b4d6784a3a6f9c1662f13d106b82b1b0f`，标题 `feat: add r
 | 30 | bash-066bffd5b89b4c98 | 0 |
 
 使用现有隔离可执行文件 `/Users/jasondai/Library/Caches/ms-playwright/chromium-1248/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing`，没有下载/安装、访问真实学校或认证、日常浏览器/有声媒体或宿主 reload。浏览器套件串行，只用自己的 loopback 与 Playwright 临时上下文，没有 MCP 浏览器、独立 CDP 服务、watchdog 或额外守护任务需要移交。library finally 等待 task abort / releaseSource、context.close / browser.close / server.close（并 closeAllConnections）；improvements finally 关闭 browser/server；memory finally 关闭全部 context/browser/server，新 memory CDP 在自身 finally detach。失败命令也走这些 finally。全部测试自然退出并完成持久化断言；上下文销毁结束页面监听器、持久化请求、建议取消代次、图片/下载 URL、延迟清理计时器和 OPFS 会话租约。1000 页 ZIP 还实际验证 retention timer 释放文件；没有保留活跃 browser/context/server/job 供 DONE 后收尾。测试资产、数据库夹具与日志作为静态证据保留，不触碰日常资料或其他任务资源。
+
+## Fix Round 1/5 — I1 批量 JSON 原生消费者补证
+
+本节追加于原 184 行之后；原有前缀保持逐字节不变。依据控制器转交的独立审查 I1，本轮补齐批量课程 JSON 的原生文件消费检查，未另作产品修复或宣布 Task2 通过。原审查报告保持只读。
+
+- FIX_BASE：`b0daf3cee20c4a6c857905f46aaa403373df7ab3`。开始前实际核对 HEAD、`fix/long-session-reliability` 分支和干净的 tracked tree/index。
+- 本轮 SOURCE：`0d8124403ce139e85b3a1dd75a3be16f5cbc3d32`，标题 `test: verify native batch report JSON delivery`。只改 [tests/library.cjs:426](../../../tests/library.cjs#L426)，新增一个独立测试组，共 66 行；原断言和第二 JSON 的 Blob 诊断完整保留。本节在 SOURCE 之后另作报告提交，报告提交哈希由外部 handoff 记录，不写入自身。
+- 沿用已读 ponytail full 和 humanizer-zh 指引，自审本轮差异。没有产品代码、下载协议/名称/权限、版本、依赖、核心/M1、其他控制器材料或审查报告改动。没有委派或发起复审。
+
+### 实际消费链与断言
+
+新组名为 `learning native batch report file preserves batch scope, filtered mappings and public projection after reload`。使用原 library 套件的隔离 context 和 loopback：当前 active 课次属于课程 99，批量目录属于课程 42。先保存两节批量课次的完整 raw 核验证据和 learning 导出设置，等待持久化，再在同一 page/context 执行一次 `page.reload()`；用 `performance.timeOrigin` 变化确认是新 document，并核对恢复后的 active、不同的 current/batch courseKey、batchPage 和 learning view。图库切到 excluded 后当前课次可见页为 0，批量输出仍按其独立范围生成。
+
+随后执行真实 `locator('#batch-course-report').click()`，与 `page.waitForEvent('download')` 同时等待；保留原生产 downloadBlob/anchor 路径，不安装 Blob、anchor 或 writer hook。确认 suggested filename 为“课程完整性报告.json”、原生事件 URL 为本 loopback 的 blob URL，调用 `download.saveAs`，检查 `download.failure() === null`，再从保存文件 `fs.readFileSync` 和 `JSON.parse` 读取内容。没有手工构造 JSON 充当交付证据，也没有用状态文字或 Blob.text 代替文件。
+
+实际文件及元数据：
+
+- [保存的原生 JSON](../../../.test-output/learning-task-2-fix-round1/library-ZKJdNd/learning-native-batch-report.json)，2562 bytes；SHA-256 `b11cc0931c09268a9859738ea3527f004cdbe60d14cd0131b089c6ebbc37ee81`。
+- [事件、触发方式、作用域与 SHA 记录](../../../.test-output/learning-task-2-fix-round1/library-ZKJdNd/native-batch-report-evidence.json) 记录 `downloadEvent:true`、`failure:null`，以及无三类 hook、未重放或修复旧 burst。事件 URL 为 `blob:http://127.0.0.1:58205/e4b2d55b-0ff0-45c4-9c7a-97953b388f01`。
+- 实际解析结果断言课程 42 的两节 lesson，排除当前课程 99 的 ID 900；raw/exported/excluded 为 4/2/2。学习版 ID/时间/序号为 `613 → 1.25 → 1`、`612 → 2.25 → 2`，保存顺序与 fixture 输入顺序不同，避免只检查数量。
+- 有内容课次 saved/raw/exported/excluded 为 3/3/2/1，无内容课次为 1/1/0/1 且仍保留 no-content 行。`knowledgeComplete:true` 与尚未全物理到尾的 `complete:false` 分开；本次无历史 receipt，`lastExport:null`。
+- 顶层/lesson 的公开字段集合逐项检查；job 与 coverage source/track 必须为公开别名。合成签名 URL、源名、原始 source key、笔记、凭据、knowledgeReviewEvidence 及签名/token 值不得出现于实际文件。该 JSON 的 coverage 是 `source-2` / `track-3`，job 是 `job-1` / `job-4`。
+
+### 实际命令、输出与时期
+
+原始证据放在 [Round1 证据目录](../../../.test-output/learning-task-2-fix-round1/)；每条 runner 命令有独立 `.command`、`.stdout`、`.stderr`、十进制 `.exit`，以及 before/after SHA-256 和实际源文件/报告副本。没有覆盖旧轮次证据。本轮是修复缺失验收证据，未虚构 RED：I1 原先是缺少原生消费者证明，旧 10/13 是既有真实失败；本轮新增聚焦场景首次执行即通过，没有失败后重试或放松原生断言。
+
+```sh
+node .test-output/learning-task-2-fix-round1/run.cjs 02-consumer-syntax node --check tests/library.cjs
+PPT_TEST_FILTER='^learning native batch report file ' node .test-output/learning-task-2-fix-round1/run.cjs 03-native-batch-consumer node tests/library.cjs
+node .test-output/learning-task-2-fix-round1/run.cjs 04-source-audit node .test-output/learning-task-2-fix-round1/audit.cjs
+```
+
+以上实际退出均为 0；02 没有语法诊断。03 的实际 stdout 包含 `NATIVE_BATCH_REPORT_FILE …/library-ZKJdNd/learning-native-batch-report.json SHA256 b11cc0931c09268a9859738ea3527f004cdbe60d14cd0131b089c6ebbc37ee81`、该组 `PASS`、`1 focused library groups passed` 和 `ACTUAL_EXIT 0`。[results](../../../.test-output/learning-task-2-fix-round1/library-ZKJdNd/results.json) 为一个 passed、`errors:[]`、`blocked:[]`。01 基线、05 精确 stage、06 SOURCE commit、07 SOURCE provenance 也实际退出 0；完整 argv/stdout/stderr/exit 各自保留。08 最终范围审计也实际退出 0，核对了追加后的原始前缀、两文件范围、相同执行时期与原生文件 SHA。
+
+[范围与时期审计](../../../.test-output/learning-task-2-fix-round1/fix-source-audit.json) 实际执行了逆向删去新增 66 行后与 FIX_BASE 全部测试字节相等的断言，另保存 [完整 FIX_BASE..current 差异](../../../.test-output/learning-task-2-fix-round1/fix-base-to-current.diff)。FIX_BASE fixture SHA 是 `0e3e5d76d845d75ae6202f82ceaf30724c405580300763eb164425d9b0432128`，本轮实际执行且提交的 fixture SHA 是 `28f93352ce471a5ecd430c30d38015d0afb28dcb55477513f0f2846503420f84`；03 的 before/after 与当前一致。其余十个允许文件 SHA 与 01/FIX_BASE 完全相同，包括 [capture.js](../../../capture.js) `635aac8436ac18c9934502a721baae69fada49d1eb6d17c037f3db5edb8ae47c`。
+
+原报告前缀 184 行、26484 bytes，SHA `4be225885777b0c1c2fa93c41d24b3503e82bf5e2a11fe40b77aa9955a399af4`；审计比较追加后相同长度的前缀，而非仅核对行数。完整基线副本为 [original-report-prefix](../../../.test-output/learning-task-2-fix-round1/original-report-prefix.md)。
+
+本轮只执行新增消费者和必要语法/差异/来源审计，没有重跑 npm 全套、完整 library、improvements、memory、旧九入口或发布打包。现有 26 Node 346、28 improvements 28、29 memory 16 的执行依赖/产品时期未变，可按原证据采信；library 的准确范围是“旧完整 59 + 最终视觉 1 + 本轮新 native 1”，不是新完整 60。现有隔离浏览器/工具环境仍为 Node v26.13.0、Playwright 1.62.1、Chromium 156.0.8078.4、darwin arm64；没有安装或更换工具。
+
+### 限制与清理
+
+独立重载后的批量 JSON 入口已取得原生文件消费证据，供控制器据此判断 I1。旧 10 第二次连续同名 JSON 超时、旧 13 burst 后 raw 所选 PDF 超时继续单列为 ⚠，本轮没有重新运行该连续序列，不声称其交付稳定、根因已明或已修复，也不归因为自动下载策略、产品/测试环境、旧 L1，未构造 BASE 重放。既有第二 JSON Blob 诊断仅保留其内容/dispatch 层价值。OS 保存行为、真实课程/原录像、最低 Chrome114/Node20、语义正确性未取得新增认证；Task1 M1、Task3 不在本轮。
+
+本轮唯一 managed job `bash-f612e007390e4bb9` 已由 job_output 收取，实际 exit 0。其余命令为同步完成，无待收取作业。沿用 library 的 finally，等待 task abort/releaseSource、context.close、browser.close、server.close 与 closeAllConnections，然后进程自然退出；本组没有启动 CDP/watchdog/额外服务器或后台守护进程。context 销毁结束页面 listeners、下载 URL 和 60 秒清理 timer，文件保存和 settings 持久化已等待完成。没有残留浏览器/context/loopback/请求/持久化工作留待 DONE 后处理；静态合成资产和证据保留。没有 MCP/日常浏览器、真实网络/学校/认证、有声媒体、宿主/main/remote 操作。09 的普通报告 `git add` 实际退出 1，stderr 为 `The following paths are ignored by one of your .gitignore files: .superpowers`；[失败 stderr](../../../.test-output/learning-task-2-fix-round1/09-stage-report.stderr) 与 command/stdout/exit/前后副本完整保留。10 诊断实际退出 0，显示该报告仍为 tracked 且已暂存，并显示现有 exclude 的 `.superpowers/` 规则；没有据失败码假定索引未变化。随后仅对获授权的同一报告显式使用 `git add -f --`，不修改 ignore/config、不暂存其他文件，报告提交前再次核对暂存范围和 184 行前缀。本轮未出现失败的浏览器用例或删除原生断言。
