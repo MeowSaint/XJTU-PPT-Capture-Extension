@@ -80,6 +80,22 @@ async function fresh() {
   return {context, page};
 }
 async function dispose(context) { await context.close(); contexts.delete(context); }
+async function withWorkspaceCleanup(context, action) {
+  const owner = {}; let primary, primaryFailed = false;
+  try { return await action(owner); }
+  catch (error) { primary = error; primaryFailed = true; throw error; }
+  finally {
+    const failures = [];
+    for (const [phase, cleanup] of [['cdp.detach', () => owner.cdp?.detach()], ['context.dispose', () => dispose(context)]]) {
+      try { await cleanup(); } catch (error) { failures.push({phase, error}); }
+    }
+    if (failures.length) {
+      (report.cleanupErrors ||= []).push(...failures.map(({phase, error}) => ({phase, message: error.message, stack: error.stack,
+        primaryFailed, primaryStack: primaryFailed ? primary?.stack || String(primary) : undefined})));
+      if (!primaryFailed) throw failures[0].error;
+    }
+  }
+}
 async function test(name, action, page) {
   if (process.env.PPT_TEST_FILTER && !new RegExp(process.env.PPT_TEST_FILTER).test(name)) return;
   const start = Date.now();
@@ -215,6 +231,56 @@ async function nativeDownloadControls() {
       } finally { hook.disable(); await dispose(context); }
     });
   }
+}
+
+async function workspaceCleanupControls() {
+  const cases = [
+    {name: 'attached CDP preserves native producer failure', primary: true},
+    {name: 'already-detached CDP and disposal failures preserve primary', primary: true, detached: true, disposeFailure: true},
+    {name: 'successful body surfaces already-detached CDP failure', detached: true},
+    {name: 'successful body surfaces context disposal failure', disposeFailure: true}
+  ];
+  for (const entry of cases) await test('workspace cleanup control: ' + entry.name, async () => {
+    const {context, page} = await fresh(), attempts = {detach: 0, dispose: 0};
+    const primary = new Error('owned native producer failure'), primaryStack = primary.stack;
+    const disposal = new Error('injected disposal failure after real context closure');
+    const close = context.close.bind(context), diagnosticsStart = report.cleanupErrors?.length || 0;
+    let observed, detachFailure;
+    context.close = async (...args) => { attempts.dispose++; await close(...args); if (entry.disposeFailure) throw disposal; };
+    try {
+      try {
+        await withWorkspaceCleanup(context, async owner => {
+          owner.cdp = await context.newCDPSession(page);
+          if (entry.detached) await owner.cdp.detach();
+          const detach = owner.cdp.detach.bind(owner.cdp);
+          owner.cdp.detach = async () => {
+            attempts.detach++;
+            try { await detach(); } catch (error) { detachFailure = error; throw error; }
+          };
+          if (entry.primary) await observeNativeDownload(page, () => Promise.reject(primary), {downloadTimeout: 100, producerTimeout: 1000});
+          return 'successful body';
+        });
+      } catch (error) { observed = error; }
+      const diagnostics = (report.cleanupErrors || []).slice(diagnosticsStart);
+      const details = {name: entry.name, attempts: {...attempts}, pageClosed: page.isClosed(),
+        observed: observed?.message, primaryPreserved: observed === primary, primaryStackPreserved: observed?.stack === primaryStack,
+        cleanupFailurePreserved: observed === (detachFailure || disposal), diagnostics};
+      (report.workspaceCleanupControls ||= []).push(details);
+      assert.deepEqual(attempts, {detach: 1, dispose: 1}, 'both actual owner cleanup operations are attempted');
+      assert(page.isClosed(), 'real synthetic page is closed');
+      if (entry.primary) {
+        assert.equal(observed, primary, 'caller preserves exact primary Error identity');
+        assert.equal(observed.stack, primaryStack, 'caller preserves primary stack');
+      } else assert.equal(observed, detachFailure || disposal, 'successful body surfaces the original cleanup Error');
+      assert.equal(diagnostics.length, Number(Boolean(detachFailure)) + Number(Boolean(entry.disposeFailure)), 'every cleanup failure has a secondary diagnostic');
+      assert(diagnostics.every(item => item.primaryFailed === Boolean(entry.primary)));
+      if (entry.primary) assert(diagnostics.every(item => item.primaryStack === primaryStack));
+      return details;
+    } finally {
+      context.close = close;
+      if (contexts.has(context)) await dispose(context);
+    }
+  });
 }
 
 async function migration(version) {
@@ -526,8 +592,9 @@ async function workspace() {
 }
 
 async function longWorkspace() {
-  const {context, page} = await fresh(); let cdp;
-  try {
+  const {context, page} = await fresh();
+  return withWorkspaceCleanup(context, async owner => {
+    let cdp;
     const fixture = await page.evaluate(async () => {
       const fixture = await __memory.fixture(), db = await PPTPageStore.open(), sig = new Uint8ClampedArray(192 * 108 * 4).fill(23);
       for (let i = 0; i < 2000; i++) await PPTPageStore.add(db, {order: (i + 1) * 1024, w: 1280, h: 720, time: 1000 + i, sourceTime: i * 5,
@@ -537,7 +604,7 @@ async function longWorkspace() {
     await page.goto(origin + '/capture.html'); await page.waitForFunction(() => ready);
     await page.locator('#terms-agree').check(); await page.locator('#terms-accept').click(); await page.waitForFunction(() => studyAccepted && !busy());
     await settleThumbnails(page);
-    cdp = await context.newCDPSession(page); await cdp.send('Performance.enable');
+    owner.cdp = cdp = await context.newCDPSession(page); await cdp.send('Performance.enable');
     report.heap.metadata2000 = await heap(cdp);
     const restored = await page.evaluate(async () => ({pages: pages.length, cards: $('pages').children.length, assets: await __memory.count(db, 'assets'),
       metadataOnly: pages.every(row => !('data' in row) && !('sig' in row) && !Object.values(row).some(value => value instanceof Blob || ArrayBuffer.isView(value))),
@@ -598,7 +665,7 @@ async function longWorkspace() {
     assert.deepEqual(append, {pages: 2001, cards: 2001, added: 1, removed: 0, scrollPreserved: true, reused: true, selectionPreserved: true});
     report.evidence.push(filename);
     return {restored, cache, thumbnails, zip, reads, append, cleanup: true, syntheticImagesRepeat: true, measurement: 'sampled Chromium JS heap, not process RSS or a measured peak'};
-  } finally { try { await cdp?.detach(); } finally { await dispose(context); } }
+  });
 }
 
 async function learningMemory() {
@@ -665,7 +732,7 @@ async function main() {
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve)); origin = `http://127.0.0.1:${server.address().port}`;
   try {
     browser = await chromium.launch(browserOptions()); report.browser = browser.version();
-    if (process.env.PPT_TEST_NATIVE_CONTROLS === '1') { await nativeDownloadControls(); return; }
+    if (process.env.PPT_TEST_NATIVE_CONTROLS === '1') { await nativeDownloadControls(); await workspaceCleanupControls(); return; }
     await test('v1 migration preserves image bytes, signatures, metadata, order and naming', () => migration(1));
     await test('v2 migration preserves JPEG/PNG/WebP and converts non-JPEG images when exporting', () => migration(2));
     await test('failed migration rolls back the full upgrade and keeps the v2 database intact', failedMigration);
