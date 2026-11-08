@@ -80,14 +80,15 @@
     for (let row = top; row < bottom; row++) mask.fill(1, row * width + left, row * width + right);
     return mask;
   }
-  function frameDistance(a, b, mask = null) {
-    if (!a || !b || !a.length || a.length % 4 || a.length !== b.length || (mask && mask.length !== a.length / 4)) return {changed: 100, mean: 100};
-    let total = 0, changed = 0, biasR = 0, biasG = 0, biasB = 0, pixels = 0;
+  function comparisonMetrics(a, b, mask) {
+    if (!a || !b || !a.length || a.length % 4 || a.length !== b.length || (mask && mask.length !== a.length / 4)) return {changed: 100, mean: 100, local: true};
+    let total = 0, changed = 0, biasR = 0, biasG = 0, biasB = 0, pixels = 0, local = false;
+    const canonical = a.length === 192 * 108 * 4;
     for (let i = 0; i < a.length; i += 4) {
       if (mask?.[i / 4]) continue;
       pixels++; biasR += a[i] - b[i]; biasG += a[i + 1] - b[i + 1]; biasB += a[i + 2] - b[i + 2];
     }
-    if (!pixels) return {changed: 100, mean: 100};
+    if (!pixels) return {changed: 100, mean: 100, local: true};
     biasR = Math.abs(biasR / pixels) <= 8 ? biasR / pixels : 0;
     biasG = Math.abs(biasG / pixels) <= 8 ? biasG / pixels : 0;
     biasB = Math.abs(biasB / pixels) <= 8 ? biasB / pixels : 0;
@@ -95,13 +96,23 @@
       if (mask?.[i / 4]) continue;
       const dr = Math.abs(a[i] - b[i] - biasR), dg = Math.abs(a[i + 1] - b[i + 1] - biasG), db = Math.abs(a[i + 2] - b[i + 2] - biasB);
       total += dr + dg + db;
-      if (Math.max(dr, dg, db) >= 24) changed++;
+      const maximum = Math.max(dr, dg, db);
+      if (maximum >= 24) changed++;
+      // A single strong pixel can be a small glyph; this deliberately also retains noise.
+      if (canonical && maximum >= 48) local = true;
     }
-    return {changed: changed * 100 / pixels, mean: total * 100 / (pixels * 765)};
+    return {changed: changed * 100 / pixels, mean: total * 100 / (pixels * 765), local};
+  }
+  function frameDistance(a, b, mask = null) {
+    const {changed, mean} = comparisonMetrics(a, b, mask);
+    return {changed, mean};
+  }
+  function hasLocalChange(a, b, mask = null) {
+    return comparisonMetrics(a, b, mask).local;
   }
   function similar(a, b, threshold = 1.2, mask = null) {
-    const d = frameDistance(a, b, mask);
-    return d.changed < threshold && d.mean < Math.max(0.25, threshold / 2);
+    const d = comparisonMetrics(a, b, mask);
+    return !d.local && d.changed < threshold && d.mean < Math.max(0.25, threshold / 2);
   }
   function sampleTimes(duration, step, start = 0) {
     const end = Math.max(0, duration - Math.min(0.05, duration / 2));
@@ -139,7 +150,7 @@
     const error = Error(`${phase === 'seek' ? '跳转' : '加载'}${source}${position}：${detail}${audioOmitted ? '本次已忽略音轨，此处理不代表已确诊原文件的故障原因。' : ''}`);
     return Object.assign(error, {code, phase, nativeCode, time: Number.isFinite(time) ? time : null});
   }
-  const api = {mediaError, mediaInfo, extractUrls, ignoreMask, frameDistance, similar, sampleTimes, postLocalMessage, isLocalMessage};
+  const api = {mediaError, mediaInfo, extractUrls, ignoreMask, frameDistance, hasLocalChange, similar, sampleTimes, postLocalMessage, isLocalMessage};
   root.PPTCore = api;
   if (typeof module !== 'undefined') module.exports = api;
 })(globalThis);

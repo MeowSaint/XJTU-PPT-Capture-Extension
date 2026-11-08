@@ -23,6 +23,129 @@ async function test(name, run) { await run(); passed++; console.log('PASS ' + na
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
     const origin = `http://127.0.0.1:${server.address().port}`;
     browser = await chromium.launch(browserOptions());
+    await test('local detail Canvas/scanner/save pipeline and comparison provenance', async () => {
+      const local = await browser.newContext({viewport: {width: 1440, height: 1000}});
+      const errors = []; const localPage = await local.newPage(); localPage.on('pageerror', error => errors.push(error.message));
+      await local.route('**/*', route => {
+        if (route.request().url().startsWith(origin + '/')) return route.continue();
+        blocked.push(route.request().url()); return route.abort();
+      });
+      try {
+        await localPage.goto(origin + '/capture.html'); await localPage.waitForFunction(() => ready);
+        await localPage.locator('#terms-agree').check(); await localPage.locator('#terms-accept').click();
+        const result = await localPage.evaluate(async () => {
+          // Synthetic seek events drive the real scanner; frame still crops and resizes actual Canvas pixels.
+          const canvas = document.createElement('canvas'); canvas.width = 710; canvas.height = 378;
+          const ctx = canvas.getContext('2d'), drawImage = CanvasRenderingContext2D.prototype.drawImage;
+          let paint = () => {}, clock = 0, duration = 6;
+          const paintStage = time => {
+            const stage = Math.floor(time); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, 710, 378);
+            ctx.fillStyle = '#000'; ctx.font = '28px serif'; ctx.fillText('E = mc     x     Data:', 50, 100);
+            if (stage >= 1) { ctx.font = '12px serif'; ctx.fillText('2', 161, 80); }
+            if (stage >= 2) { ctx.font = 'bold 14px serif'; ctx.fillText('i', 183, 110); }
+            if (stage >= 3) { ctx.font = '12px serif'; ctx.fillText('1', 331, 100); }
+            // Exact 48/8 signature-pixel controls are tested separately below.
+            if (stage >= 4) { ctx.font = '22px serif'; ctx.fillText('+ C', 360, 100); }
+            if (stage >= 5) { ctx.fillStyle = '#d00000'; ctx.fillRect(400, 140, 20, 8); }
+          };
+          Object.defineProperties(video, {
+            readyState: {configurable: true, get: () => 2}, videoWidth: {configurable: true, get: () => canvas.width}, videoHeight: {configurable: true, get: () => canvas.height},
+            duration: {configurable: true, get: () => duration}, seeking: {configurable: true, get: () => false},
+            currentTime: {configurable: true, get: () => clock, set: time => { clock = time; paint(time); queueMicrotask(() => video.dispatchEvent(new Event('seeked'))); }}
+          });
+          CanvasRenderingContext2D.prototype.drawImage = function(source, ...args) { return drawImage.call(this, source === video ? canvas : source, ...args); };
+          const reset = async (name, dedupe = true) => {
+            activeLesson = {id: 'local-' + name, course: {}, source: {kind: 'file', sourceKey: 'synthetic-local', sourceName: 'synthetic-local'}, crop: {x: 0, y: 0, w: 1, h: 1}, suspects: [], created: Date.now()};
+            lessons.push(activeLesson); applyLesson(); sourceReady = true; loadedIdentity = {...activeLesson.source}; sourceName = 'synthetic-local';
+            $('mode').value = '0.5'; $('diff').value = '1.2'; $('dedupe').checked = dedupe; ignoreRect = null;
+            await persistLesson();
+          };
+          const imageBytes = async id => {
+            const asset = await PPTPageStore.asset(db, id); return {sig: [...asset.sig], image: [...new Uint8Array(await asset.image.arrayBuffer())]};
+          };
+          try {
+            await reset('knowledge'); paint = paintStage; paint(0);
+            const distances = [], expected = [];
+            for (let stage = 0; stage < 6; stage++) {
+              paint(stage); const f = frame(stage + .25), encoded = await PPTPageStore.encode(f.canvas);
+              expected.push({sig: f.sig, image: [...new Uint8Array(await encoded.image.arrayBuffer())]});
+              if (stage) distances.push(PPTCore.frameDistance(expected[stage - 1].sig, f.sig));
+            }
+            paint(0); const scan = await fastScan(), saved = [];
+            for (let i = 0; i < pages.length; i++) {
+              const p = pages[i], stage = Math.floor(p.sourceTime), asset = await imageBytes(p.id), previous = expected[Math.max(0, stage - 1)].sig;
+              const changedPixels = [];
+              for (let at = 0; at < asset.sig.length; at += 4) if (Math.max(...[0, 1, 2].map(c => Math.abs(asset.sig[at + c] - previous[at + c]))) >= 48) changedPixels.push({pixel: at / 4, before: [...previous.slice(at, at + 3)], after: asset.sig.slice(at, at + 3)});
+              saved.push({id: p.id, sourceTime: p.sourceTime, sourceKey: p.sourceKey, imageEqual: JSON.stringify(asset.image) === JSON.stringify(expected[stage].image),
+                sigEqual: asset.sig.every((n, j) => n === expected[stage].sig[j]), changedPixels, signature: asset.sig, image: asset.image});
+            }
+            const knowledgeVersion = activeLesson.task.comparisonVersion;
+            const knowledgePages = pages.slice(); pages = knowledgePages.slice(0, 2); await cleanSimilar(); const detailCandidate = !!similarReview?.pair; closeSimilar(); pages = knowledgePages;
+            const controls = [];
+            canvas.width = 192; canvas.height = 108; duration = 3;
+            for (const [name, count, dedupe, masked] of [['formula', 48, true, false], ['annotation', 8, true, false], ['single-on', 1, true, false], ['single-off', 1, false, false], ['ignored', 1, true, true], ['brightness', 0, true, false]]) {
+              await reset(name, dedupe); if (masked) ignoreRect = {x: 0, y: 0, w: .1, h: .1};
+              paint = time => {
+                ctx.fillStyle = name === 'brightness' && time >= 1 && time < 2 ? '#f7f7f7' : '#fff'; ctx.fillRect(0, 0, 192, 108);
+                if (time >= 1 && time < 2) { ctx.fillStyle = name === 'annotation' ? '#ff0000' : '#000'; ctx.fillRect(0, 0, count, count ? 1 : 0); }
+              };
+              paint(0); const outcome = await fastScan();
+              if (!outcome) throw Error(name + ': ' + $('status').textContent);
+              const assets = []; for (const p of pages) { const asset = await imageBytes(p.id); assets.push({id: p.id, sourceTime: p.sourceTime, pixel: asset.sig.slice(0, 4)}); }
+              controls.push({name, saved: outcome.saved, unstable: outcome.unstable, assets});
+            }
+            // Real adjacent-review candidates still work for identical pages; choosing both preserves IDs.
+            await reset('manual'); paint = () => { ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, 192, 108); }; paint();
+            await save(frame(0)); await save(frame(1)); const manualIds = pages.map(p => p.id);
+            await cleanSimilar(); const duplicateCandidate = similarReview?.pair?.map(p => p.id); await chooseSimilar('both'); await $('similar-confirm').onclick();
+            const manualAfter = pages.map(p => p.id);
+            // Resume at an actual safe checkpoint, using each provenance class without changing settings.
+            const resumes = [];
+            for (const version of [null, 'old-v0', 'local-v1', 'mixed']) {
+              await reset('resume-' + version); duration = 3;
+              activeLesson.task = {id: 'checkpoint-' + version, state: 'paused', checkpoint: 1, baselineTime: .25, duration, settings: scanSettings(), crop: {...crop}, ignoreRect: null,
+                ...(version === null ? {} : {comparisonVersion: version})};
+              await save(frame(.25)); const retained = pages[0], before = await imageBytes(retained.id), seeks = [];
+              paint = time => { seeks.push(time); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, 192, 108); };
+              const settings = JSON.stringify(scanSettings()), context = createDedupeContext(); cacheSignature(context, retained.id, new Uint8Array(before.sig));
+              const eligible = canResume(); await fastScan(); const after = await imageBytes(retained.id);
+              const stored = await new Promise((resolve, reject) => { const r = db.transaction('settings').objectStore('settings').get('lesson:' + activeLesson.id); r.onsuccess = () => resolve(r.result.task); r.onerror = () => reject(r.error); });
+              resumes.push({version, eligible, id: activeLesson.task.id, comparisonVersion: activeLesson.task.comparisonVersion, storedVersion: stored.comparisonVersion,
+                checkpoint: activeLesson.task.checkpoint, seeks, settingsEqual: settings === JSON.stringify(scanSettings()), retainedId: pages[0].id === retained.id,
+                imageEqual: JSON.stringify(before) === JSON.stringify(after), count: pages.length});
+            }
+            return {saved, scan, distances, knowledgeVersion, detailCandidate, controls, manualIds, duplicateCandidate, manualAfter, resumes};
+          } finally { closeSimilar(); releaseDedupeContext(); CanvasRenderingContext2D.prototype.drawImage = drawImage; sourceReady = false; }
+        });
+        const evidenceRoot = path.join(root, '.test-output', 'learning-task-1'); fs.mkdirSync(evidenceRoot, {recursive: true});
+        const output = fs.mkdtempSync(path.join(evidenceRoot, 'canvas-'));
+        result.saved.forEach((p, i) => {
+          fs.writeFileSync(path.join(output, `knowledge-${i}-${p.id}.jpg`), Buffer.from(p.image));
+          fs.writeFileSync(path.join(output, `knowledge-${i}-${p.id}.rgba`), Buffer.from(p.signature)); delete p.image; delete p.signature;
+        });
+        fs.writeFileSync(path.join(output, 'evidence.json'), JSON.stringify(result, null, 2) + '\n'); console.log('Local detail evidence: ' + output);
+        assert.deepEqual(result.saved.map(p => p.sourceTime), [.25, 1.25, 2.25, 3.25, 4.25, 5.25]);
+        assert.equal(new Set(result.saved.map(p => p.id)).size, 6);
+        assert(result.saved.every(p => p.imageEqual && p.sigEqual && p.sourceKey === 'synthetic-local'));
+        assert(result.distances.every(d => d.changed < 1.2 && d.mean < .6), 'all increments pass the old global rule');
+        assert(result.saved.slice(1, 4).every(p => p.changedPixels.length >= 1 && p.changedPixels.length < 8), 'superscript/subscript/digit need fewer than eight pixels');
+        assert.equal(result.knowledgeVersion, 'local-v1'); assert.equal(result.detailCandidate, false);
+        for (const c of result.controls) {
+          const ignored = ['ignored', 'brightness'].includes(c.name), returning = c.name === 'single-off';
+          assert.deepEqual(c.assets.map(p => p.sourceTime), ignored ? [.25] : returning ? [.25, 1.25, 2.25] : [.25, 1.25], c.name);
+          assert.equal(c.unstable, 0); assert.equal(c.assets[0].pixel[0], 255);
+          if (!ignored) assert.equal(c.assets[1].pixel[c.name === 'annotation' ? 1 : 0], 0, c.name);
+        }
+        assert.deepEqual(result.duplicateCandidate, result.manualIds); assert.deepEqual(result.manualAfter, result.manualIds);
+        for (const r of result.resumes) {
+          assert(r.eligible && r.settingsEqual && r.retainedId && r.imageEqual); assert.equal(r.count, 1);
+          assert.equal(r.id, 'checkpoint-' + r.version); assert.equal(r.checkpoint, 2.95); assert.deepEqual(r.seeks.slice(0, 2), [.25, 1]);
+          assert.equal(r.comparisonVersion, r.version === 'local-v1' ? 'local-v1' : 'mixed'); assert.equal(r.storedVersion, r.comparisonVersion);
+        }
+        assert.deepEqual(errors, []);
+      } finally { await local.close(); }
+    });
+    if (process.env.PPT_TEST_LOCAL_DETAIL_ONLY) { assert.deepEqual(blocked, []); return; }
     const context = await browser.newContext({viewport: {width: 1440, height: 1000}});
     await context.route('**/*', route => {
       if (route.request().url().startsWith(origin + '/')) return route.continue();

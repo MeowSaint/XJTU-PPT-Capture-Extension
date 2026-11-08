@@ -6,6 +6,25 @@ const vm = require('node:vm');
 const Scanner = vm.runInNewContext(fs.readFileSync(require.resolve('../scanner.js'), 'utf8') + '\nPPTScanner', {
   PPTCore: {...require('../media.js'), similar: (a, b) => a === b},
 });
+test('real comparator retains one-pixel A-B-A changes with dedupe, stable and ignore controls', async () => {
+  const core = require('../media.js');
+  const RealScanner = vm.runInNewContext(fs.readFileSync(require.resolve('../scanner.js'), 'utf8') + '\nPPTScanner', {PPTCore: core});
+  const a = new Uint8ClampedArray(82944).fill(255), b = a.slice(); b[400] = b[401] = b[402] = 0;
+  for (const dedupe of [false, true]) for (const masked of [false, true]) {
+    const saved = [], mask = new Uint8Array(20736); if (masked) mask[100] = 1;
+    const scanner = new RealScanner({duration: 3}, null);
+    scanner.seek = async time => ({sig: time >= 1 && time < 2 ? b : a, sourceTime: time});
+    const result = await scanner.scan(options({step: .5, dedupe, compare: (x, y, t) => core.similar(x, y, t, mask), save: async frame => saved.push(frame)}));
+    assert.deepEqual(saved.map(f => f.sourceTime), masked ? [.25] : dedupe ? [.25, 1.25] : [.25, 1.25, 2.25]);
+    assert.deepEqual(saved.map(f => f.sig[400]), masked ? [255] : dedupe ? [255, 0] : [255, 0, 255]);
+    assert.equal(result.unstable, 0);
+  }
+  const scanner = new RealScanner({duration: 1}, null), saved = [], suspects = [];
+  scanner.seek = async time => ({sig: time === 0 ? a : b, sourceTime: time});
+  const result = await scanner.scan(options({step: .5, save: async frame => saved.push(frame.sourceTime), suspect: async item => suspects.push(item.time)}));
+  assert.equal(result.unstable, 1); assert.deepEqual(suspects, [0]); assert.deepEqual(saved, [.75]);
+});
+
 test('completedTo is the last checkpointed safe sample and waits for its commit', async () => {
   const {scanner} = rangeFixture(4), entered = gate(), release = gate();
   let returned = false;

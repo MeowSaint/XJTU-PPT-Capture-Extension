@@ -88,10 +88,57 @@ test('message bridge handles inherited and opaque origins, rejecting other windo
   assert.equal(core.isLocalMessage({source: {}, origin: 'null'}, frame), false);
   assert.equal(core.isLocalMessage({source: frame, origin: 'https://other.example'}, frame), false);
 });
-test('small but substantive text changes beat compression and cursor noise', () => {
+test('single strong pixels, formula and annotation changes defeat the old global thresholds', () => {
+  const a = new Uint8ClampedArray(82944).fill(255);
+  for (const [label, count, channels] of [['superscript', 2, 3], ['subscript', 1, 3], ['single digit', 1, 3], ['formula', 48, 3], ['annotation', 8, 1]]) {
+    const b = a.slice();
+    for (let p = 0; p < count; p++) for (let c = 0; c < channels; c++) b[p * 4 + c] = 0;
+    const d = core.frameDistance(a, b);
+    assert(d.changed < 1.2 && d.mean < .6, label + ' passes the old global rule');
+    assert.equal(core.similar(a, b), false, label);
+    assert.equal(core.hasLocalChange(a, b), true, label);
+  }
+});
+test('local protection uses exact floating bias, RGB maximum, edges and per-pixel masks', () => {
+  const a = new Uint8ClampedArray(82944).fill(128), mask = new Uint8Array(192 * 108);
+  for (const p of [0, 191, 192 * 107, 192 * 108 - 1, 10001]) for (const channel of [0, 1, 2]) {
+    for (const delta of [47, 48]) {
+      const b = a.slice(); b[p * 4 + channel] += delta;
+      // Opposite differences below 48 cancel the exact per-channel mean.
+      b[((p + 1) % mask.length) * 4 + channel] -= 24;
+      b[((p + 2) % mask.length) * 4 + channel] -= delta - 24;
+      assert.equal(core.hasLocalChange(a, b), delta === 48, `${p}/${channel}/${delta}`);
+      assert.equal(core.similar(a, b), delta === 47);
+    }
+    const b = a.slice(); b[p * 4 + channel] += 48;
+    assert.equal(core.hasLocalChange(a, b), false, 'raw 48 falls below 48 after fractional bias');
+    b[p * 4 + channel] = 255; mask.fill(0); mask[p] = 1;
+    assert.equal(core.similar(a, b, 1.2, mask), true, 'fully masked single pixel');
+    b[((p + 1) % mask.length) * 4 + channel] = 255;
+    assert.equal(core.similar(a, b, 1.2, mask), false, 'partially masked change');
+  }
+  for (const delta of [-8, 0, 8]) {
+    const b = a.map((value, index) => index % 4 === 3 ? value : value + delta);
+    assert.equal(core.hasLocalChange(a, b), false); assert.equal(core.similar(a, b), true);
+  }
+  const uncorrected = a.map((value, index) => index % 4 === 3 ? value : value + 9);
+  assert.equal(core.frameDistance(a, uncorrected).changed, 0); assert.equal(core.hasLocalChange(a, uncorrected), false);
+  assert.equal(core.similar(a, uncorrected), false, 'the old mean threshold still applies above the brightness tolerance');
+  const weak = a.map((value, index) => index % 8 === 0 ? value + 30 : index % 8 === 4 ? value - 30 : value);
+  assert.equal(core.hasLocalChange(a, weak), false); assert.equal(core.similar(a, weak), false, 'global thresholds still apply');
+  const alpha = a.slice(); for (let i = 3; i < alpha.length; i += 4) alpha[i] = 0;
+  assert.equal(core.similar(a, alpha), true, 'alpha does not affect RGB comparison');
+  for (const [x, y, m] of [[null, a], [a, a.slice(4)], [a, a, new Uint8Array(1)], [a, a, new Uint8Array(20736).fill(1)]]) {
+    assert.equal(core.similar(x, y, 1.2, m), false); assert.equal(core.hasLocalChange(x, y, m), true);
+  }
+  const legacyA = new Uint8Array(1000 * 4), legacyB = legacyA.slice(); legacyB[0] = 255;
+  assert.equal(core.similar(legacyA, legacyB), true, 'noncanonical lengths retain global-only logic');
+  assert.equal(core.hasLocalChange(legacyA, legacyB), false);
+});
+test('small but substantive text changes are retained alongside brightness controls', () => {
   const pixels = 192 * 108, a = new Uint8ClampedArray(pixels * 4).fill(255), b = a.slice();
   for (let i = 0; i < 8; i++) b[i * 4] = 0;
-  assert.equal(core.similar(a, b), true);
+  assert.equal(core.similar(a, b), false);
   b.set(a); for (let i = 0; i < b.length; i += 4) b[i] = b[i + 1] = b[i + 2] = 249;
   assert.equal(core.similar(a, b), true);
   for (let i = 0; i < 400; i++) b[i * 4] = b[i * 4 + 1] = b[i * 4 + 2] = 0;

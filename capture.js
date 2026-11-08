@@ -1533,7 +1533,8 @@ async function fastScan({restart = false, range = null} = {}) {
   if (!range) {
     const coverage = resume && activeLesson.task.coverage ? structuredClone(activeLesson.task.coverage)
       : {version: 1, sourceKey: PPTLibrary.key(activeLesson.source), trackKey: PPTBatch.trackKey(activeLesson.source), duration: video.duration, ranges: [], reachedEnd: false};
-    activeLesson.task = {id: scanId, state: 'running', checkpoint: start, baselineTime, duration: video.duration, settings, crop: {...crop}, ignoreRect: ignoreRect && {...ignoreRect}, coverage};
+    const comparisonVersion = resume && activeLesson.task.comparisonVersion !== 'local-v1' ? 'mixed' : 'local-v1';
+    activeLesson.task = {id: scanId, state: 'running', checkpoint: start, baselineTime, duration: video.duration, settings, crop: {...crop}, ignoreRect: ignoreRect && {...ignoreRect}, coverage, comparisonVersion};
   }
   let coveredTo = start;
   const context = createDedupeContext(controller.signal);
