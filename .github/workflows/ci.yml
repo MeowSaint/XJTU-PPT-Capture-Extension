@@ -57,3 +57,4 @@ jobs:
       - run: npm run test:integration
       - run: npm run test:memory
       - run: npm run test:library
+      - run: npm run test:improvements

@@ -8,7 +8,7 @@ const {PDFDocument, PDFName} = dependency('pdf-lib');
 const root = path.resolve(__dirname, '..');
 let browser, server, page, passed = 0;
 const blocked = [];
-async function test(name, run) { await run(); passed++; console.log('PASS ' + name); }
+async function test(name, run) { if (process.env.PPT_TEST_FILTER && !new RegExp(process.env.PPT_TEST_FILTER).test(name)) return; await run(); passed++; console.log('PASS ' + name); }
 (async () => {
   try {
     server = http.createServer((req, res) => {
@@ -23,6 +23,237 @@ async function test(name, run) { await run(); passed++; console.log('PASS ' + na
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
     const origin = `http://127.0.0.1:${server.address().port}`;
     browser = await chromium.launch(browserOptions());
+    await test('learning neutral suggestions preserve local details and require separate confirmation', async () => {
+      const local = await browser.newContext({viewport: {width: 1440, height: 900}, reducedMotion: 'reduce'}), p = await local.newPage();
+      await local.route('**/*', route => route.request().url().startsWith(origin + '/') ? route.continue() : route.abort());
+      try {
+        await p.goto(origin + '/capture.html'); await p.waitForFunction(() => ready); await p.locator('#terms-agree').check(); await p.locator('#terms-accept').click();
+        const result = await p.evaluate(async () => {
+          activeLesson = {id: 'suggestions', source: {sourceKey: 'synthetic', sourceName: 'synthetic'}, course: {}, crop: {x: 0, y: 0, w: 1, h: 1}, suspects: []}; lessons = [activeLesson]; pages = []; allPages = [];
+          const canvas = document.createElement('canvas'); canvas.width = 192; canvas.height = 108;
+          const ctx = canvas.getContext('2d'); ctx.fillStyle = '#808080'; ctx.fillRect(0, 0, 192, 108); const asset = await PPTPageStore.encode(canvas);
+          const plain = ctx.getImageData(0, 0, 192, 108).data, detail = plain.slice(); detail[40] += 64;
+          for (let i = 0; i < 41; i++) { const page = {lessonId: activeLesson.id, order: i * 1024, w: 192, h: 108, sourceKey: 'synthetic', sourceName: 'synthetic', sourceTime: i < 8 ? i : 100 + i * 30, signatureCrop: {...activeLesson.crop}, learningExcluded: false}; page.id = await PPTPageStore.add(db, page, {...asset, sig: i === 2 ? detail : plain}); pages.push(page); }
+          syncAllPages(); render(); controls(); await persistLesson();
+          const reads = [], releases = [], get = PPTPageStore.assets;
+          PPTPageStore.assets = async (db, ids) => { reads.push(ids.length); const values = await get(db, ids); return new Proxy(values, {set(target, key, value) { if (value === null) releases.push(target[key]?.id); return Reflect.set(target, key, value); }}); };
+          try { await $('learning-suggest').onclick(); } finally { PPTPageStore.assets = get; }
+          const rows = [...$('learning-suggestions').children].map(row => ({type: row.dataset.type, ids: [...row.querySelectorAll('input')].map(input => Number(input.value)), text: row.textContent}));
+          const cut = plain.slice(), pixels = cut.length / 4;
+          for (let i = 0; i < Math.floor(pixels * .05); i++) cut.fill(200, i * 4, i * 4 + 3);
+          const at95 = lowChangeSignature(cut), mask = new Uint8Array(pixels); mask.fill(1, 0, Math.ceil(pixels * .05));
+          cut.fill(200, Math.floor(pixels * .05) * 4, Math.floor(pixels * .05) * 4 + 3);
+          return {rows, ids: pages.map(p => p.id), reads, releases, at95, below95: lowChangeSignature(cut), ignored: lowChangeSignature(cut, mask), flags: pages.map(p => p.learningExcluded), review: activeLesson.knowledgeReview || null};
+        });
+        assert(result.reads.every(n => n <= 32)); assert.equal(result.releases.length, 41); assert.equal(result.at95, true); assert.equal(result.below95, false); assert.equal(result.ignored, true);
+        assert.deepEqual([...new Set(result.rows.map(row => row.type))].sort(), ['adjacent', 'dense', 'low-change']);
+        assert(result.rows.some(row => row.type === 'adjacent' && row.ids.join() === result.ids.slice(0, 2).join()));
+        assert(!result.rows.some(row => row.type === 'adjacent' && row.ids.includes(result.ids[2])), 'single local addition remains a distinct page');
+        assert.deepEqual(result.rows.filter(row => row.type === 'dense').map(row => row.ids[0]), result.ids.slice(0, 8));
+        assert(result.flags.every(flag => flag === false)); assert.equal(result.review, null);
+        assert(!result.rows.some(row => /桌面|公式无效|无知识/.test(row.text)));
+        await p.getByRole('button', {name: '对照两页', exact: true}).first().click(); await p.waitForFunction(() => !$('similar-pair').hidden); await p.locator('#similar-cancel').click();
+        await p.locator('#learning-suggestions input:not(:disabled)').first().check(); await p.locator('#learning-cancel').click();
+        await p.locator('#learning-suggest').click(); await p.waitForFunction(() => $('learning-status').textContent.includes('条线索'));
+        assert.equal(await p.locator('#learning-suggestions input:checked').count(), 0); assert.equal(await p.locator('#learning-confirm').isDisabled(), true);
+        assert.equal(await p.evaluate(() => pages.some(page => page.learningExcluded)), false);
+        await p.locator('#learning-suggestions input:not(:disabled)').first().check(); await p.locator('#learning-confirm').click(); await p.waitForFunction(() => !busy());
+        assert.deepEqual(await p.evaluate(() => pages.filter(page => page.learningExcluded).map(page => page.id)), [result.ids[0]]);
+        await p.locator('#undo').click(); await p.waitForFunction(() => !busy()); assert.equal(await p.evaluate(() => pages.some(page => page.learningExcluded)), false);
+        await p.evaluate(async () => { await setLearningExcluded([pages[0].id], true); $('learning-view').value = 'kept'; $('learning-view').onchange(); });
+        await p.locator('#learning-suggest').click(); await p.waitForFunction(() => $('learning-status').textContent.includes('条线索'));
+        await p.locator(`.learning-suggestion[data-type="low-change"]:has(input[value="${result.ids[0]}"]) button`).click();
+        assert.equal(await p.locator('#lightbox').isVisible(), true, 'suggestions can preview an original page hidden by the gallery view');
+        await p.waitForFunction(() => $('lightbox-img').complete && $('lightbox-img').naturalWidth > 0);
+        await p.locator('#lightbox-close').click(); await p.locator('#learning-cancel').click(); await p.locator('#undo').click(); await p.waitForFunction(() => !busy());
+        fs.mkdirSync(process.env.PPT_TEST_OUTPUT || path.join(root, '.test-output', 'learning-task-2'), {recursive: true});
+        fs.writeFileSync(path.join(process.env.PPT_TEST_OUTPUT || path.join(root, '.test-output', 'learning-task-2'), 'suggestions.json'), JSON.stringify(result, null, 2));
+      } finally { await local.close(); }
+    });
+    await test('local detail Canvas/scanner/save pipeline and comparison provenance', async () => {
+      const local = await browser.newContext({viewport: {width: 1440, height: 1000}});
+      const errors = []; const localPage = await local.newPage(); localPage.on('pageerror', error => errors.push(error.message));
+      await local.route('**/*', route => {
+        if (route.request().url().startsWith(origin + '/')) return route.continue();
+        blocked.push(route.request().url()); return route.abort();
+      });
+      try {
+        await localPage.goto(origin + '/capture.html'); await localPage.waitForFunction(() => ready);
+        await localPage.locator('#terms-agree').check(); await localPage.locator('#terms-accept').click();
+        const evidenceRoot = process.env.PPT_TEST_OUTPUT || path.join(root, '.test-output', 'learning-task-1'); fs.mkdirSync(evidenceRoot, {recursive: true});
+        const output = fs.mkdtempSync(path.join(evidenceRoot, 'canvas-'));
+        await localPage.exposeFunction('recordLocalDetailInput', packet => {
+          packet.frames.forEach((f, i) => {
+            fs.writeFileSync(path.join(output, `input-${i}.rgba`), Buffer.from(f.sig));
+            fs.writeFileSync(path.join(output, `input-${i}.jpg`), Buffer.from(f.image));
+            fs.writeFileSync(path.join(output, `input-${i}.png`), Buffer.from(f.png.split(',')[1], 'base64'));
+          });
+          delete packet.frames;
+          fs.writeFileSync(path.join(output, 'input.json'), JSON.stringify(packet, null, 2) + '\n');
+          console.log('Local detail input: ' + JSON.stringify(packet));
+          console.log('Local detail evidence: ' + output);
+        });
+        await localPage.exposeFunction('recordLocalDetailCleanup', state => {
+          fs.writeFileSync(path.join(output, 'cleanup.json'), JSON.stringify(state, null, 2) + '\n');
+          console.log('Local detail cleanup: ' + JSON.stringify(state));
+          assert(Object.values(state).every(Boolean), 'local detail resources restore even on input failure');
+        });
+        const result = await localPage.evaluate(async () => {
+          // Synthetic seek events drive the real scanner; frame still crops and resizes actual Canvas pixels.
+          const canvas = document.createElement('canvas'); canvas.width = 710; canvas.height = 378;
+          const ctx = canvas.getContext('2d'), drawImage = CanvasRenderingContext2D.prototype.drawImage;
+          let paint = () => {}, clock = 0, duration = 6;
+          // Signature-cell geometry keeps these tiny glyphs observable without system-font rasterization.
+          const glyph = (rows, x, baseline) => {
+            const sx = canvas.width / 192, sy = canvas.height / 108;
+            const left = Math.round(x / sx), top = Math.round(baseline / sy) - rows.length;
+            rows.forEach((row, y) => [...row].forEach((ink, x) => { if (ink === '1') ctx.fillRect((left + x) * sx, (top + y) * sy, sx, sy); }));
+          };
+          const paintStage = time => {
+            const stage = Math.floor(time); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, 710, 378);
+            ctx.fillStyle = '#000'; ctx.font = '28px serif'; ctx.fillText('E = mc     x     Data:', 50, 100);
+            if (stage >= 1) glyph(['011', '010', '110'], 161, 80);
+            if (stage >= 2) glyph(['1', '0', '1'], 183, 110);
+            if (stage >= 3) glyph(['010', '110', '111'], 331, 100);
+            // Exact 48/8 signature-pixel controls are tested separately below.
+            if (stage >= 4) { ctx.font = '22px serif'; ctx.fillText('+ C', 360, 100); }
+            if (stage >= 5) { ctx.fillStyle = '#d00000'; ctx.fillRect(400, 140, 20, 8); }
+          };
+          const properties = ['readyState', 'videoWidth', 'videoHeight', 'duration', 'seeking', 'currentTime', 'requestVideoFrameCallback', 'cancelVideoFrameCallback'];
+          const descriptors = properties.map(name => Object.getOwnPropertyDescriptor(video, name)), callbacks = new Map();
+          let callbackId = 0, render, seeking = false, presentedFrames = 0;
+          Object.defineProperties(video, {
+            readyState: {configurable: true, get: () => 2}, videoWidth: {configurable: true, get: () => canvas.width}, videoHeight: {configurable: true, get: () => canvas.height},
+            duration: {configurable: true, get: () => duration}, seeking: {configurable: true, get: () => seeking},
+            requestVideoFrameCallback: {configurable: true, value: callback => { const id = ++callbackId; callbacks.set(id, callback); return id; }},
+            cancelVideoFrameCallback: {configurable: true, value: id => callbacks.delete(id)},
+            currentTime: {configurable: true, get: () => clock, set: time => {
+              clock = time; seeking = true;
+              render = requestAnimationFrame(() => {
+                render = undefined; paint(time); seeking = false; presentedFrames++;
+                const metadata = {presentationTime: performance.now(), mediaTime: time, presentedFrames, width: canvas.width, height: canvas.height};
+                video.dispatchEvent(new Event('seeked'));
+                const pending = [...callbacks.values()]; callbacks.clear();
+                for (const callback of pending) callback(performance.now(), metadata);
+              });
+            }}
+          });
+          CanvasRenderingContext2D.prototype.drawImage = function(source, ...args) { return drawImage.call(this, source === video ? canvas : source, ...args); };
+          const reset = async (name, dedupe = true) => {
+            activeLesson = {id: 'local-' + name, course: {}, source: {kind: 'file', sourceKey: 'synthetic-local', sourceName: 'synthetic-local'}, crop: {x: 0, y: 0, w: 1, h: 1}, suspects: [], created: Date.now()};
+            lessons.push(activeLesson); applyLesson(); sourceReady = true; loadedIdentity = {...activeLesson.source}; sourceName = 'synthetic-local';
+            $('mode').value = '0.5'; $('diff').value = '1.2'; $('dedupe').checked = dedupe; ignoreRect = null;
+            await persistLesson();
+          };
+          const imageBytes = async id => {
+            const asset = await PPTPageStore.asset(db, id); return {sig: [...asset.sig], image: [...new Uint8Array(await asset.image.arrayBuffer())]};
+          };
+          try {
+            await reset('knowledge'); paint = paintStage; paint(0);
+            const distances = [], expected = [], inputFrames = [], preconditions = [];
+            for (let stage = 0; stage < 6; stage++) {
+              paint(stage); const f = frame(stage + .25), encoded = await PPTPageStore.encode(f.canvas);
+              expected.push({sig: f.sig, image: [...new Uint8Array(await encoded.image.arrayBuffer())]});
+              inputFrames.push({sig: [...f.sig], image: expected[stage].image, png: f.canvas.toDataURL()});
+              if (stage) distances.push(PPTCore.frameDistance(expected[stage - 1].sig, f.sig));
+              if (stage >= 1 && stage <= 3) {
+                const previous = expected[stage - 1].sig, pixels = f.sig.length / 4, bias = [0, 0, 0], raw = [], strong = [];
+                for (let at = 0; at < f.sig.length; at += 4) for (let c = 0; c < 3; c++) bias[c] += previous[at + c] - f.sig[at + c];
+                for (let c = 0; c < 3; c++) bias[c] = Math.abs(bias[c] / pixels) <= 8 ? bias[c] / pixels : 0;
+                for (let at = 0; at < f.sig.length; at += 4) {
+                  const delta = [0, 1, 2].map(c => previous[at + c] - f.sig[at + c]);
+                  const pixel = {pixel: at / 4, before: [...previous.slice(at, at + 4)], after: [...f.sig.slice(at, at + 4)]};
+                  if (Math.max(...delta.map(Math.abs)) >= 48) raw.push(pixel);
+                  if (Math.max(...delta.map((n, c) => Math.abs(n - bias[c]))) >= 48) strong.push(pixel);
+                }
+                preconditions.push({stage, raw, strong, bias, distance: distances.at(-1), local: PPTCore.hasLocalChange(previous, f.sig)});
+              }
+            }
+            await window.recordLocalDetailInput({userAgent: navigator.userAgent, dpr: devicePixelRatio, canvas: [710, 378], signature: [192, 108], frames: inputFrames, preconditions});
+            for (const p of preconditions) {
+              if (!(p.raw.length >= 1 && p.raw.length < 8 && p.strong.length >= 1 && p.strong.length < 8 && p.distance.changed < 1.2 && p.distance.mean < .6 && p.local)) {
+                throw Error('Tiny glyph input precondition failed before scanner: ' + JSON.stringify(p));
+              }
+            }
+            paint(0); const scan = await fastScan(), saved = [];
+            for (let i = 0; i < pages.length; i++) {
+              const p = pages[i], stage = Math.floor(p.sourceTime), asset = await imageBytes(p.id), previous = expected[Math.max(0, stage - 1)].sig;
+              const changedPixels = [];
+              for (let at = 0; at < asset.sig.length; at += 4) if (Math.max(...[0, 1, 2].map(c => Math.abs(asset.sig[at + c] - previous[at + c]))) >= 48) changedPixels.push({pixel: at / 4, before: [...previous.slice(at, at + 3)], after: asset.sig.slice(at, at + 3)});
+              saved.push({id: p.id, sourceTime: p.sourceTime, sourceKey: p.sourceKey, imageEqual: JSON.stringify(asset.image) === JSON.stringify(expected[stage].image),
+                sigEqual: asset.sig.every((n, j) => n === expected[stage].sig[j]), changedPixels, signature: asset.sig, image: asset.image});
+            }
+            const knowledgeVersion = activeLesson.task.comparisonVersion;
+            const knowledgePages = pages.slice(); pages = knowledgePages.slice(0, 2); await cleanSimilar(); const detailCandidate = !!similarReview?.pair; closeSimilar(); pages = knowledgePages;
+            const controls = [];
+            canvas.width = 192; canvas.height = 108; duration = 3;
+            for (const [name, count, dedupe, masked] of [['formula', 48, true, false], ['annotation', 8, true, false], ['single-on', 1, true, false], ['single-off', 1, false, false], ['ignored', 1, true, true], ['brightness', 0, true, false]]) {
+              await reset(name, dedupe); if (masked) ignoreRect = {x: 0, y: 0, w: .1, h: .1};
+              paint = time => {
+                ctx.fillStyle = name === 'brightness' && time >= 1 && time < 2 ? '#f7f7f7' : '#fff'; ctx.fillRect(0, 0, 192, 108);
+                if (time >= 1 && time < 2) { ctx.fillStyle = name === 'annotation' ? '#ff0000' : '#000'; ctx.fillRect(0, 0, count, count ? 1 : 0); }
+              };
+              paint(0); const outcome = await fastScan();
+              if (!outcome) throw Error(name + ': ' + $('status').textContent);
+              const assets = []; for (const p of pages) { const asset = await imageBytes(p.id); assets.push({id: p.id, sourceTime: p.sourceTime, pixel: asset.sig.slice(0, 4)}); }
+              controls.push({name, saved: outcome.saved, unstable: outcome.unstable, assets});
+            }
+            // Real adjacent-review candidates still work for identical pages; choosing both preserves IDs.
+            await reset('manual'); paint = () => { ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, 192, 108); }; paint();
+            await save(frame(0)); await save(frame(1)); const manualIds = pages.map(p => p.id);
+            await cleanSimilar(); const duplicateCandidate = similarReview?.pair?.map(p => p.id); await chooseSimilar('both'); await $('similar-confirm').onclick();
+            const manualAfter = pages.map(p => p.id);
+            // Resume at an actual safe checkpoint, using each provenance class without changing settings.
+            const resumes = [];
+            for (const version of [null, 'old-v0', 'local-v1', 'mixed']) {
+              await reset('resume-' + version); duration = 3;
+              activeLesson.task = {id: 'checkpoint-' + version, state: 'paused', checkpoint: 1, baselineTime: .25, duration, settings: scanSettings(), crop: {...crop}, ignoreRect: null,
+                ...(version === null ? {} : {comparisonVersion: version})};
+              await save(frame(.25)); const retained = pages[0], before = await imageBytes(retained.id), seeks = [];
+              paint = time => { seeks.push(time); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, 192, 108); };
+              const settings = JSON.stringify(scanSettings()), context = createDedupeContext(); cacheSignature(context, retained.id, new Uint8Array(before.sig));
+              const eligible = canResume(); await fastScan(); const after = await imageBytes(retained.id);
+              const stored = await new Promise((resolve, reject) => { const r = db.transaction('settings').objectStore('settings').get('lesson:' + activeLesson.id); r.onsuccess = () => resolve(r.result.task); r.onerror = () => reject(r.error); });
+              resumes.push({version, eligible, id: activeLesson.task.id, comparisonVersion: activeLesson.task.comparisonVersion, storedVersion: stored.comparisonVersion,
+                checkpoint: activeLesson.task.checkpoint, seeks, settingsEqual: settings === JSON.stringify(scanSettings()), retainedId: pages[0].id === retained.id,
+                imageEqual: JSON.stringify(before) === JSON.stringify(after), count: pages.length});
+            }
+            return {saved, scan, distances, knowledgeVersion, detailCandidate, controls, manualIds, duplicateCandidate, manualAfter, resumes};
+          } finally {
+            closeSimilar(); releaseDedupeContext(); CanvasRenderingContext2D.prototype.drawImage = drawImage; sourceReady = false;
+            if (render !== undefined) cancelAnimationFrame(render); callbacks.clear();
+            properties.forEach((name, i) => { if (descriptors[i]) Object.defineProperty(video, name, descriptors[i]); else delete video[name]; });
+            await window.recordLocalDetailCleanup({drawImageRestored: CanvasRenderingContext2D.prototype.drawImage === drawImage, dedupeReleased: dedupeContext === null, reviewClosed: similarReview === null, sourceReleased: !sourceReady,
+              videoRestored: properties.every((name, i) => JSON.stringify(Object.getOwnPropertyDescriptor(video, name)) === JSON.stringify(descriptors[i])), callbacksReleased: callbacks.size === 0});
+          }
+        });
+        result.saved.forEach((p, i) => {
+          fs.writeFileSync(path.join(output, `knowledge-${i}-${p.id}.jpg`), Buffer.from(p.image));
+          fs.writeFileSync(path.join(output, `knowledge-${i}-${p.id}.rgba`), Buffer.from(p.signature)); delete p.image; delete p.signature;
+        });
+        fs.writeFileSync(path.join(output, 'evidence.json'), JSON.stringify(result, null, 2) + '\n'); console.log('Local detail evidence: ' + output);
+        assert.deepEqual(result.saved.map(p => p.sourceTime), [.25, 1.25, 2.25, 3.25, 4.25, 5.25]);
+        assert.equal(new Set(result.saved.map(p => p.id)).size, 6);
+        assert(result.saved.every(p => p.imageEqual && p.sigEqual && p.sourceKey === 'synthetic-local'));
+        assert(result.distances.every(d => d.changed < 1.2 && d.mean < .6), 'all increments pass the old global rule');
+        assert(result.saved.slice(1, 4).every(p => p.changedPixels.length >= 1 && p.changedPixels.length < 8), 'superscript/subscript/digit need fewer than eight pixels');
+        assert.equal(result.knowledgeVersion, 'local-v1'); assert.equal(result.detailCandidate, false);
+        for (const c of result.controls) {
+          const ignored = ['ignored', 'brightness'].includes(c.name), returning = c.name === 'single-off';
+          assert.deepEqual(c.assets.map(p => p.sourceTime), ignored ? [.25] : returning ? [.25, 1.25, 2.25] : [.25, 1.25], c.name);
+          assert.equal(c.unstable, 0); assert.equal(c.assets[0].pixel[0], 255);
+          if (!ignored) assert.equal(c.assets[1].pixel[c.name === 'annotation' ? 1 : 0], 0, c.name);
+        }
+        assert.deepEqual(result.duplicateCandidate, result.manualIds); assert.deepEqual(result.manualAfter, result.manualIds);
+        for (const r of result.resumes) {
+          assert(r.eligible && r.settingsEqual && r.retainedId && r.imageEqual); assert.equal(r.count, 1);
+          assert.equal(r.id, 'checkpoint-' + r.version); assert.equal(r.checkpoint, 2.95); assert.deepEqual(r.seeks.slice(0, 2), [.25, 1]);
+          assert.equal(r.comparisonVersion, r.version === 'local-v1' ? 'local-v1' : 'mixed'); assert.equal(r.storedVersion, r.comparisonVersion);
+        }
+        assert.deepEqual(errors, []);
+      } finally { await local.close(); }
+    });
+    if (process.env.PPT_TEST_LOCAL_DETAIL_ONLY) { assert.deepEqual(blocked, []); return; }
     const context = await browser.newContext({viewport: {width: 1440, height: 1000}});
     await context.route('**/*', route => {
       if (route.request().url().startsWith(origin + '/')) return route.continue();
@@ -304,7 +535,7 @@ async function test(name, run) { await run(); passed++; console.log('PASS ' + na
     const errors = []; page.on('pageerror', error => errors.push(error.message));
     await page.goto(origin + '/capture.html'); await page.waitForFunction(() => ready);
     await page.locator('#terms-agree').check(); await page.locator('#terms-accept').click();
-    const scratch = path.join(root, '.test-output', 'v3.1.1'); fs.mkdirSync(scratch, {recursive: true});
+    const scratch = process.env.PPT_TEST_OUTPUT || path.join(root, '.test-output', 'v3.1.3'); fs.mkdirSync(scratch, {recursive: true});
     const output = fs.mkdtempSync(path.join(scratch, 'task4-')); console.log('Task4 artifacts: ' + output);
     const idle = () => page.waitForFunction(() => ready && !busy());
     const download = async (selector, label) => {
@@ -339,6 +570,30 @@ async function test(name, run) { await run(); passed++; console.log('PASS ' + na
       if (annotated) assert.match(texts.join('\n'), /\d{2}:\d{2}:\d{2}/);
       return {pdf, titles, texts};
     }
+    async function inspectCourse(bytes, expected, title, {sheets = expected.length, times = true} = {}) {
+      const pdf = await PDFDocument.load(bytes); assert.equal(pdf.getPageCount(), sheets);
+      assert.equal(pdf.catalog.get(PDFName.of('PageMode')).toString(), '/UseOutlines');
+      const originals = [], texts = [], leaves = [], lessonTitles = [];
+      for (const sheet of pdf.getPages()) {
+        const objects = sheet.node.Resources().lookup(PDFName.of('XObject'));
+        for (const key of objects.keys()) originals.push(Buffer.from(objects.lookup(key).contents));
+        texts.push(Buffer.from(pdf.context.lookup(sheet.node.get(PDFName.of('Contents'))).contents).toString('ascii'));
+      }
+      assert.deepEqual(originals, expected.map(image => Buffer.from(image, 'base64')));
+      const root = pdf.catalog.lookup(PDFName.of('Outlines')), course = pdf.context.lookup(root.get(PDFName.of('First')));
+      assert.equal(course.get(PDFName.of('Title')).decodeText(), title);
+      assert.equal(root.get(PDFName.of('Next')), undefined);
+      let ref = course.get(PDFName.of('First'));
+      while (ref) {
+        const lesson = pdf.context.lookup(ref); lessonTitles.push(lesson.get(PDFName.of('Title')).decodeText());
+        let leaf = lesson.get(PDFName.of('First'));
+        while (leaf) { const node = pdf.context.lookup(leaf); leaves.push(node.get(PDFName.of('Title')).decodeText()); leaf = node.get(PDFName.of('Next')); }
+        ref = lesson.get(PDFName.of('Next'));
+      }
+      assert.equal(leaves.length, expected.length);
+      if (times) assert.match(texts.join('\n'), /\d{2}:\d{2}:\d{2}/); else assert(!texts.join('\n').match(/\d{2}:\d{2}:\d{2}/));
+      return {pdf, lessonTitles, leaves, texts};
+    }
     let images;
     await test('PDF defaults, zero selection guards, and synthetic export fixtures', async () => {
       assert(await page.locator('#selected-pdf').isDisabled()); assert(await page.locator('#selected-zip').isDisabled());
@@ -370,8 +625,18 @@ async function test(name, run) { await run(); passed++; console.log('PASS ' + na
         return originals;
       });
       await idle(); assert(await page.locator('#selected-pdf').isDisabled());
+      assert.match(await page.locator('#current-lesson').textContent(), /当前整理.*Synthetic A/);
+      assert.match(await page.locator('#current-course-context').textContent(), /当前课次所属课程.*Synthetic A/);
+      assert.match(await page.locator('#batch-course-context').textContent(), /批量列表课程.*Synthetic B/);
+      assert.equal(await page.locator('#export-view').inputValue(), 'raw');
+      assert.equal(await page.locator('#export-scope').textContent(), '原始全部 · 3 / 3 页');
       const all = await download('#pdf', 'default-all'); assert(!all.name.includes('-selected'));
       await inspectPDF(all.bytes, [images[2], images[0], images[1]]);
+      await page.locator('#tab-export').click();
+      const merged = await download('#course-pdf', 'merged-default-A'); assert.equal(merged.name, 'Synthetic A-整课.pdf');
+      const parsed = await inspectCourse(merged.bytes, [images[2], images[0], images[1]], 'Synthetic A', {times: false});
+      assert.deepEqual(parsed.lessonTitles, ['第 1 课 · 2026-11-06 08:00:00']);
+      assert.deepEqual(parsed.leaves, ['第 1 页 · 00:01:03', '第 2 页 · 00:01:01', '第 3 页']);
     });
     await test('selected PDF/image ZIP export zero, one and many in displayed order; all-retained ignores selection', async () => {
       const cards = page.locator('#pages article');
@@ -429,6 +694,47 @@ async function test(name, run) { await run(); passed++; console.log('PASS ' + na
       const message = await page.locator('#batch-status').textContent(); assert.match(message, /共 2 页/); assert.match(message, /跳过 2 个空课次/); assert.match(message, /1 节尚未完成/);
       assert.equal(await page.locator('#lesson-select').inputValue(), 'A');
     });
+    await test('merged PDF buttons keep active and batch courses independent, including unselected partial lessons', async () => {
+      await page.locator('#tab-export').click();
+      const main = await download('#course-pdf', 'merged-handout-A'); assert.equal(main.name, 'Synthetic A-整课.pdf');
+      await inspectCourse(main.bytes, [images[2], images[0], images[1]], 'Synthetic A', {sheets: 2});
+      await page.locator('#tab-source').click(); await page.locator('#batch-panel').evaluate(panel => { panel.open = true; });
+      const batch = await download('#batch-course-pdf', 'merged-handout-B'); assert.equal(batch.name, 'Synthetic B-整课.pdf');
+      const parsed = await inspectCourse(batch.bytes, [images[4], images[3]], 'Synthetic B', {sheets: 1});
+      assert.deepEqual(parsed.leaves, ['第 1 页 · 00:01:05', '第 2 页 · 00:01:04']);
+      assert.match(await page.locator('#batch-status').textContent(), /共 2 页.*跳过 2 个空课次.*1 节尚未完成/);
+      assert.equal(await page.locator('#lesson-select').inputValue(), 'A');
+    });
+    await test('merged export freezes metadata, title, warnings and options during actual writes and rejects competing work', async () => {
+      await page.evaluate(() => {
+        window.originalCreate = PPTDiskCache.create;
+        PPTDiskCache.create = async kind => {
+          const cache = await originalCreate(kind), write = cache.write; let held = false;
+          cache.write = async bytes => { if (!held) { held = true; await new Promise(resolve => window.releaseExport = resolve); } return write(bytes); };
+          return cache;
+        };
+        window.exportPromise = exportCoursePDF();
+      });
+      await page.waitForFunction(() => !!window.releaseExport && exportBusy);
+      for (const id of ['selected-pdf', 'selected-zip', 'pdf', 'export-zip', 'course-zip', 'batch-course-zip', 'course-pdf', 'batch-course-pdf', 'pdf-layout', 'pdf-timestamps', 'pdf-bookmarks']) assert(await page.locator('#' + id).isDisabled());
+      const event = page.waitForEvent('download');
+      await page.evaluate(async () => {
+        await exportCoursePDF(batchCourseKey()); await exportCourseZIP(); await exportRetained('pdf');
+        activeLesson.course.name = 'Mutated'; activeLesson.task.state = 'paused'; lessons.reverse(); allPages.reverse();
+        selectedPages.clear(); pages.reverse(); pages[1].sourceTime = 999;
+        $('pdf-layout').value = 'single'; $('pdf-timestamps').checked = false; $('pdf-bookmarks').checked = false;
+        releaseExport();
+      });
+      const file = await event, destination = path.join(output, 'merged-snapshot.pdf'); await file.saveAs(destination);
+      await page.evaluate(async () => {
+        await exportPromise; PPTDiskCache.create = originalCreate; delete window.releaseExport;
+        activeLesson.course.name = 'Synthetic A'; activeLesson.task.state = 'done'; lessons.reverse(); allPages.reverse(); pages.reverse(); pages[1].sourceTime = 61;
+        applyPDFOptions(savedPDFOptions); render(); controls();
+      });
+      assert.equal(file.suggestedFilename(), 'Synthetic A-整课.pdf');
+      await inspectCourse(fs.readFileSync(destination), [images[2], images[0], images[1]], 'Synthetic A', {sheets: 2});
+      assert(!await page.locator('#status').textContent().then(text => text.includes('尚未完成')));
+    });
     await test('selected export snapshots metadata/options before asynchronous writes and locks competing exports', async () => {
       await page.locator('#select-all').click();
       await page.evaluate(() => {
@@ -455,6 +761,39 @@ async function test(name, run) { await run(); passed++; console.log('PASS ' + na
       });
       assert.match(result.messages[0], /请先读取课程录像列表/); assert.match(result.messages[1], /本课程还没有截图/); assert.match(result.messages[2], /synthetic unavailable image/);
       assert.equal(result.busy, false); assert.equal(result.enabled, true);
+    });
+    await test('merged course export rejects missing/empty scopes, honors real busy guards and cleans failed caches', async () => {
+      const result = await page.evaluate(async () => {
+        const messages = [], create = PPTDiskCache.create, read = PPTPageStore.imageBytes; let created = 0, removed = 0;
+        await exportCoursePDF(null, 'batch-status'); messages.push($('batch-status').textContent);
+        await exportCoursePDF('missing-course', 'batch-status'); messages.push($('batch-status').textContent);
+        try {
+          PPTDiskCache.create = async () => { created++; throw Error('guard bypass'); };
+          const reset = () => { studyAccepted = true; task = null; realtimeTimer = null; realtimeBusy = false; reviewBusy = false; batchRunning = false; exportBusy = false; pageWrites = 0; };
+          for (const guard of [() => studyAccepted = false, () => task = {}, () => realtimeTimer = 1, () => realtimeBusy = true,
+            () => reviewBusy = true, () => batchRunning = true, () => exportBusy = true, () => pageWrites = 1]) {
+            guard(); await exportCoursePDF(batchCourseKey(), 'batch-status'); reset();
+          }
+          if (created) throw Error('merged export ignored a busy guard');
+          for (const stage of ['read', 'write', 'finish', 'cleanup']) {
+            PPTDiskCache.create = async kind => {
+              const cache = await create(kind), remove = cache.remove; created++;
+              cache.remove = async () => { await remove(); removed++; if (stage === 'cleanup') throw Error('synthetic cleanup failure'); };
+              if (stage === 'write') cache.write = async () => { throw Error('synthetic write failure'); };
+              if (stage === 'finish') cache.finish = async () => { throw Error('synthetic finish failure'); };
+              return cache;
+            };
+            PPTPageStore.imageBytes = stage === 'read' || stage === 'cleanup' ? async () => { throw Error('synthetic unavailable image'); } : read;
+            await exportCoursePDF(batchCourseKey(), 'batch-status'); messages.push($('batch-status').textContent);
+            if (busy() || $('batch-course-pdf').disabled) throw Error('merged export retained busy state');
+          }
+        } finally { PPTDiskCache.create = create; PPTPageStore.imageBytes = read; controls(); }
+        return {messages, created, removed, busy: busy()};
+      });
+      assert.match(result.messages[0], /请先读取课程录像列表/); assert.match(result.messages[1], /本课程还没有截图/);
+      assert.match(result.messages[2], /synthetic unavailable image/); assert.match(result.messages[3], /synthetic write failure/);
+      assert.match(result.messages[4], /synthetic finish failure/); assert.match(result.messages[5], /synthetic unavailable image.*临时文件清理失败.*synthetic cleanup failure/);
+      assert.equal(result.created, 4); assert.equal(result.removed, 4); assert.equal(result.busy, false);
     });
     await test('main course ZIP waits for a pending local rename before choosing its course group', async () => {
       await idle();
@@ -500,7 +839,92 @@ async function test(name, run) { await run(); passed++; console.log('PASS ' + na
       assert.match(entries[0].name, /Renamed local course/);
       assert.equal(await page.evaluate(() => lessons.find(lesson => lesson.id === 'B').course.name), 'Old local course');
     });
+    await test('main merged PDF resolves its default group after a real naming transaction commits', async () => {
+      // The preceding document delivered ten downloads; isolate this case from the observed burst suppression.
+      await page.reload(); await idle();
+      await page.evaluate(async () => {
+        await namingSave; await lessonSave;
+        activeLesson.course.name = 'Old local course'; await PPTLibrary.put(db, activeLesson); applyLesson(); render(); controls();
+        const original = IDBObjectStore.prototype.put;
+        IDBObjectStore.prototype.put = function(value, key) {
+          const request = original.call(this, value, key);
+          if (this.name === 'settings' && key === 'exportNaming') {
+            IDBObjectStore.prototype.put = original;
+            let held = true; window.releaseNaming = () => { held = false; };
+            const keepAlive = () => { if (held) this.get('exportNaming').onsuccess = keepAlive; }; keepAlive();
+          }
+          return request;
+        };
+      });
+      await page.locator('#tab-export').click();
+      await page.locator('#course-name').fill('中文😀 (课程) / 标题');
+      await page.waitForFunction(() => !!window.releaseNaming);
+      const event = page.waitForEvent('download');
+      try {
+        await page.locator('#course-pdf').click();
+        assert.equal(await page.evaluate(() => activeLesson.course.name), 'Old local course');
+        assert.equal(await page.evaluate(() => exportBusy), true); assert(await page.locator('#course-pdf').isDisabled());
+      } finally { await page.evaluate(() => { releaseNaming(); delete window.releaseNaming; }); }
+      const file = await event, destination = path.join(output, 'merged-pending-naming.pdf'); await file.saveAs(destination); await idle();
+      assert.equal(file.suggestedFilename(), '中文😀 (课程) _ 标题-整课.pdf');
+      await inspectCourse(fs.readFileSync(destination), [images[2], images[0], images[1]], '中文😀 (课程) / 标题', {sheets: 2});
+      assert.equal(await page.evaluate(() => lessons.find(lesson => lesson.id === 'B').course.name), 'Old local course');
+    });
+    await test('main merged PDF waits for a real library put commit before scope, title and fallback snapshots', async () => {
+      await page.evaluate(async () => {
+        await namingSave; await lessonSave;
+        const original = IDBObjectStore.prototype.put;
+        IDBObjectStore.prototype.put = function(value, key) {
+          const request = original.call(this, value, key);
+          if (this.name === 'settings' && key === 'lesson:A') {
+            IDBObjectStore.prototype.put = original;
+            let held = true; window.releaseLesson = () => { held = false; };
+            const keepAlive = () => { if (held) this.get('lesson:A').onsuccess = keepAlive; }; keepAlive();
+          }
+          return request;
+        };
+        // The library clones at call and updates the retained record only after its real transaction completes.
+        lessonSave = lessonSave.then(async () => {
+          const next = {...activeLesson, course: {}};
+          await PPTLibrary.put(db, next); Object.assign(activeLesson, next);
+        });
+      });
+      await page.waitForFunction(() => !!window.releaseLesson);
+      const event = page.waitForEvent('download');
+      try {
+        await page.locator('#course-pdf').click();
+        assert.equal(await page.evaluate(() => activeLesson.course.name), '中文😀 (课程) / 标题');
+        assert.equal(await page.evaluate(() => exportBusy), true);
+      } finally { await page.evaluate(() => { releaseLesson(); delete window.releaseLesson; }); }
+      const file = await event, destination = path.join(output, 'merged-pending-lesson.pdf'); await file.saveAs(destination); await idle();
+      assert.equal(file.suggestedFilename(), '未命名课程-整课.pdf');
+      const parsed = await inspectCourse(fs.readFileSync(destination), [images[2], images[0], images[1]], '未命名课程', {sheets: 2});
+      assert.deepEqual(parsed.lessonTitles, ['第 1 课 · 未知日期 未知时间']);
+      assert.deepEqual(await page.evaluate(async () => {
+        const request = db.transaction('settings').objectStore('settings').get('lesson:A');
+        return new Promise(resolve => request.onsuccess = () => resolve(request.result.course));
+      }), {});
+    });
+    await test('main course requests reject an owner change during pending saves before creating a writer', async () => {
+      const result = await page.evaluate(async () => {
+        await namingSave; await lessonSave;
+        const owner = activeLesson, originalSave = namingSave, create = PPTDiskCache.create; let calls = 0, release;
+        namingSave = new Promise(resolve => release = resolve);
+        PPTDiskCache.create = async () => { calls++; throw Error('synthetic writer must not start after owner change'); };
+        try {
+          const request = exportCoursePDF(PPTLibrary.courseKey(owner.page, owner.course), 'batch-status', owner.page);
+          activeLesson = lessons.find(lesson => lesson.id !== owner.id); release(); await request;
+          return {calls, message: $('batch-status').textContent, exporting: exportBusy};
+        } finally { activeLesson = owner; namingSave = originalSave; PPTDiskCache.create = create; controls(); }
+      });
+      assert.equal(result.calls, 0, 'pending save cannot redirect a course request to another active lesson');
+      assert.match(result.message, /当前课次已变化/); assert.equal(result.exporting, false);
+    });
     assert.deepEqual(errors, []); await exportContext.close();
     assert.deepEqual(blocked, []); console.log(`${passed} focused improvement groups passed; no external requests.`);
-  } finally { await browser?.close(); if (server) await new Promise(resolve => server.close(resolve)); }
+  } finally {
+    try { await browser?.close(); } finally { if (server) await new Promise(resolve => server.close(resolve)); }
+    const cleanup = {browserClosed: !browser?.isConnected(), contextsClosed: !browser?.contexts().length, serverClosed: !server?.listening};
+    console.log('Improvement cleanup: ' + JSON.stringify(cleanup)); assert(Object.values(cleanup).every(Boolean));
+  }
 })().catch(error => { console.error(error); process.exitCode = 1; });

@@ -120,6 +120,29 @@ const PPTPageStore = (() => {
     }
     return new Uint8Array(await image.arrayBuffer());
   }
+  function learning(db, updates) {
+    return new Promise((resolve, reject) => {
+      if (!Array.isArray(updates) || updates.some(item => !item || item.id == null || typeof item.excluded !== 'boolean')
+        || new Set(updates.map(item => item.id)).size !== updates.length) { reject(Error('页面排除设置无效')); return; }
+      const snapshot = updates.map(item => ({id: item.id, excluded: item.excluded}));
+      const tx = db.transaction(['pages'], 'readwrite'), store = tx.objectStore('pages'), oldFlags = []; let failure;
+      tx.oncomplete = () => resolve(oldFlags);
+      tx.onerror = tx.onabort = () => reject(failure || tx.error || Error('页面排除设置未能保存'));
+      const abort = error => { failure = error; tx.abort(); };
+      try {
+        snapshot.forEach((item, index) => {
+          const read = store.get(item.id);
+          read.onsuccess = () => {
+            try {
+              if (!read.result) throw Error('页面已不存在，请刷新后重试');
+              oldFlags[index] = {id: item.id, excluded: read.result.learningExcluded === true};
+              store.put({...read.result, learningExcluded: item.excluded});
+            } catch (error) { abort(error); }
+          };
+        });
+      } catch (error) { abort(error); }
+    });
+  }
   function discard(db, ids) {
     if (!ids.length) return Promise.resolve();
     return transaction(db, ['assets'], 'readwrite', tx => ids.forEach(id => tx.objectStore('assets').delete(id)));
@@ -154,5 +177,5 @@ const PPTPageStore = (() => {
     })();
     return pageLease;
   }
-  return {open, add, asset, assets, encode, thumbnail, imageBytes, discard, prune, estimate};
+  return {open, add, asset, assets, encode, thumbnail, imageBytes, learning, discard, prune, estimate};
 })();

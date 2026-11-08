@@ -7,7 +7,7 @@ const {dependency, browserOptions} = require('./runtime.cjs');
 const {chromium} = dependency('playwright'), sharp = dependency('sharp');
 const {PDFDocument} = dependency('pdf-lib');
 const root = path.resolve(__dirname, '..');
-const scratch = path.join(root, '.test-output', 'v3.1.1');
+const scratch = process.env.PPT_TEST_OUTPUT || path.join(root, '.test-output', 'v3.1.3');
 fs.mkdirSync(scratch, {recursive: true});
 const output = fs.mkdtempSync(path.join(scratch, 'review-'));
 const fixture = path.join(output, 'review-video.mp4');
@@ -104,10 +104,26 @@ async function atTime(time) {
 }
 async function load(file) {
   await page.locator('#tab-source').click();
-  await page.locator('#file').setInputFiles(file);
-  await page.waitForFunction(() => sourceReady && !busy() && document.querySelector('#video').seekable.length > 0);
+  await page.waitForFunction(() => ready && !busy() && !document.querySelector('#file').disabled);
+  const selection = await page.locator('#file').evaluateHandle(input => {
+    const selected = {input, sourceKey: null};
+    // Capture Playwright's actual File metadata before the runtime clears the input.
+    selected.listen = () => { const file = input.files[0]; if (file) selected.sourceKey = 'file:' + JSON.stringify([file.name, file.size, file.lastModified]); };
+    input.addEventListener('change', selected.listen, {once: true, capture: true});
+    return selected;
+  });
+  try {
+    await page.locator('#file').setInputFiles(file);
+    const sourceKey = await selection.evaluate(selected => selected.sourceKey);
+    assert.equal(typeof sourceKey, 'string', 'file selection supplies the requested source fingerprint');
+    await page.waitForFunction(expected => sourceReady && !busy() && loadedIdentity?.sourceKey === expected && document.querySelector('#video').seekable.length > 0, sourceKey);
+  } finally {
+    try { await selection.evaluate(selected => selected.input.removeEventListener('change', selected.listen, true)); }
+    finally { await selection.dispose(); }
+  }
 }
 async function test(name, body) {
+  if (process.env.PPT_TEST_FILTER && !new RegExp(process.env.PPT_TEST_FILTER).test(name)) return;
   await body(); results.push(name); console.log('PASS ' + name);
 }
 function zipEntries(bytes) {
@@ -128,7 +144,11 @@ function zipEntries(bytes) {
     const video = spawnSync(process.env.PPT_TEST_FFMPEG || 'ffmpeg', ['-y', '-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=duration=4:size=640x360:rate=10', '-an', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', fixture], {encoding: 'utf8'});
     assert.equal(video.status, 0, video.stderr || video.error?.message);
     const wrong = path.join(output, 'other', path.basename(fixture)); fs.mkdirSync(path.dirname(wrong));
-    fs.writeFileSync(wrong, Buffer.concat([fs.readFileSync(fixture), Buffer.from('different file with the same name')]));
+    const differentPayload = Buffer.from('different file with the same name');
+    const freeBox = Buffer.alloc(8 + differentPayload.length);
+    freeBox.writeUInt32BE(freeBox.length, 0); freeBox.write('free', 4, 4, 'ascii'); differentPayload.copy(freeBox, 8);
+    fs.writeFileSync(wrong, Buffer.concat([fs.readFileSync(fixture), freeBox]));
+    assert.notDeepEqual(fs.readFileSync(wrong), fs.readFileSync(fixture), 'same-name source fixture has different file bytes');
     images = await Promise.all(['#24354a', '#9e2437', '#596779'].map(async (color, index) => {
       const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360"><rect width="640" height="360" fill="#ffffff"/><rect x="35" y="35" width="570" height="70" fill="${color}"/><text x="55" y="82" font-family="sans-serif" font-size="30" fill="white">Review slide ${index + 1}</text><path d="M55 160h480M55 210h400M55 260h450" stroke="${color}" stroke-width="16"/></svg>`;
       return 'data:image/jpeg;base64,' + (await sharp(Buffer.from(svg)).jpeg({quality: 95}).toBuffer()).toString('base64');
@@ -162,6 +182,89 @@ function zipEntries(bytes) {
     assert.equal(await page.locator('#terms-dialog').isVisible(), true, 'decline and Escape keep the workspace locked');
     await page.locator('#terms-agree').check(); await page.locator('#terms-accept').click(); await count(0);
 
+    if (!process.argv.includes('--motion-only')) await test('source, batch and export scopes are discoverable in desktop and narrow workspaces', async () => {
+      assert.equal(await page.locator('#batch-panel').evaluate(panel => !!panel.closest('.workspace-sheet') && !panel.closest('.setting-panel')), true, 'batch work has a permanent wide workspace entry');
+      assert.equal(await page.locator('#pdf, #export-zip, #selected-pdf, #selected-zip, #filename-preview, #export-settings').evaluateAll(nodes => nodes.length === 6 && nodes.every(node => node.closest('#results'))), true, 'scope, filename and settings shortcut are beside results');
+      assert.equal(await page.locator('#export-view').inputValue(), 'raw', 'a fresh workspace defaults to raw export');
+      assert.equal(await page.locator('#export-scope').textContent(), '原始全部 · 0 / 0 页', 'raw scope reports both retained and total counts');
+      assert.match(await page.locator('#current-lesson').textContent(), /当前整理/);
+      assert.match(await page.locator('#batch-course-context').textContent(), /批量列表/);
+      await page.locator('#export-settings').click();
+      assert.equal(await page.locator('#tab-export').getAttribute('aria-selected'), 'true');
+      assert.equal(await page.locator('#course-name').evaluate(input => input === document.activeElement), true, 'shortcut immediately focuses editable naming');
+      await page.locator('#tab-source').click();
+      const name = '0-' + '光电传感与机器视觉课堂录像完整来源名称'.repeat(5) + '.mp4';
+      await page.evaluate(({origin, name}) => { sources = [{name, url: origin + '/0-long-source.mp4', source: '合成来源'}]; updateSources(); }, {origin, name});
+      await page.locator('#sources').selectOption(origin + '/0-long-source.mp4');
+      assert.equal(await page.locator('#selected-source-name').textContent(), name);
+      assert.match(await page.locator('#source-track-hint').textContent(), /0 路.*框选/);
+      for (const [width, height] of [[1440, 900], [390, 844]]) {
+        await page.setViewportSize({width, height});
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, 'long source names never cause horizontal overflow');
+        assert.equal(await page.locator('#selected-source-name').evaluate(node => node.scrollWidth <= node.clientWidth && getComputedStyle(node).whiteSpace !== 'nowrap'), true, 'full selected name wraps instead of truncating');
+        await page.locator('#batch-panel > summary').click();
+        const batch = await page.locator('#batch-panel').boundingBox(); assert(batch.width > (width === 390 ? 340 : 850), 'batch controls use workspace width');
+        await page.locator('#batch-panel > summary').click();
+      }
+      await page.setViewportSize({width: 1440, height: 900});
+    });
+    await test('rapid tab reversal, immediate typing and preview close remain usable during motion; live reduce cancels it', async () => {
+      assert.equal(await page.evaluate(() => typeof window.PPTMotion?.reveal), 'function', 'shared motion layer is loaded');
+      await page.emulateMedia({reducedMotion: 'no-preference'});
+      await page.locator('#tab-source').focus();
+      for (const key of ['ArrowRight', 'ArrowLeft', 'End', 'ArrowLeft', 'End']) await page.keyboard.press(key);
+      assert.equal(await page.locator('[role="tabpanel"]:visible').count(), 1);
+      await page.locator('#export-settings').click(); await page.keyboard.type('motion input');
+      assert.equal(await page.locator('#course-name').inputValue(), 'motion input', 'typing is not deferred until panel motion finishes');
+      await page.locator('#tab-source').focus(); await page.keyboard.press('ArrowRight');
+      const beforeReverse = await page.locator('#tab-marker').boundingBox();
+      await page.keyboard.press('ArrowLeft');
+      const afterReverse = await page.locator('#tab-marker').boundingBox();
+      assert(Math.abs(afterReverse.x - beforeReverse.x) < beforeReverse.width * .65, 'reversal continues from its rendered position instead of snapping to a tab endpoint');
+      await page.keyboard.press('ArrowRight');
+      assert(await page.evaluate(() => document.getAnimations().some(animation => animation.playState === 'running')), 'normal mode provides local feedback');
+      await page.emulateMedia({reducedMotion: 'reduce'});
+      await page.waitForFunction(() => document.getAnimations().every(animation => animation.playState !== 'running'));
+      assert.equal(await page.locator('#panel-extraction').evaluate(node => getComputedStyle(node).transform), 'none', 'live reduce leaves no spatial offset');
+      await seed([{id: 1}, {id: 2, image: 1}]); await page.emulateMedia({reducedMotion: 'no-preference'});
+      await page.locator('#pages article img').first().focus(); await page.keyboard.press('Enter');
+      await page.waitForFunction(() => previewURL !== null);
+      await page.keyboard.press('Escape');
+      await page.waitForFunction(() => !$('lightbox').open && previewURL === null && !$('lightbox-img').hasAttribute('src'));
+      assert.equal(await page.locator('#pages article img').first().evaluate(image => image === document.activeElement), true, 'closing during entry restores the original focus');
+      assert.equal(await page.locator('#lightbox').evaluate(dialog => dialog.getAnimations({subtree: true}).length), 0, 'closed preview has no residual motion');
+      await page.emulateMedia({reducedMotion: 'reduce'}); await seed([]);
+    });
+    await test('committed new pages animate only twelve visible cards and ordinary renders preserve their nodes and scroll', async () => {
+      await seed([]); await page.emulateMedia({reducedMotion: 'no-preference'}); await page.setViewportSize({width: 1920, height: 2000});
+      const result = await page.evaluate(async () => {
+        await bindLesson({kind: 'file', sourceKey: 'motion-cards', sourceName: '合成动效课次', page: ''});
+        const canvas = document.createElement('canvas'); canvas.width = 320; canvas.height = 180;
+        const context = canvas.getContext('2d'); context.fillStyle = '#e9e4dc'; context.fillRect(0, 0, 320, 180);
+        const asset = await PPTPageStore.encode(canvas);
+        for (let i = 0; i < 32; i++) {
+          const metadata = {lessonId: activeLesson.id, w: 320, h: 180, time: 1, order: (i + 1) * 1024};
+          metadata.id = await PPTPageStore.add(db, metadata, asset); pages.push(metadata);
+        }
+        syncAllPages(); render({revealNew: true});
+        const cards = [...$('pages').children], rect = $('pages').getBoundingClientRect();
+        const visible = cards.filter(card => { const r = card.getBoundingClientRect(); return r.top < rect.bottom && r.bottom > rect.top; }).length;
+        const animated = cards.filter(card => card.getAnimations().length).length;
+        PPTMotion.cancelAll(); $('pages').scrollTop = 50; const scroll = $('pages').scrollTop;
+        render();
+        return {visible, animated, reused: cards.every((card, i) => card === $('pages').children[i]), preservedScroll: $('pages').scrollTop === scroll,
+          residual: $('pages').getAnimations({subtree: true}).length};
+      });
+      assert(result.visible > 12, 'fixture has enough visible cards to exercise the budget'); assert.equal(result.animated, 12);
+      assert.equal(result.reused && result.preservedScroll, true); assert.equal(result.residual, 0);
+      await page.setViewportSize({width: 1440, height: 900}); await page.emulateMedia({reducedMotion: 'reduce'}); await seed([]);
+    });
+    if (process.argv.includes('--ui-only') || process.argv.includes('--motion-only')) {
+      assert.deepEqual(errors, []); assert.deepEqual(blocked, []);
+      fs.writeFileSync(path.join(output, 'results.json'), JSON.stringify({passed: results, errors, blocked, output, focused: true}, null, 2));
+      console.log(`${results.length} focused UI groups passed. Evidence: ${output}`); return;
+    }
+
     await test('three accessible setting tabs and desktop first layout', async () => {
       assert.equal(await page.locator('[role="tab"][aria-selected="true"]').getAttribute('id'), 'tab-source');
       assert.equal(await page.locator('[role="tabpanel"]:visible').count(), 1);
@@ -190,10 +293,10 @@ function zipEntries(bytes) {
       await page.keyboard.press('Control+z'); assert.equal(await page.evaluate(() => window.inputUndoPrevented), false, 'Ctrl+Z in input is not intercepted');
       await page.locator('#undo').click(); await count(4); assert.deepEqual(await stored(), original);
       await page.reload(); await count(4); assert.deepEqual(await ids(), [41, 7, 99, 13]);
-      await abortNextReview(); await page.locator('#pages article button').first().click();
+      await abortNextReview(); await page.locator('#pages article').getByRole('button', {name: '删除', exact: true}).first().click();
       await page.waitForFunction(() => document.querySelector('#status').textContent.includes('删除失败'));
       await count(4); assert.deepEqual(await stored(), original, 'aborted delete changes neither pages nor naming');
-      await page.locator('#pages article button').nth(1).click(); await count(3);
+      await page.locator('#pages article').getByRole('button', {name: '删除', exact: true}).nth(1).click(); await count(3);
       const afterDelete = await stored(); await abortNextReview(); await page.locator('#undo').click();
       await page.waitForFunction(() => document.querySelector('#status').textContent.includes('撤销失败'));
       await count(3); assert.deepEqual(await stored(), afterDelete, 'aborted Undo changes neither pages nor naming');
@@ -203,16 +306,16 @@ function zipEntries(bytes) {
 
     await test('last-page deletion retains lesson naming, Undo is atomic and clear invalidates history', async () => {
       await seed([{id: 12, order: 8128}], {...naming, course: {...naming.course, name: '删除前命名'}});
-      const original = await stored(); await page.locator('#pages article button').click(); await count(0);
+      const original = await stored(); await page.locator('#pages article').getByRole('button', {name: '删除', exact: true}).click(); await count(0);
       assert.equal(await page.locator('#course-name').inputValue(), '删除前命名');
       const empty = await stored(); assert.deepEqual(empty.naming, original.naming); assert.deepEqual(empty.lesson, original.lesson);
       await page.reload(); await count(0); assert.equal(await page.locator('#course-name').inputValue(), '删除前命名');
       assert.deepEqual(await stored(), empty, 'empty lesson naming persists after reload');
       await seed([{id: 12, order: 8128}], {...naming, course: {...naming.course, name: '删除前命名'}});
-      await page.locator('#pages article button').click(); await count(0);
+      await page.locator('#pages article').getByRole('button', {name: '删除', exact: true}).click(); await count(0);
       await page.locator('#pages').focus(); await page.keyboard.press(modifier + '+z'); await count(1);
       assert.deepEqual(await stored(), original); await page.reload(); await count(1); assert.deepEqual(await stored(), original);
-      await seed([{id: 1}, {id: 2, image: 1}]); await page.locator('#pages article button').first().click(); await count(1);
+      await seed([{id: 1}, {id: 2, image: 1}]); await page.locator('#pages article').getByRole('button', {name: '删除', exact: true}).first().click(); await count(1);
       page.once('dialog', dialog => dialog.accept()); await page.locator('#clear').click(); await count(0);
       assert.equal(await page.locator('#undo').isDisabled(), true); assert.equal((await stored()).pages.length, 0);
     });
@@ -233,7 +336,7 @@ function zipEntries(bytes) {
       });
       await idle(); assert.deepEqual(await ids(), [40, 20, 30, 10]);
       await check(10).click({modifiers: ['Shift']}); assert.deepEqual(await selected(), [20, 30, 10]);
-      await page.locator('#pages article[data-page-id="20"] button').click(); await count(3);
+      await page.locator('#pages article[data-page-id="20"]').getByRole('button', {name: '删除', exact: true}).click(); await count(3);
       await check(40).click({modifiers: ['Shift']}); assert.deepEqual(await selected(), [40, 30, 10]);
       await page.locator('#clear-selection').click(); await check(10).click({modifiers: ['Shift']}); assert.deepEqual(await selected(), [10]);
       page.once('dialog', dialog => dialog.accept()); await page.locator('#clear').click(); await count(0);
@@ -285,6 +388,62 @@ function zipEntries(bytes) {
       await page.keyboard.press('Enter'); await page.keyboard.press('Delete'); await count(0);
       assert.equal(await page.locator('#lightbox').evaluate(dialog => dialog.open), false);
       await page.waitForFunction(() => document.activeElement === document.querySelector('#pages'));
+    });
+
+    await test('synthetic driver protocol waits for ownership and rejects old-source readiness', async () => {
+      const workspace = page, protocol = await context.newPage();
+      try {
+        await protocol.goto(origin + '/fixture.html');
+        await protocol.setContent('<button id="tab-source">Source</button><input id="file" type="file" disabled><video id="video"></video>');
+        await protocol.evaluate(() => {
+          window.ready = true; window.pending = true; window.sourceReady = true;
+          window.busy = () => pending; window.loadedIdentity = {sourceKey: 'file:old'};
+          window.selections = []; window.phase = 'operation';
+          Object.defineProperty(document.querySelector('#video'), 'seekable', {get: () => ({length: 1})});
+          document.querySelector('#file').onchange = event => {
+            const input = event.target, file = input.files[0];
+            selections.push({ignored: busy() || input.disabled, name: file.name, size: file.size, lastModified: file.lastModified});
+            if (!busy() && !input.disabled) phase = 'binding';
+            input.value = '';
+          };
+        });
+        // Synthetic protocol gates only: no native decoder, frame or seek success is asserted here.
+        page = new Proxy(protocol, {get(target, key) {
+          if (key === 'waitForFunction') return async (predicate, argument, ...options) => {
+            const state = await target.evaluate(() => ({phase, selections}));
+            if (state.phase === 'operation') {
+              assert.deepEqual(state.selections, [], 'the driver must not select while another operation owns the disabled input');
+              assert.equal(await target.evaluate(predicate, argument), false, 'pending ownership cannot satisfy readiness');
+              await target.evaluate(() => { pending = false; });
+              assert.equal(await target.evaluate(predicate, argument), false, 'idle alone cannot satisfy a disabled input');
+              await target.evaluate(() => { document.querySelector('#file').disabled = false; });
+            } else {
+              assert.equal(await target.evaluate(predicate, argument), false, 'an idle seekable old source cannot satisfy the requested file');
+              await target.evaluate(() => {
+                const file = selections[0];
+                loadedIdentity = {sourceKey: 'file:' + JSON.stringify([file.name, file.size, file.lastModified])};
+              });
+            }
+            return target.waitForFunction(predicate, argument, ...options);
+          };
+          const value = Reflect.get(target, key); return typeof value === 'function' ? value.bind(target) : value;
+        }});
+        await load(wrong);
+        const selected = await protocol.evaluate(() => selections);
+        assert.equal(selected.length, 1, 'the path is selected once after ownership is released');
+        assert.equal(selected[0].ignored, false);
+        assert.equal(selected[0].name, path.basename(wrong)); assert.equal(selected[0].size, fs.statSync(wrong).size);
+        assert.equal(await protocol.locator('#file').inputValue(), '', 'metadata survives the handler clearing its input');
+      } finally { page = workspace; await protocol.close(); }
+    });
+
+    await test('native file driver preserves path metadata and same-file reload identity', async () => {
+      await seed([]); await load(fixture);
+      const identity = await page.evaluate(() => loadedIdentity), metadata = fs.statSync(fixture);
+      assert.equal(identity.sourceKey, 'file:' + JSON.stringify([path.basename(fixture), metadata.size, Math.trunc(metadata.mtimeMs)]));
+      await load(fixture);
+      assert.deepEqual(await page.evaluate(() => loadedIdentity), identity, 'selecting the same path again retains its original File identity');
+      assert.equal(await page.locator('#file').inputValue(), '');
     });
 
     await test('seek requires matching persisted source identity, rejects same-name files, other course/batch and legacy identity', async () => {
@@ -379,9 +538,9 @@ function zipEntries(bytes) {
     await test('similar review reevaluates nontransitive candidates and preserves pages on read or commit failure', async () => {
       await seed([1, 2, 3].map(id => ({id, sourceTime: id, sourceKey: 'file:chain'})));
       await page.evaluate(async () => {
-        const signatures = [0, .5, 1].map(percent => {
+        const signatures = [0, 2, 4].map(percent => {
           const sig = new Uint8ClampedArray(192 * 108 * 4);
-          for (let i = 0; i < Math.floor(192 * 108 * percent / 100); i++) sig.fill(255, i * 4, i * 4 + 3);
+          for (let i = 0; i < Math.floor(192 * 108 * percent / 100); i++) sig.fill(30, i * 4, i * 4 + 3);
           return sig;
         });
         if (!PPTCore.similar(signatures[0], signatures[1], 3) || !PPTCore.similar(signatures[1], signatures[2], 3) || PPTCore.similar(signatures[0], signatures[2], 3)) throw Error('Invalid nontransitive fixture');
@@ -456,6 +615,214 @@ function zipEntries(bytes) {
       assert.match(await page.locator('#status').textContent(), /导出失败/);
     });
 
+    await test('low-height expanded batch keeps a bounded reachable gallery and native first-card drag', async () => {
+      const observations = [], captureURL = page.url();
+      const setBatch = () => page.evaluate(async course => {
+        batchPage = location.origin + '/study-capture-courses/low-height/preview-detail/list';
+        batchJobs = [
+          {id: 'low-a', course, sourceName: '12345/2-batch-a.mp4', url: location.origin + '/2-a.mp4', selected: true, state: 'pending', requiresCrop: false, options: []},
+          {id: 'low-b', course, sourceName: '12345/2-batch-b.mp4', url: location.origin + '/2-b.mp4', selected: true, state: 'pending', requiresCrop: false, options: []},
+          {id: 'low-c', course, sourceName: '12345/0-batch-c-teacher.mp4', url: location.origin + '/0-c.mp4', selected: false, state: 'needs-crop', requiresCrop: true, cropConfirmed: false, options: []}
+        ];
+        await persistBatch(); renderBatchJobs();
+      }, {name: '传感网络与大数据技术', date: '2026-11-07', start: '10:10:00'});
+      const measure = () => page.evaluate(() => {
+        const rect = node => { const r = node.getBoundingClientRect(); return {x: r.x, y: r.y, right: r.right, bottom: r.bottom, width: r.width, height: r.height}; };
+        const clips = node => {
+          const regions = [{name: 'viewport', x: 0, y: 0, right: innerWidth, bottom: innerHeight, clipX: true, clipY: true}];
+          for (let parent = node.parentElement; parent; parent = parent.parentElement) {
+            const css = getComputedStyle(parent), clipX = /auto|scroll|hidden|clip/.test(css.overflowX), clipY = /auto|scroll|hidden|clip/.test(css.overflowY);
+            if (clipX || clipY) { const r = parent.getBoundingClientRect(); regions.push({name: parent.id || parent.className || parent.tagName,
+              x: r.x + parent.clientLeft, y: r.y + parent.clientTop, right: r.x + parent.clientLeft + parent.clientWidth,
+              bottom: r.y + parent.clientTop + parent.clientHeight, clipX, clipY}); }
+          }
+          return regions;
+        };
+        const card = document.querySelector('#pages article'), sheet = $('pages'), bounds = rect(sheet);
+        const controls = [card, card.querySelector('.page-select'), card.querySelector('.slide-time'), card.querySelector('.learning-toggle'),
+          [...card.querySelectorAll('button')].find(button => button.textContent.trim() === '删除')].map(node => {
+          const r = rect(node), points = [[r.x + 3, r.y + 3], [r.right - 3, r.y + 3], [r.x + 3, r.bottom - 3], [r.right - 3, r.bottom - 3], [r.x + r.width / 2, r.y + r.height / 2]];
+          return {name: node.className || node.tagName, rect: r, clips: clips(node), hits: points.map(([x, y]) => {
+            const target = document.elementFromPoint(x, y); return target === node || node.contains(target);
+          })};
+        });
+        const thumbs = [...sheet.querySelectorAll('img')].map(img => {
+          const r = img.getBoundingClientRect(); return {id: img.closest('article').dataset.pageId, loaded: !!img.getAttribute('src'), allowed: r.bottom >= bounds.y - 200 && r.y <= bounds.bottom + 200};
+        });
+        const workspace = document.querySelector('.workspace-sheet');
+        return {width: innerWidth, height: innerHeight, documentWidth: document.documentElement.scrollWidth, documentHeight: document.documentElement.scrollHeight,
+          windowScroll: scrollY, batchOpen: $('batch-panel').open, batchJobs: batchJobs.length, busy: busy(), task: !!task,
+          workspace: {...rect(workspace), scrollTop: workspace.scrollTop, clientHeight: workspace.clientHeight, scrollHeight: workspace.scrollHeight, overflow: getComputedStyle(workspace).overflowY},
+          results: rect($('results')), exportRows: [...document.querySelectorAll('.result-export > .export-row')].map(rect),
+          pages: {...bounds, clientHeight: sheet.clientHeight, scrollHeight: sheet.scrollHeight, scrollTop: sheet.scrollTop},
+          stop: rect($('stop')), actionRow: rect($('stop').parentElement), controls,
+          thumbnails: {loaded: thumbs.filter(t => t.loaded).length, allowed: thumbs.filter(t => t.allowed).length, outside: thumbs.filter(t => t.loaded && !t.allowed).map(t => t.id)}};
+      });
+      const saveGeometry = () => fs.writeFileSync(path.join(output, 'fix-2-gallery-geometry.json'), JSON.stringify(observations, null, 2));
+      let sourceKey;
+      for (const [width, height] of [[1280, 720], [1440, 900], [390, 844]]) {
+        await page.setViewportSize({width, height}); await seed([]); await load(fixture);
+        sourceKey = await page.evaluate(() => loadedIdentity.sourceKey);
+        await seed(Array.from({length: 4}, (_, i) => ({id: 10 + i, image: i % 3, sourceKey}))); await load(fixture); await setBatch();
+        await page.locator('#batch-panel > summary').click();
+        const observation = {width, height, initial: await measure()}; observations.push(observation); saveGeometry();
+        await page.screenshot({path: path.join(output, `fix-2-expanded-before-scroll-${width}x${height}.png`)});
+        assert.equal(observation.initial.batchOpen && observation.initial.batchJobs === 3 && !observation.initial.busy && !observation.initial.task, true);
+        assert(observation.initial.pages.bottom <= observation.initial.results.bottom + 0.5, 'gallery stays inside its allocated results height instead of escaping below the action row');
+        assert(observation.initial.documentWidth <= width);
+        if (width > 1020) assert(observation.initial.documentHeight <= height, 'desktop workspace scroll does not escape into document overflow');
+        const firstCard = page.locator('#pages article').first(), lastCard = page.locator('#pages article').last();
+        await firstCard.scrollIntoViewIfNeeded();
+        await page.waitForFunction(() => { const img = document.querySelector('#pages article img'); return img.complete && img.naturalWidth > 0; });
+        observation.reached = await measure(); saveGeometry();
+        for (const control of observation.reached.controls) {
+          for (const clip of control.clips) assert((!clip.clipX || (control.rect.x >= clip.x - 0.5 && control.rect.right <= clip.right + 0.5)) &&
+            (!clip.clipY || (control.rect.y >= clip.y - 0.5 && control.rect.bottom <= clip.bottom + 0.5)), `${control.name} is not fully reachable inside ${clip.name}`);
+          assert(control.hits.every(Boolean), `${control.name} corners and center are hit-testable`);
+          assert(control.rect.bottom <= observation.reached.actionRow.y, 'gallery controls remain above the shared action row');
+        }
+        assert(observation.reached.pages.clientHeight >= observation.reached.controls[0].rect.height, 'finite lazy root can display a complete card and its controls');
+        assert(observation.reached.thumbnails.loaded > 0 && observation.reached.thumbnails.loaded <= observation.reached.thumbnails.allowed);
+        assert.deepEqual(observation.reached.thumbnails.outside, []);
+        await firstCard.locator('.page-select').check(); assert.match(await page.locator('#selected-count').textContent(), /已选 1 页/);
+        await firstCard.locator('.page-select').uncheck(); await firstCard.locator('.slide-time').click();
+        await page.screenshot({path: path.join(output, `fix-2-expanded-reachable-${width}x${height}.png`)});
+        const before = await stored(), originalOrder = await ids();
+        await page.evaluate(() => {
+          window.__galleryEvents = [];
+          for (const type of ['pointerdown', 'dragstart', 'drop', 'dragend']) document.addEventListener(type, event => {
+            window.__galleryEvents.push({type, trusted: event.isTrusted, id: event.target.closest('article')?.dataset.pageId,
+              hitId: document.elementFromPoint(event.clientX, event.clientY)?.closest('article')?.dataset.pageId, x: event.clientX, y: event.clientY,
+              busy: busy(), task: !!task, draggable: event.target.closest('article')?.draggable});
+          }, {capture: true, passive: true});
+        });
+        observation.beforeDrag = await measure(); saveGeometry();
+        const firstBox = await firstCard.boundingBox(), source = {x: firstBox.x + firstBox.width / 2, y: firstBox.y + firstBox.height / 2};
+        await page.mouse.move(source.x, source.y); await page.mouse.down();
+        try {
+          // Start a trusted native drag on the visible source before ordinary scrolling reaches the target.
+          await page.mouse.move(source.x + 12, source.y, {steps: 3});
+          await page.waitForFunction(() => window.__galleryEvents.some(event => event.type === 'dragstart'));
+          assert.deepEqual(await page.evaluate(() => window.__galleryEvents.filter(event => event.type === 'dragstart').map(event => ({id: event.id, trusted: event.trusted}))), [{id: String(originalOrder[0]), trusted: true}]);
+          await lastCard.scrollIntoViewIfNeeded();
+          const lastBox = await lastCard.boundingBox(); observation.dropTarget = {x: lastBox.x + lastBox.width - 4, y: lastBox.y + 12};
+          assert.equal(await page.evaluate(({x, y}) => document.elementFromPoint(x, y)?.closest('article')?.dataset.pageId, observation.dropTarget), String(originalOrder.at(-1)));
+          await page.mouse.move(observation.dropTarget.x, observation.dropTarget.y, {steps: 10});
+        } finally { await page.mouse.up(); }
+        try { await page.waitForFunction(id => !busy() && pages.at(-1)?.id === id, originalOrder[0]); }
+        finally { observation.events = await page.evaluate(() => window.__galleryEvents); observation.order = await ids(); saveGeometry(); }
+        assert.deepEqual(observation.events.filter(event => event.type === 'dragstart').map(event => ({id: event.id, trusted: event.trusted})), [{id: String(originalOrder[0]), trusted: true}]);
+        assert(observation.events.some(event => event.type === 'drop' && event.trusted && event.id === String(originalOrder.at(-1))));
+        assert.deepEqual(observation.order, [...originalOrder.slice(1), originalOrder[0]]);
+        const retained = records => records.map(({order, ...record}) => record).sort((a, b) => a.id - b.id);
+        assert.deepEqual(retained((await stored()).pages), retained(before.pages), 'native drag changes order alone, preserving metadata, signatures and image bytes');
+        const orderCheck = await context.newPage(); orderCheck.on('pageerror', error => errors.push(error.message));
+        try { await orderCheck.goto(captureURL); await orderCheck.waitForFunction(expected => pages.length === expected.length && pages.every((item, index) => item.id === expected[index]), observation.order); }
+        finally { await orderCheck.close(); }
+        observation.reloadOrder = observation.order; assert.equal(await page.locator('#batch-panel').evaluate(panel => panel.open), true); saveGeometry();
+      }
+      // A longer restored list must enlarge only the lazy root's content, never the root or workspace row.
+      await page.setViewportSize({width: 1280, height: 720});
+      await seed(Array.from({length: 1000}, (_, i) => ({id: i + 1, image: i % 3, sourceKey}))); await load(fixture); await setBatch();
+      await page.locator('#batch-panel > summary').click(); await page.locator('#pages article').first().scrollIntoViewIfNeeded();
+      await page.waitForFunction(() => { const img = document.querySelector('#pages article img'); return img.complete && img.naturalWidth > 0; });
+      const large = {restored: 1000, reached: await measure()}; observations.push(large); saveGeometry();
+      const small = observations[0].reached;
+      assert(Math.abs(large.reached.pages.height - small.pages.height) <= 1, '1000 cards preserve the same finite lazy-root height');
+      assert(Math.abs(large.reached.workspace.scrollHeight - small.workspace.scrollHeight) <= 1, '1000 cards do not enlarge the outer workspace');
+      assert(large.reached.pages.scrollHeight > large.reached.pages.clientHeight * 10);
+      assert(large.reached.thumbnails.loaded <= large.reached.thumbnails.allowed); assert.deepEqual(large.reached.thumbnails.outside, []);
+      assert.equal(large.reached.documentHeight, 720); assert.equal(large.reached.windowScroll, 0);
+      await page.setViewportSize({width: 1440, height: 900}); await seed([]);
+    });
+
+    await test('expanded running batch keeps shared Stop visible and hit-testable at desktop and narrow sizes', async () => {
+      const geometry = [];
+      for (const [width, height] of [[1280, 800], [1440, 900], [1920, 1080], [390, 844]]) {
+        await page.setViewportSize({width, height}); await seed([{id: 101}, {id: 102, image: 1}]);
+        const before = await stored();
+        await page.evaluate(async ({url, course}) => {
+          batchPage = location.origin + '/study-capture-courses/stop-visibility/preview-detail/list';
+          batchJobs = [
+            {id: 'stop-auto', course, sourceName: '2-自动课次.mp4', url, selected: true, state: 'pending', requiresCrop: false, options: []},
+            {id: 'stop-zero', course, sourceName: '0-待确认 PPT 区域.mp4', url: url + '?track=0', selected: false, state: 'needs-crop', requiresCrop: true, cropConfirmed: false, options: []}
+          ];
+          await persistBatch(); renderBatchJobs();
+          window.chrome ||= {}; chrome.permissions = {request: async () => true};
+          window.__stopFixture = {entered: false, aborted: false, originalScan: PPTScanner.prototype.scan};
+          PPTScanner.prototype.scan = async function ({signal, save}) {
+            // Keep the real controller/fastScan/save/Stop path; bound only the scanner's wait for cancellation.
+            await save(frame()); window.__stopFixture.entered = true;
+            await new Promise((resolve, reject) => {
+              const deadline = setTimeout(() => reject(Error('Stop fixture exceeded its 15-second cancellation deadline')), 15000);
+              signal.addEventListener('abort', () => {
+                clearTimeout(deadline); window.__stopFixture.aborted = true; reject(signal.reason);
+              }, {once: true});
+            });
+          };
+        }, {url: origin + '/' + path.relative(root, fixture).split(path.sep).join('/'), course: {...naming.course, date: '2026-11-07'}});
+        await page.locator('#batch-panel > summary').click();
+        await page.locator('#batch-start').click();
+        await page.waitForFunction(() => window.__stopFixture.entered && batchRunning && task && pages.length === 1);
+        assert.equal(await page.locator('#batch-panel').evaluate(panel => panel.open), true);
+        assert.equal(await page.locator('#stop').count(), 1);
+        assert.equal(await page.locator('#batch-jobs .batch-job').count(), 2);
+        assert.match(await page.locator('[data-job-id="stop-zero"]').textContent(), /需要手动框选/);
+        // These frames synchronize the actual screenshot only, not controller progress or button state.
+        await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+        const measured = await page.evaluate(() => {
+          const rect = node => { const r = node.getBoundingClientRect(); return {x: r.x, y: r.y, right: r.right, bottom: r.bottom, width: r.width, height: r.height}; };
+          const clipping = node => {
+            const clips = [{name: 'viewport', x: 0, y: 0, right: innerWidth, bottom: innerHeight, clipX: true, clipY: true}];
+            for (let parent = node.parentElement; parent; parent = parent.parentElement) {
+              const css = getComputedStyle(parent), clipX = /auto|scroll|hidden|clip/.test(css.overflowX), clipY = /auto|scroll|hidden|clip/.test(css.overflowY);
+              if (clipX || clipY) { const r = parent.getBoundingClientRect(); clips.push({name: parent.id || parent.className || parent.tagName,
+                x: r.x + parent.clientLeft, y: r.y + parent.clientTop, right: r.x + parent.clientLeft + parent.clientWidth,
+                bottom: r.y + parent.clientTop + parent.clientHeight, clipX, clipY}); }
+            }
+            return clips;
+          };
+          const contained = (r, clips) => clips.every(c => (!c.clipX || (r.x >= c.x && r.right <= c.right)) && (!c.clipY || (r.y >= c.y && r.bottom <= c.bottom)));
+          const hit = (node, x, y) => { const target = document.elementFromPoint(x, y); return target === node || node.contains(target); };
+          const stop = $('stop'), r = rect(stop), region = rect(stop.parentElement);
+          const targets = [[r.x + 3, r.y + 3], [r.right - 3, r.y + 3], [r.x + 3, r.bottom - 3], [r.right - 3, r.bottom - 3], [r.x + r.width / 2, r.y + r.height / 2]];
+          const essential = ['#batch-panel > summary', '#tab-source', '#tab-extraction', '#tab-export', '#crop-select', '#full', '#shot'].map(selector => {
+            const node = document.querySelector(selector), bounds = rect(node), visible = contained(bounds, clipping(node));
+            const overlap = bounds.x < region.right && bounds.right > region.x && bounds.y < region.bottom && bounds.bottom > region.y;
+            return {selector, visible, overlap, hit: visible ? hit(node, bounds.x + bounds.width / 2, bounds.y + bounds.height / 2) : null};
+          });
+          return {width: innerWidth, height: innerHeight, documentWidth: document.documentElement.scrollWidth, enabled: !stop.disabled,
+            stop: r, region, editor: rect(document.querySelector('.editor-layout')), clips: clipping(stop), targets: targets.map(([x, y]) => ({x, y, hit: hit(stop, x, y)})), essential,
+            captureScroll: $('panel-capture').scrollTop, batchOpen: $('batch-panel').open, running: batchRunning, taskRunning: activeLesson.task.state};
+        });
+        geometry.push(measured); fs.writeFileSync(path.join(output, 'fix-1-stop-geometry.json'), JSON.stringify(geometry, null, 2));
+        assert.equal(measured.enabled && measured.running && measured.batchOpen, true);
+        assert.equal(measured.taskRunning, 'running'); assert.equal(measured.captureScroll, 0, 'fixture never pre-scrolls the capture pane');
+        assert(measured.documentWidth <= width, 'running actions do not add horizontal overflow');
+        if (width > 1020) assert(measured.editor.bottom <= measured.region.y, 'desktop action row reserves space below both panes');
+        for (const clip of measured.clips) assert((!clip.clipX || (measured.stop.x >= clip.x && measured.stop.right <= clip.right)) &&
+          (!clip.clipY || (measured.stop.y >= clip.y && measured.stop.bottom <= clip.bottom)), `enabled Stop escapes its actual clipping context ${clip.name}: ${JSON.stringify(measured)}`);
+        assert(measured.targets.every(target => target.hit), 'all four Stop corners and center are hit-testable before any scroll or click');
+        measured.essential.filter(control => control.visible).forEach(control => assert(!control.overlap && control.hit, `action row covers ${control.selector}`));
+        await page.screenshot({path: path.join(output, `fix-1-expanded-running-${width}x${height}.png`)});
+        const during = await stored(); assert.equal(during.pages.length, before.pages.length + 1);
+        const center = measured.targets[4]; await page.mouse.click(center.x, center.y);
+        assert.equal(await page.evaluate(() => window.__stopFixture.aborted), true, 'the real Stop click aborts the active scan immediately');
+        await page.waitForFunction(() => !batchRunning && !busy() && batchJobs[0].state === 'stopped');
+        assert.equal(await page.locator('#batch-panel').evaluate(panel => panel.open), true, 'Stop keeps the batch disclosure expanded');
+        assert.equal(await page.locator('#stop').isDisabled(), true);
+        assert.match(await page.locator('#batch-status').textContent(), /已停止.*截图均已保留/);
+        const after = await stored(); assert.deepEqual(after.pages, during.pages, 'Stop retains existing and newly committed page bytes');
+        before.pages.forEach(record => assert.deepEqual(after.pages.find(page => page.id === record.id), record));
+        assert.equal(await page.locator('#pages article').count(), 1);
+        measured.cancellation = {immediateAbort: true, retainedBefore: before.pages.length, retainedDuring: during.pages.length,
+          retainedAfter: after.pages.length, activeCards: 1, state: 'stopped', batchStillOpen: true};
+        fs.writeFileSync(path.join(output, 'fix-1-stop-geometry.json'), JSON.stringify(geometry, null, 2));
+        await page.evaluate(() => { PPTScanner.prototype.scan = window.__stopFixture.originalScan; });
+      }
+      await page.setViewportSize({width: 1440, height: 900}); await seed([]);
+    });
+
     await test('1280×800, 1440×900 and 1920×1080 keep video beside a bounded independently scrolling contact sheet', async () => {
       await seed([]); await load(fixture); const sourceKey = await page.evaluate(() => loadedIdentity.sourceKey);
       await seed(Array.from({length: 72}, (_, i) => ({id: i + 1, image: i % 3, sourceTime: i / 20, sourceKey}))); await load(fixture); await atTime(0.25);
@@ -469,8 +836,9 @@ function zipEntries(bytes) {
             scrollHeight: document.querySelector('#pages').scrollHeight, scrollClient: document.querySelector('#pages').clientHeight,
             actions: ['pdf', 'export-zip', 'run', 'stop', 'shot', 'clear', 'clean-similar', 'undo'].map(rect)};
         });
+        fs.writeFileSync(path.join(output, 'geometry-progress.json'), JSON.stringify([...geometry, measured], null, 2));
         assert(measured.documentWidth <= width && measured.documentHeight <= height, JSON.stringify(measured));
-        assert.equal(measured.tools.width, 240); assert(measured.video.right < measured.results.x, 'video is beside the review pane');
+        assert(measured.tools.width >= 260 && measured.tools.width <= 280, 'inspector has readable width'); assert(measured.video.right < measured.results.x, 'video is beside the review pane');
         assert(measured.pages.bottom <= height && measured.pages.height > 250 && measured.scrollHeight > measured.scrollClient);
         measured.actions.forEach(action => assert(action.x >= 0 && action.y >= 0 && action.right <= width && action.bottom <= height));
         await page.locator('#pages').evaluate(sheet => { sheet.scrollTop = sheet.scrollHeight; });
@@ -480,6 +848,47 @@ function zipEntries(bytes) {
         await page.screenshot({path: path.join(output, `desktop-${width}x${height}.png`)}); geometry.push(measured);
       }
       fs.writeFileSync(path.join(output, 'geometry.json'), JSON.stringify(geometry, null, 2));
+    });
+    await test('real workspace screenshots cover narrow stacking, wide batch, dark, contrast and reduced motion', async () => {
+      const settleLayout = () => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      assert.equal(await page.locator('.app-shell').count(), 1);
+      await page.setViewportSize({width: 1440, height: 900}); await page.locator('#tab-source').click();
+      await page.evaluate(() => {
+        batchPage = location.origin + '/study-capture-courses/72/preview-detail/list';
+        const course = {name: '机器学习 · 批量课程', date: '2026-11-07', start: '10:00:00'};
+        batchJobs = [
+          {id: 'visual-auto', course, sourceName: '2-第二节课堂录像.mp4', url: location.origin + '/2-fixture.mp4', selected: true, state: 'pending', requiresCrop: false, options: []},
+          {id: 'visual-zero', course, sourceName: '0-第三节课堂录像（待确认 PPT 区域）.mp4', url: location.origin + '/0-fixture.mp4', selected: false, state: 'needs-crop', requiresCrop: true, cropConfirmed: false, options: []}
+        ]; renderBatchJobs();
+        sources = [{name: '0-' + '光电传感与机器视觉课堂录像完整来源名称'.repeat(5) + '.mp4', url: location.origin + '/0-long-source.mp4', source: '合成课程页'}]; updateSources();
+      });
+      await page.locator('#sources').selectOption(origin + '/0-long-source.mp4');
+      await page.locator('#batch-panel > summary').click();
+      await page.screenshot({path: path.join(output, 'batch-wide-1440x900.png')});
+      await page.locator('#batch-panel > summary').click();
+      await page.setViewportSize({width: 390, height: 844}); await settleLayout();
+      const narrow = await page.evaluate(() => ({documentWidth: document.documentElement.scrollWidth, width: innerWidth,
+        inspectorBottom: $('workspace-tools').getBoundingClientRect().bottom, workspaceTop: document.querySelector('.workspace-sheet').getBoundingClientRect().top,
+        resultsTop: $('results').getBoundingClientRect().top, videoBottom: $('panel-capture').getBoundingClientRect().bottom}));
+      assert(narrow.documentWidth <= narrow.width && narrow.workspaceTop >= narrow.inspectorBottom && narrow.resultsTop >= narrow.videoBottom);
+      fs.writeFileSync(path.join(output, 'narrow-geometry.json'), JSON.stringify(narrow, null, 2));
+      await page.screenshot({path: path.join(output, 'stacked-390x844.png')});
+      await page.locator('#results').scrollIntoViewIfNeeded();
+      await page.screenshot({path: path.join(output, 'results-390x844.png')});
+      await page.locator('#export-settings').click();
+      assert.equal(await page.locator('#course-name').evaluate(input => input === document.activeElement), true);
+      assert.equal(await page.locator('#panel-export').evaluate(panel => { const r = panel.getBoundingClientRect(); return r.top >= 0 && r.top < innerHeight; }), true, 'narrow export shortcut brings its focused fields into view');
+      await page.locator('#tab-source').click(); await page.setViewportSize({width: 1440, height: 900});
+      await page.evaluate(() => scrollTo(0, 0)); await settleLayout();
+      await page.emulateMedia({colorScheme: 'dark', reducedMotion: 'no-preference'}); await settleLayout();
+      await page.waitForFunction(() => document.getAnimations().every(animation => animation.playState !== 'running'));
+      await page.screenshot({path: path.join(output, 'dark-1440x900.png')});
+      await page.emulateMedia({contrast: 'more'});
+      await page.screenshot({path: path.join(output, 'contrast-dark-1440x900.png')});
+      await page.emulateMedia({colorScheme: 'light', contrast: 'no-preference', reducedMotion: 'reduce'});
+      await page.locator('#tab-export').click();
+      assert.equal(await page.evaluate(() => document.getAnimations().filter(animation => animation.playState === 'running').length), 0);
+      await page.screenshot({path: path.join(output, 'reduce-1440x900.png')});
     });
     assert.deepEqual(errors, [], 'no browser script errors'); assert.deepEqual(blocked, [], 'no external network requests');
     fs.writeFileSync(path.join(output, 'results.json'), JSON.stringify({passed: results, errors, blocked, output}, null, 2));
@@ -494,5 +903,7 @@ function zipEntries(bytes) {
   } finally {
     if (context) await context.close(); if (browser) await browser.close();
     if (server?.listening) await new Promise(resolve => server.close(resolve));
+    fs.writeFileSync(path.join(output, 'cleanup.json'), JSON.stringify({contextClosed: !context || context.pages().length === 0,
+      browserDisconnected: !browser || !browser.isConnected(), serverClosed: !server?.listening}, null, 2));
   }
 })();

@@ -15,6 +15,10 @@ async function writePDF(pages, {layout = 'single', timestamps = false, bookmarks
   await writeExport(pdfParts(pages, {layout, timestamps, bookmarks}), readImage, write);
 }
 
+async function writeCoursePDF(lessons, {title, layout = 'single', timestamps = false, readImage, write}) {
+  await writeExport(pdfParts([], {layout, timestamps, course: {title, lessons}}), readImage, write);
+}
+
 async function writeZIP(pages, {readImage, write}) {
   await writeExport(zipParts(pages), readImage, write);
 }
@@ -155,7 +159,18 @@ function pdfTime(sourceTime) {
   return [seconds / 3600n, seconds / 60n % 60n, seconds % 60n].map(n => String(n).padStart(2, '0')).join(':');
 }
 
-function* pdfParts(pages, {layout, timestamps = false, bookmarks = false} = {}) {
+// PDF outline strings use UTF-16BE; replace historical titles truncated inside a surrogate pair.
+function pdfUnicode(value) {
+  let hex = 'FEFF';
+  for (let char of String(value)) {
+    const code = char.charCodeAt(0);
+    if (char.length === 1 && code >= 0xd800 && code <= 0xdfff) char = '\ufffd';
+    for (let i = 0; i < char.length; i++) hex += char.charCodeAt(i).toString(16).padStart(4, '0');
+  }
+  return `<${hex}>`;
+}
+
+function* pdfParts(pages, {layout, timestamps = false, bookmarks = false, course} = {}) {
   const enc = new TextEncoder(), offsets = [0], handout = layout === 'handout';
   const hasFont = handout || timestamps === true;
   let length = 0, next = hasFont ? 4 : 3;
@@ -169,14 +184,33 @@ function* pdfParts(pages, {layout, timestamps = false, bookmarks = false} = {}) 
     yield* put(`${n} 0 obj\n`); yield* put(body); yield* put('\nendobj\n');
   }
   const perSheet = handout ? 2 : 1;
-  const sheets = Array.from({length: Math.ceil(pages.length / perSheet)}, (_, i) => {
-    const slides = pages.slice(i * perSheet, (i + 1) * perSheet), n = next++;
-    return {n, slides, images: slides.map(() => next++), content: next++};
-  });
-  const outline = bookmarks === true && pages.length ? next++ : null;
-  const items = outline ? pages.map(() => next++) : [];
+  const sheets = [], groups = [];
+  let slideNumber = 0;
+  // Course lessons start on a new physical sheet, even after an odd handout row.
+  for (const lesson of course ? course.lessons : [{pages}]) {
+    const positions = [];
+    for (let i = 0; i < lesson.pages.length; i += perSheet) {
+      const slides = lesson.pages.slice(i, i + perSheet), n = next++;
+      const sheet = {n, slides, images: slides.map(() => next++), content: next++, firstNumber: slideNumber + 1};
+      sheets.push(sheet);
+      for (const [row, page] of slides.entries()) {
+        const time = pdfTime(page.sourceTime), top = handout ? row ? 364 : 758 : 842 * page.h / page.w + (timestamps === true && time ? 28 : 0);
+        if (course) positions.push({title: `第 ${i + row + 1} 页${time ? ' · ' + time : ''}`, dest: `[${n} 0 R /XYZ 0 ${top} null]`});
+        slideNumber++;
+      }
+    }
+    if (course && positions.length) groups.push({title: lesson.title, children: positions, dest: positions[0].dest, count: positions.length});
+  }
+  const outline = (course || bookmarks === true) && sheets.length ? next++ : null;
+  const items = outline && !course ? pages.map(() => next++) : [];
+  const courseItem = outline && course ? {n: next++, title: course.title || '未命名课程', children: groups,
+    dest: groups[0].dest, count: groups.length + slideNumber} : null;
+  if (courseItem) for (const group of groups) {
+    group.n = next++;
+    for (const position of group.children) position.n = next++;
+  }
   yield* put('%PDF-1.4\n');
-  yield* obj(1, `<< /Type /Catalog /Pages 2 0 R${outline ? ` /Outlines ${outline} 0 R` : ''} >>`);
+  yield* obj(1, `<< /Type /Catalog /Pages 2 0 R${outline ? ` /Outlines ${outline} 0 R${course ? ' /PageMode /UseOutlines' : ''}` : ''} >>`);
   yield* obj(2, `<< /Type /Pages /Count ${sheets.length} /Kids [${sheets.map(sheet => `${sheet.n} 0 R`).join(' ')}] >>`);
   if (hasFont) yield* obj(3, '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>');
   for (const [i, sheet] of sheets.entries()) {
@@ -201,7 +235,7 @@ function* pdfParts(pages, {layout, timestamps = false, bookmarks = false} = {}) 
           commands += `360 ${y} m 555 ${y} l S\n`;
         }
         const time = timestamps === true ? pdfTime(p.sourceTime) : '';
-        commands += `BT /F1 10 Tf 40 ${bottom - 22} Td (${i * 2 + row + 1}${time ? ' - ' + time : ''}) Tj ET\n`;
+        commands += `BT /F1 10 Tf 40 ${bottom - 22} Td (${course ? sheet.firstNumber + row : i * 2 + row + 1}${time ? ' - ' + time : ''}) Tj ET\n`;
       } else {
         commands = `q ${w} 0 0 ${h - footer} 0 ${footer} cm /Im0 Do Q\n`;
         if (footer) commands += `BT /F1 10 Tf 24 10 Td (${pdfTime(p.sourceTime)}) Tj ET\n`;
@@ -210,7 +244,18 @@ function* pdfParts(pages, {layout, timestamps = false, bookmarks = false} = {}) 
     if (handout) commands += `BT /F1 10 Tf 280 24 Td (${i + 1} / ${sheets.length}) Tj ET\n`;
     yield* obj(sheet.content, `<< /Length ${enc.encode(commands).length} >>\nstream\n${commands}endstream`);
   }
-  if (outline) {
+  if (courseItem) {
+    function* nodes(children, parent) {
+      for (const [i, node] of children.entries()) {
+        const links = `${i ? ` /Prev ${children[i - 1].n} 0 R` : ''}${i + 1 < children.length ? ` /Next ${children[i + 1].n} 0 R` : ''}`;
+        const nested = node.children ? ` /First ${node.children[0].n} 0 R /Last ${node.children.at(-1).n} 0 R /Count ${node.count}` : '';
+        yield* obj(node.n, `<< /Title ${pdfUnicode(node.title)} /Parent ${parent} 0 R${links}${nested} /Dest ${node.dest} >>`);
+        if (node.children) yield* nodes(node.children, node.n);
+      }
+    }
+    yield* obj(outline, `<< /Type /Outlines /First ${courseItem.n} 0 R /Last ${courseItem.n} 0 R /Count ${courseItem.count + 1} >>`);
+    yield* nodes([courseItem], outline);
+  } else if (outline) {
     yield* obj(outline, `<< /Type /Outlines /First ${items[0]} 0 R /Last ${items.at(-1)} 0 R /Count ${items.length} >>`);
     for (const [i, n] of items.entries()) {
       const p = pages[i], time = pdfTime(p.sourceTime), sheet = sheets[Math.floor(i / perSheet)];

@@ -8,6 +8,31 @@ const {dependency} = require('./runtime.cjs');
 const {PDFDocument, PDFName} = dependency('pdf-lib');
 const sharp = dependency('sharp');
 const source = fs.readFileSync(path.join(__dirname, '../pdf.js'), 'utf8');
+
+for (const cacheKind of ['absent', 'successful', 'rejecting']) {
+  test(`downloadBlob delayed cleanup handles ${cacheKind} cache without retaining URLs`, async () => {
+    const captureSource = fs.readFileSync(path.join(__dirname, '../capture.js'), 'utf8');
+    const start = captureSource.indexOf('const downloadURLs = new Set();');
+    const end = captureSource.indexOf("window.addEventListener('pagehide'", start);
+    assert(start >= 0 && end > start, 'exercise the production download helper');
+    const timers = [], revoked = [], messages = [], actions = []; let removals = 0;
+    const context = vm.createContext({
+      URL: {createObjectURL: () => 'blob:fixture-download', revokeObjectURL: url => revoked.push(url)},
+      document: {createElement: () => ({click: () => actions.push('click'), remove: () => actions.push('remove')}),
+        body: {append: () => actions.push('append')}},
+      setTimeout: (fn, delay) => { assert.equal(delay, 60000); timers.push(fn); }, status: message => messages.push(message)
+    });
+    vm.runInContext(captureSource.slice(start, end), context);
+    context.cache = cacheKind === 'absent' ? undefined : {remove: async () => { removals++; if (cacheKind === 'rejecting') throw Error('synthetic cleanup failure'); }};
+    vm.runInContext("downloadBlob({}, '课程完整性报告.json', cache)", context);
+    assert.deepEqual(actions, ['append', 'click', 'remove']); assert.equal(timers.length, 1);
+    assert.equal(vm.runInContext('downloadURLs.size', context), 1);
+    assert.doesNotThrow(() => timers[0]()); await new Promise(setImmediate);
+    assert.deepEqual(revoked, ['blob:fixture-download']); assert.equal(vm.runInContext('downloadURLs.size', context), 0);
+    assert.equal(removals, cacheKind === 'absent' ? 0 : 1);
+    assert.deepEqual(messages, cacheKind === 'rejecting' ? ['下载临时文件清理失败：synthetic cleanup failure'] : []);
+  });
+}
 const jpeg = Buffer.from('/9j/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCAADAAcDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAABQf/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCcAAVZf//Z', 'base64');
 const page = (sourceTime = 0, w = 7, h = 3) => ({data: 'data:image/jpeg;base64,' + jpeg.toString('base64'), w, h, sourceTime});
 function exportsWith(overrides = {}) {
@@ -831,6 +856,147 @@ test('course ZIP accepts 65535 nonempty members and rejects 65536 before reads o
     async write() { assert.fail('entry count overflow must precede writes'); }
   }), /ZIP32.*(limit|overflow)/i);
 });
+
+// Validate every link and expanded descendant count, including nested sibling chains.
+function courseOutlines(pdf) {
+  const seen = new Set(), key = name => PDFName.of(name);
+  function children(parent, parentRef) {
+    const result = []; let ref = parent.get(key('First')), previous, count = 0;
+    while (ref) {
+      assert(!seen.has(ref.toString()), 'outline tree must be acyclic'); seen.add(ref.toString());
+      const item = pdf.context.lookup(ref);
+      assert.equal(item.get(key('Parent')).toString(), parentRef.toString());
+      assert.equal(item.get(key('Prev'))?.toString(), previous?.toString());
+      const nested = children(item, ref), dest = item.lookup(key('Dest'));
+      assert.equal(dest.get(1).toString(), '/XYZ'); assert.equal(dest.get(2).asNumber(), 0);
+      assert.equal(dest.get(4).toString(), 'null');
+      result.push({title: item.get(key('Title')).decodeText(), dest, children: nested.items});
+      count += 1 + nested.count;
+      previous = ref; ref = item.get(key('Next'));
+    }
+    assert.equal(parent.get(key('Last'))?.toString(), previous?.toString());
+    assert.equal(parent.get(key('Count'))?.asNumber(), result.length ? count : undefined);
+    return {items: result, count};
+  }
+  const ref = pdf.catalog.get(key('Outlines'));
+  return ref ? children(pdf.context.lookup(ref), ref).items : [];
+}
+async function coursePDF(lessons, options = {}) {
+  const chunks = [];
+  await exportsWith().writeCoursePDF(lessons, {...options,
+    readImage: async p => Uint8Array.from(Buffer.concat([jpeg, Buffer.from([p.id])])),
+    write: async bytes => { chunks.push(Buffer.from(bytes)); }});
+  return PDFDocument.load(Buffer.concat(chunks));
+}
+
+for (const layout of ['single', 'handout']) for (const timestamps of [false, true]) {
+  test(`course PDF ${layout} timestamps=${timestamps} has full Unicode hierarchy and shared sheet destinations`, async () => {
+    const title = '中文😀 (课程)\\标题\ud800', duplicate = '重复课次😀 (括号)\\尾\udc00';
+    const slides = metadata([page(0), page(3661.9, 3, 7), page(-1), page(360000.9)]);
+    const pdf = await coursePDF([{title: '空课', pages: []}, {title: duplicate, pages: slides.slice(0, 3)},
+      {title: duplicate, pages: slides.slice(3)}, {title: '尾空课', pages: []}], {title, layout, timestamps, bookmarks: false});
+    assert.equal(pdf.catalog.get(PDFName.of('PageMode')).toString(), '/UseOutlines');
+    const tree = courseOutlines(pdf); assert.equal(tree.length, 1);
+    assert.equal(tree[0].title, '中文😀 (课程)\\标题�');
+    assert.deepEqual(tree[0].children.map(x => x.title), [duplicate.replace('\udc00', '�'), duplicate.replace('\udc00', '�')]);
+    assert.deepEqual(tree[0].children.map(x => x.children.map(y => y.title)), [
+      ['第 1 页 · 00:00:00', '第 2 页 · 01:01:01', '第 3 页'], ['第 1 页 · 100:00:00']]);
+    const handout = layout === 'handout'; assert.equal(pdf.getPageCount(), handout ? 3 : 4);
+    const leaves = tree[0].children.flatMap(x => x.children), indices = handout ? [0, 0, 1, 2] : [0, 1, 2, 3];
+    for (const [i, leaf] of leaves.entries()) {
+      const sheet = pdf.getPage(indices[i]), row = handout && i === 1 ? 1 : 0;
+      assert.equal(leaf.dest.get(0).toString(), sheet.ref.toString());
+      assert.equal(leaf.dest.get(3).asNumber(), handout ? row ? 364 : 758 : sheet.getHeight());
+      const image = sheet.node.Resources().lookup(PDFName.of('XObject')).lookup(PDFName.of('Im' + row));
+      assert.deepEqual(Buffer.from(image.contents), Buffer.concat([jpeg, Buffer.from([i])]));
+      const commands = content(pdf, sheet), time = ['00:00:00', '01:01:01', '', '100:00:00'][i];
+      if (time) assert.equal(commands.includes(time), timestamps);
+      if (handout) assert(commands.includes(`(${i + 1}${timestamps && time ? ' - ' + time : ''}) Tj`));
+      else assert.equal(sheet.getHeight(), 842 * slides[i].h / slides[i].w + (timestamps && time ? 28 : 0));
+    }
+    for (const parent of [tree[0], ...tree[0].children]) {
+      const first = parent.children[0]; assert.equal(parent.dest.toString(), first.dest.toString());
+    }
+    if (handout) pdf.getPages().forEach((sheet, i) => assert(content(pdf, sheet).includes(`(${i + 1} / 3) Tj`)));
+  });
+}
+for (const sizes of [[3, 1], [1, 1], [2, 3]]) {
+  test(`course handout [${sizes}] starts every lesson at the upper row without numbering gaps`, async () => {
+    let id = 0;
+    const lessons = sizes.map(size => ({title: '课次', pages: Array.from({length: size}, () => ({id: id++, w: 7, h: 3}))}));
+    const pdf = await coursePDF(lessons, {layout: 'handout'}), tree = courseOutlines(pdf)[0];
+    assert.equal(tree.title, '未命名课程'); assert.equal(pdf.getPageCount(), sizes.reduce((sum, n) => sum + Math.ceil(n / 2), 0));
+    let sheetIndex = 0, number = 0;
+    for (const [index, size] of sizes.entries()) {
+      const lesson = tree.children[index];
+      assert.equal(lesson.dest.get(0).toString(), pdf.getPage(sheetIndex).ref.toString());
+      assert.equal(lesson.dest.get(3).asNumber(), 758);
+      for (let i = 0; i < size; i++) {
+        const sheet = pdf.getPage(sheetIndex + Math.floor(i / 2)), row = i % 2, leaf = lesson.children[i];
+        const image = sheet.node.Resources().lookup(PDFName.of('XObject')).lookup(PDFName.of('Im' + row));
+        assert.deepEqual(Buffer.from(image.contents), Buffer.concat([jpeg, Buffer.from([number])]));
+        assert(content(pdf, sheet).includes(`(${++number}) Tj`));
+        assert.equal(leaf.title, `第 ${i + 1} 页`); assert.equal(leaf.dest.get(0).toString(), sheet.ref.toString());
+        assert.equal(leaf.dest.get(3).asNumber(), row ? 364 : 758);
+      }
+      sheetIndex += Math.ceil(size / 2);
+    }
+  });
+}
+test('course PDF omits invalid outline times and accepts empty lessons as a valid zero-page file', async () => {
+  const times = [-1, NaN, Infinity, -Infinity, undefined, null, '60', 0, 360000.9];
+  const pdf = await coursePDF([{title: '课', pages: times.map((sourceTime, id) => ({id, w: 7, h: 3, sourceTime}))}]);
+  assert.deepEqual(courseOutlines(pdf)[0].children[0].children.map(x => x.title),
+    times.map((_, i) => `第 ${i + 1} 页` + (i === 7 ? ' · 00:00:00' : i === 8 ? ' · 100:00:00' : '')));
+  for (const lessons of [[], [{title: '空', pages: []}]]) {
+    const empty = await coursePDF(lessons); assert.equal(empty.getPageCount(), 0); assert.deepEqual(courseOutlines(empty), []);
+  }
+});
+
+for (const layout of ['single', 'handout']) {
+  test(`course PDF ${layout} honors controlled backpressure across lesson boundaries without collecting images`, {timeout: 5000}, async () => {
+    const {writeCoursePDF} = exportsWith({Blob: class { constructor() { assert.fail('no course Blob'); } }, atob() { assert.fail('no data URL reads'); }});
+    assert.equal(typeof writeCoursePDF, 'function');
+    const slides = metadata([page(), page(), page(), page()]), pending = [];
+    let image = null, reads = 0, payloads = 0, finished = false;
+    const exporting = writeCoursePDF([{title: '一', pages: slides.slice(0, 3)}, {title: '二', pages: slides.slice(3)}], {
+      layout, title: '课程', readImage(p) {
+        assert.equal(image, null); assert.equal(p, slides[reads++]); image = Uint8Array.of(p.id, 255);
+        return new Promise(resolve => pending.push(() => resolve(image)));
+      }, write(chunk) {
+        return new Promise(resolve => pending.push(() => { if (chunk === image) { image = null; payloads++; } resolve(); }));
+      }});
+    exporting.then(() => { finished = true; }, () => { finished = true; });
+    while (!finished) {
+      await nextTurn(); if (finished) break;
+      assert.equal(pending.length, 1); await nextTurn(); assert.equal(pending.length, 1); pending.shift()();
+    }
+    await exporting; assert.equal(reads, 4); assert.equal(payloads, 4); assert.equal(image, null);
+  });
+}
+test('course PDF streams 1000 metadata-only pages with one original JPEG in flight', async () => {
+  const pages = Array.from({length: 1000}, (_, id) => ({id, w: 7, h: 3}));
+  let image = null, reads = 0, payloads = 0, writing = false;
+  await exportsWith().writeCoursePDF([{title: '一', pages: pages.slice(0, 701)}, {title: '二', pages: pages.slice(701)}], {
+    readImage: async p => { assert(!writing); assert.equal(image, null); assert.equal(p, pages[reads++]); await Promise.resolve(); return image = Uint8Array.of(p.id & 255); },
+    write: async chunk => { assert(!writing); writing = true; await Promise.resolve(); if (chunk === image) { image = null; payloads++; } writing = false; }});
+  assert.equal(reads, 1000); assert.equal(payloads, 1000); assert.equal(image, null);
+});
+for (const failAt of ['read', 'header write', 'image write', 'outline write', 'xref write', 'final write']) {
+  test(`course PDF propagates ${failAt} failure and stops later reads and writes`, async () => {
+    const failure = Error(failAt), slides = metadata([page(), page(), page()]); let image, reads = 0, writes = 0;
+    await assert.rejects(exportsWith().writeCoursePDF([{title: '课', pages: slides}], {
+      readImage: async p => { reads++; if (failAt === 'read' && p.id === 1) throw failure; return image = Uint8Array.of(p.id, 255); },
+      write: async chunk => {
+        writes++; const text = Buffer.from(chunk).toString('ascii');
+        if (failAt === 'header write' && text.startsWith('%PDF') || failAt === 'image write' && chunk === image
+          || failAt === 'outline write' && text.startsWith('<< /Type /Outlines') || failAt === 'xref write' && text.startsWith('xref\n')
+          || failAt === 'final write' && text.endsWith('%%EOF')) throw failure;
+      }}), error => error === failure);
+    assert.equal(reads, {'read': 2, 'header write': 0, 'image write': 1, 'outline write': 3, 'xref write': 3, 'final write': 3}[failAt]);
+    const stopped = {reads, writes}; await nextTurn(); assert.deepEqual({reads, writes}, stopped);
+  });
+}
 
 test('manifest icons are exact square RGBA PNGs derived from the approved art', async () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '../manifest.json'), 'utf8'));

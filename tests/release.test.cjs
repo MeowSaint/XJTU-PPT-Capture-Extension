@@ -8,15 +8,15 @@ const { test } = require('node:test');
 
 const project = path.resolve(__dirname, '..');
 const release = path.join(project, 'scripts', 'release.cjs');
-const output = path.join(project, '.test-output');
+const output = process.env.PPT_TEST_OUTPUT || path.join(project, '.test-output');
 if (!fs.existsSync(output)) fs.mkdirSync(output);
 assert.ok(fs.lstatSync(output).isDirectory() && !fs.lstatSync(output).isSymbolicLink());
 assert.equal(fs.realpathSync(output), output, 'test output must stay inside the repository');
 const suite = fs.mkdtempSync(path.join(output, 'node-release-'));
 const files = [
   'manifest.json', 'background.js', 'media.js', 'course.js', 'batch.js', 'content.js',
-  'page-hook.js', 'capture.html', 'capture.js', 'scanner.js', 'pdf.js', 'style.css',
-  'extension-state.js', 'preflight.js', 'workspace.js', 'disk-cache.js', 'page-store.js', 'library.js',
+  'page-hook.js', 'capture.html', 'capture.js', 'mp4-recovery.js', 'scanner.js', 'pdf.js', 'style.css',
+  'extension-state.js', 'preflight.js', 'workspace.js', 'disk-cache.js', 'page-store.js', 'library.js', 'motion.js',
   'README.md', 'THIRD_PARTY_NOTICES.md', 'LICENSE', 'vendor/hls.min.js', 'vendor/hls.LICENSE',
   'icons/icon-16.png', 'icons/icon-32.png', 'icons/icon-48.png', 'icons/icon-128.png',
   'icons/browsers/chrome.svg', 'icons/browsers/edge.svg', 'icons/browsers/brave.svg',
@@ -30,14 +30,19 @@ function fixture(label, omitted) {
     fs.mkdirSync(path.dirname(path.join(root, name)), { recursive: true });
     fs.copyFileSync(path.join(project, name), path.join(root, name));
   }
+  if (omitted !== 'package-lock.json') {
+    const {version} = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8'));
+    fs.writeFileSync(path.join(root, 'package-lock.json'), JSON.stringify({version, lockfileVersion: 3, packages: {'': {version}}}));
+  }
   return root;
 }
 
 function setVersion(root, version, name) {
-  for (const file of name ? [name] : ['manifest.json', 'package.json']) {
+  for (const file of name ? [name] : ['manifest.json', 'package.json', 'package-lock.json']) {
     const target = path.join(root, file);
     const data = JSON.parse(fs.readFileSync(target, 'utf8'));
     data.version = version;
+    if (file === 'package-lock.json') data.packages[''].version = version;
     fs.writeFileSync(target, JSON.stringify(data));
   }
 }
@@ -161,14 +166,21 @@ const oldZips = [
   },
 ];
 
-test('packs exactly 33 members with original LICENSE, notices and every resource byte', () => {
+test('current release metadata is 3.1.3 in manifest, package and both lock versions', () => {
+  const manifest = JSON.parse(fs.readFileSync(path.join(project, 'manifest.json'), 'utf8'));
+  const pkg = JSON.parse(fs.readFileSync(path.join(project, 'package.json'), 'utf8'));
+  const lock = JSON.parse(fs.readFileSync(path.join(project, 'package-lock.json'), 'utf8'));
+  assert.deepEqual([manifest.version, pkg.version, lock.version, lock.packages[''].version], ['3.1.3', '3.1.3', '3.1.3', '3.1.3']);
+});
+
+test('packs exactly 35 members with original LICENSE, notices and every resource byte', () => {
   const root = fixture('contents');
   fs.writeFileSync(path.join(root, '.env'), 'must never be packaged');
   fs.mkdirSync(path.join(root, 'tests'));
   fs.writeFileSync(path.join(root, 'tests', 'private.txt'), 'must never be packaged');
   build(root);
   const entries = inspectZip(latest(root));
-  assert.equal(entries.size, 33);
+  assert.equal(entries.size, 35);
   assert.deepEqual([...entries.keys()].sort(), [...files].sort());
   for (const name of files) assert.deepEqual(entries.get(name), fs.readFileSync(path.join(root, name)), name);
   assert.deepEqual(entries.get('LICENSE'), fs.readFileSync(path.join(project, 'LICENSE')));
@@ -253,6 +265,27 @@ test('manifest and package version mismatch leaves every existing ZIP untouched'
   failedWithoutChangingZips(root, /manifest\.json and package\.json versions differ/);
 });
 
+test('missing lock leaves every existing ZIP untouched', () => {
+  const root = fixture('missing-lock', 'package-lock.json');
+  seedArchives(root);
+  failedWithoutChangingZips(root, /package-lock\.json/);
+});
+
+for (const field of ['root', 'package']) {
+  for (const version of [undefined, '9.9.9']) {
+    test(`rejects ${field} lock version ${JSON.stringify(version)} without changing ZIPs`, () => {
+      const root = fixture('lock-mismatch');
+      seedArchives(root);
+      const target = path.join(root, 'package-lock.json');
+      const lock = JSON.parse(fs.readFileSync(target, 'utf8'));
+      if (field === 'root') lock.version = version;
+      else lock.packages[''].version = version;
+      fs.writeFileSync(target, JSON.stringify(lock));
+      failedWithoutChangingZips(root, /manifest\.json and package-lock\.json versions differ/);
+    });
+  }
+}
+
 for (const version of ['2.5', '2.5.2-beta', '2.5.2\n', 252]) {
   test(`rejects non-x.y.z release version ${JSON.stringify(version)} before changing ZIPs`, () => {
     const root = fixture('invalid-version');
@@ -270,7 +303,7 @@ test('explicit Chinese and space root works from an unrelated cwd, including rel
   build(path.relative(cwd, root), { cwd });
   const version = JSON.parse(inspectZip(old).get('manifest.json')).version;
   assert.deepEqual(fs.readFileSync(path.join(root, 'last-release', `ppt-capture-v${version}.zip`)), old);
-  assert.equal(inspectZip(latest(root)).size, 33);
+  assert.equal(inspectZip(latest(root)).size, 35);
 });
 
 test('CLI defaults to its own repository root independently of cwd', () => {
@@ -280,7 +313,7 @@ test('CLI defaults to its own repository root independently of cwd', () => {
   fs.copyFileSync(release, script);
   const cwd = fs.mkdtempSync(path.join(suite, 'default-unrelated-'));
   build(undefined, { script, cwd });
-  assert.equal(inspectZip(latest(root)).size, 33);
+  assert.equal(inspectZip(latest(root)).size, 35);
   assert.deepEqual(fs.readdirSync(cwd), [], 'must not create archives in cwd');
 });
 
@@ -301,3 +334,16 @@ for (const directory of ['last-release', 'tmp']) {
     assert.deepEqual(zipNames(root), ['ppt-capture.zip']);
   });
 }
+
+
+test('recovery asset loads before capture and stays out of school scripts', () => {
+  const html = fs.readFileSync(path.join(project, 'capture.html'), 'utf8');
+  assert(html.indexOf('src="mp4-recovery.js"') >= 0);
+  assert(html.indexOf('src="mp4-recovery.js"') < html.indexOf('src="capture.js"'));
+  assert.match(html, /id="video-only"[^>]*checked/);
+  const manifest = JSON.parse(fs.readFileSync(path.join(project, 'manifest.json')));
+  assert(!JSON.stringify(manifest.content_scripts).includes('mp4-recovery.js'));
+  for (const name of ['content.js', 'page-hook.js']) assert(!fs.readFileSync(path.join(project, name), 'utf8').includes('PPTMP4'));
+  const root = fixture('missing-recovery', 'mp4-recovery.js');
+  assert.notEqual(run(root).status, 0);
+});

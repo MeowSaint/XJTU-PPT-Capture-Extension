@@ -5,7 +5,7 @@ const fs = require('node:fs'), path = require('node:path'), os = require('node:o
 const {spawnSync} = require('node:child_process'), {createHash} = require('node:crypto');
 const {dependency, browserOptions} = require('./runtime.cjs');
 const {chromium} = dependency('playwright'), sharp = dependency('sharp');
-const root = path.resolve(__dirname, '..'), reportRoot = path.join(root, '.test-output', 'v3.1.1');
+const root = path.resolve(__dirname, '..'), reportRoot = process.env.PPT_TEST_OUTPUT || path.join(root, '.test-output', 'v3.1.3');
 fs.mkdirSync(reportRoot, {recursive: true});
 const output = fs.mkdtempSync(path.join(reportRoot, 'features-'));
 const github = 'https://api.github.com/repos/MeowSaint/XJTU-PPT-Capture-Extension/releases/latest';
@@ -13,6 +13,7 @@ const repository = 'https://github.com/MeowSaint/XJTU-PPT-Capture-Extension';
 const campus = 'https://rms-v5.xjtu.edu.cn', courseURL = code => `${campus}/my-capture-courses/16220/preview-detail/${code}`;
 const results = [], errors = [], unexpected = [], requests = [], updateRequests = [], keyboardTrace = [], timers = new Set();
 const pending = {old: [], update: [], load: []};
+const cancellation = {events: [], boundaries: []}, heldOld = new Set(), cleanup = {};
 const consentKey = 'ppt-study-consent', updateKey = 'ppt-update-state';
 let context, server, worker, temp, extensionOrigin, origin, alternate, updateOrigin, retained, retainedPages, initialActive = 0, initialPeak = 0;
 const copiedHashes = {}, finalHashes = {};
@@ -35,7 +36,7 @@ function sources(phase) {
   return ['video.mp4', 'lecture.m3u8', 'login.mp4', 'data.mp4', 'unknown.mp4'].map(name => `${origin}/initial/${name}`);
 }
 function releaseJSON() {
-  const tag = updateMode === 'prerelease' ? 'v9.0.0-beta.1' : updateMode === 'current' ? 'v3.1.1' : 'v3.10.0';
+  const tag = updateMode === 'prerelease' ? 'v9.0.0-beta.1' : updateMode === 'current' ? 'v3.1.3' : 'v3.10.0';
   return {tag_name: tag, draft: false, prerelease: updateMode === 'prerelease', published_at: '2026-11-05T00:00:00Z',
     html_url: `${repository}/releases/tag/${tag}`, assets: [{name: 'ppt-capture.zip', browser_download_url: `${repository}/releases/download/${tag}/ppt-capture.zip`}]};
 }
@@ -79,14 +80,16 @@ async function setup() {
       res.writeHead(status, {'Content-Type': type, 'Content-Length': end - start + 1, 'Accept-Ranges': 'bytes', ...(range ? {'Content-Range': `bytes ${start}-${end}/${bytes.length}`} : {})});
       res.end(bytes.subarray(start, end + 1));
     };
-    if (pathname.startsWith('/old/')) pending.old.push(send);
+    if (pathname.startsWith('/old/')) {
+      heldOld.add(res); res.once('close', () => heldOld.delete(res)); pending.old.push(send);
+    }
     else if (pathname === '/slow-load.mp4' && !probing && holdLoad) pending.load.push(send);
     else later(send, probing ? 180 : 0);
   });
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
   origin = `http://127.0.0.1:${server.address().port}`; alternate = `http://localhost:${server.address().port}`; updateOrigin = `http://updates.test:${server.address().port}`;
   temp = fs.mkdtempSync(path.join(os.tmpdir(), 'ppt-features-')); const ext = path.join(temp, 'extension'); fs.mkdirSync(ext);
-  for (const name of ['manifest.json', 'background.js', 'media.js', 'course.js', 'batch.js', 'page-hook.js', 'content.js', 'capture.html', 'capture.js', 'page-store.js', 'library.js', 'disk-cache.js', 'scanner.js', 'style.css', 'pdf.js', 'extension-state.js', 'preflight.js', 'workspace.js', 'vendor', 'icons']) {
+  for (const name of ['manifest.json', 'background.js', 'media.js', 'course.js', 'batch.js', 'page-hook.js', 'content.js', 'capture.html', 'capture.js', 'mp4-recovery.js', 'page-store.js', 'library.js', 'disk-cache.js', 'scanner.js', 'style.css', 'pdf.js', 'extension-state.js', 'preflight.js', 'workspace.js', 'motion.js', 'vendor', 'icons']) {
     fs.cpSync(path.join(root, name), path.join(ext, name), {recursive: true});
     if (fs.statSync(path.join(ext, name)).isFile()) copiedHashes[name] = createHash('sha256').update(fs.readFileSync(path.join(ext, name))).digest('hex');
   }
@@ -269,22 +272,74 @@ async function closeTools() { for (const page of context.pages()) if (page.url()
       assert(requests.some(item => item.path.startsWith('/permission/'))); await page.evaluate(() => window.restorePermissions());
     });
     await test('course flip cancels queued probes and rejects delayed old-course results', async () => {
-      fixturePhase = 'old'; await course.goto(courseURL('old')); await page.locator('#discover').click();
-      await until(() => requests.filter(item => item.path.startsWith('/old/')).length >= 2, 'old-course probes did not start');
-      const started = requests.filter(item => item.path.startsWith('/old/')).length;
-      fixturePhase = 'fresh'; await course.goto(courseURL('fresh')); await page.locator('#discover').click(); await settled(page); release('old');
-      assert.equal((await statusOf(page, sources('fresh')[0])).status, 'valid');
-      await page.locator('#source-show-all').check(); assert.equal(await page.locator('#sources option').evaluateAll(options => options.some(option => option.value.includes('/old/'))), false);
-      assert.equal(requests.filter(item => item.path.startsWith('/old/')).length, started, 'cancelled old queue never starts another request'); await page.close();
+      await page.evaluate(() => {
+        const button = document.querySelector('#discover'), handler = button.onclick, workspace = window.PPTWorkspace, refresh = workspace.refreshSources, preflight = window.PPTPreflight, probe = preflight.probe;
+        const observation = window.fixtureDiscovery = {events: [], calls: [], promise: null};
+        const record = (type, detail = {}) => observation.events.push({type, time: performance.now(), ...detail});
+        button.onclick = function (...args) {
+          const call = {receiver: this === button, trusted: args[0].isTrusted, type: args[0].type, completed: false};
+          observation.calls.push(call); record('click', call);
+          const returned = handler.apply(this, args);
+          observation.promise = returned;
+          returned.then(() => { call.completed = true; record('discover-completed'); }, error => record('discover-rejected', {error: String(error)}));
+          return returned; // Preserve the actual handler's receiver, event and Promise identity.
+        };
+        workspace.refreshSources = function (...args) {
+          record('refresh', {reset: !!args[2]?.reset, page: args[1], urls: args[0].map(source => source.url)});
+          return refresh.apply(this, args);
+        };
+        preflight.probe = function (...args) { record('probe', {url: args[0]}); return probe.apply(this, args); };
+        observation.restore = () => {
+          button.onclick = handler; workspace.refreshSources = refresh; preflight.probe = probe;
+          return button.onclick === handler && workspace.refreshSources === refresh && preflight.probe === probe;
+        };
+      });
+      const oldRequests = () => requests.filter(item => item.path.startsWith('/old/'));
+      const boundary = async name => {
+        const observed = await page.evaluate(() => ({calls: window.fixtureDiscovery.calls.map(call => ({...call})), events: [...window.fixtureDiscovery.events],
+          options: [...document.querySelector('#sources').options].filter(option => option.value).map(option => ({url: option.value, status: option.dataset.status}))}));
+        cancellation.boundaries.push({name, requests: oldRequests().map(item => ({...item})), held: heldOld.size, ...observed});
+        return observed;
+      };
+      try {
+        fixturePhase = 'old'; await course.goto(courseURL('old')); await page.locator('#discover').click();
+        await until(() => oldRequests().length >= 2, 'old-course probes did not start');
+        await boundary('original first-two boundary'); // Observation only: never called a local RED.
+        await page.evaluate(() => window.fixtureDiscovery.promise);
+        await page.waitForFunction(url => {
+          const options = [...document.querySelector('#sources').options];
+          return options.filter(option => option.dataset.status === 'checking').length === 2 && options.some(option => option.value === url && option.dataset.status === 'queued');
+        }, sources('old')[2]);
+        await until(() => heldOld.size === 2, 'completed discovery must leave two old responses held');
+        const before = await boundary('completed old discovery');
+        assert.deepEqual(before.calls, [{receiver: true, trusted: true, type: 'click', completed: true}]);
+        assert(before.events.some(event => event.type === 'refresh' && event.reset && event.page === courseURL('old')), 'actual old discovery reached its final reset');
+        assert.equal((await statusOf(page, sources('old')[2])).status, 'queued', 'third old URL is still queued before cancellation');
+        assert.equal(oldRequests().some(item => item.path === '/old/queued.mp4'), false, 'third old URL never started before cancellation');
+        const started = oldRequests().length;
+        fixturePhase = 'fresh'; await course.goto(courseURL('fresh')); await page.locator('#discover').click();
+        await page.evaluate(() => window.fixtureDiscovery.promise); await settled(page); release('old');
+        assert.equal((await statusOf(page, sources('fresh')[0])).status, 'valid');
+        await page.locator('#source-show-all').check(); assert.equal(await page.locator('#sources option').evaluateAll(options => options.some(option => option.value.includes('/old/'))), false);
+        assert.equal(oldRequests().some(item => item.path === '/old/queued.mp4'), false, 'third old URL never starts after cancellation and release');
+        assert.equal(oldRequests().length, started, 'cancelled old queue never starts another request');
+        const after = await boundary('fresh discovery and old release');
+        assert.equal(after.calls.length, 2); assert(after.calls.every(call => call.receiver && call.trusted && call.type === 'click' && call.completed));
+      } finally {
+        Object.assign(cancellation, await page.evaluate(() => ({restored: window.fixtureDiscovery.restore(), events: [...window.fixtureDiscovery.events]})));
+        assert.equal(cancellation.restored, true, 'native discovery handler and refresh observer restored');
+      }
+      await page.close();
     });
     await test('simultaneous tool tabs serialize update GET and claim one 3.10.0 automatic dialog', async () => {
       await resetUpdate('available', true); const before = updateRequests.length;
       const tabs = await Promise.all([openTool(), openTool()]); await until(() => pending.update.length === 1, 'held update request not observed');
+      await Promise.all(tabs.map(tab => tab.waitForFunction(() => ready && !busy()))); // Automatic offers require idle restored tabs.
       holdUpdate = false; release('update'); await Promise.all(tabs.map(tab => tab.waitForFunction(() => document.querySelector('#check-updates').dataset.available === 'true')));
       await until(async () => (await Promise.all(tabs.map(tab => tab.locator('#update-dialog').evaluate(node => node.open)))).filter(Boolean).length === 1, 'expected exactly one automatic update dialog');
       assert.equal(updateRequests.length - before, 1, 'background serial queue shares one cached GET');
       const opened = await Promise.all(tabs.map(tab => tab.locator('#update-dialog').evaluate(node => node.open))); page = tabs[opened.indexOf(true)];
-      assert.equal(await page.locator('#update-current').textContent(), '3.1.1'); assert.equal(await page.locator('#update-version').textContent(), '3.10.0');
+      assert.equal(await page.locator('#update-current').textContent(), '3.1.3'); assert.equal(await page.locator('#update-version').textContent(), '3.10.0');
       assert.equal(await page.locator('#update-release').getAttribute('href'), `${repository}/releases/tag/v3.10.0`);
       assert.equal(await page.locator('#update-download').getAttribute('href'), `${repository}/releases/download/v3.10.0/ppt-capture.zip`);
       await screenshots(page, 'update', '#update-dialog');
@@ -371,16 +426,17 @@ async function closeTools() { for (const page of context.pages()) if (page.url()
     assert.deepEqual(errors, [], 'page errors must fail'); assert.deepEqual([...new Set(unexpected)], [], 'unexpected external requests must fail');
   } catch (error) { failure = error.stack || String(error); process.exitCode = 1; console.error(failure); }
   finally {
-    try { if (context) await context.close(); } catch (error) { errors.push({cleanup: 'browser', error: error.message}); process.exitCode = 1; }
+    try { if (context) { await context.close(); cleanup.browserClosed = true; } } catch (error) { errors.push({cleanup: 'browser', error: error.message}); process.exitCode = 1; }
     for (const timer of timers) clearTimeout(timer); for (const kind of Object.keys(pending)) release(kind);
-    try { if (server?.listening) { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); } } catch (error) { errors.push({cleanup: 'server', error: error.message}); process.exitCode = 1; }
-    if (temp) { const target = path.resolve(temp); assert.equal(path.dirname(target), path.resolve(os.tmpdir())); assert(path.basename(target).startsWith('ppt-features-')); fs.rmSync(target, {recursive: true, force: true}); }
+    try { if (server?.listening) { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); cleanup.serverClosed = !server.listening; } } catch (error) { errors.push({cleanup: 'server', error: error.message}); process.exitCode = 1; }
+    if (temp) { const target = path.resolve(temp); assert.equal(path.dirname(target), path.resolve(os.tmpdir())); assert(path.basename(target).startsWith('ppt-features-')); fs.rmSync(target, {recursive: true, force: true}); cleanup.tempRemoved = !fs.existsSync(target); }
+    cleanup.pending = Object.fromEntries(Object.entries(pending).map(([kind, callbacks]) => [kind, callbacks.length]));
     for (const name of Object.keys(copiedHashes)) finalHashes[name] = createHash('sha256').update(fs.readFileSync(path.join(root, name))).digest('hex');
     if (errors.length || unexpected.length) process.exitCode = 1;
     const changedDuringRun = Object.keys(copiedHashes).filter(name => copiedHashes[name] !== finalHashes[name]);
-    const report = {status: process.exitCode ? 'fail' : 'pass', scope: process.argv.includes('--focus-diagnostic') ? 'focus diagnostic only' : 'full feature suite', output, transport, copiedHashes, finalHashes, changedDuringRun, permissionTest: 'Only the disposable extension grants localhost; faithful UI contains/request shim exercises an already-granted host without a headless native prompt.', results, counters: {mediaAndAPI: requests.length, updateGET: updateRequests.length, initialPeak}, requests, updateRequests, keyboardTrace, errors, unexpected: [...new Set(unexpected)], failure};
+    const report = {status: process.exitCode ? 'fail' : 'pass', scope: process.argv.includes('--focus-diagnostic') ? 'focus diagnostic only' : 'full feature suite', output, transport, copiedHashes, finalHashes, changedDuringRun, permissionTest: 'Only the disposable extension grants localhost; faithful UI contains/request shim exercises an already-granted host without a headless native prompt.', results, counters: {mediaAndAPI: requests.length, updateGET: updateRequests.length, initialPeak}, requests, updateRequests, keyboardTrace, cancellation, cleanup, errors, unexpected: [...new Set(unexpected)], failure};
     fs.writeFileSync(path.join(output, 'results.json'), JSON.stringify(report, null, 2));
-    fs.writeFileSync(path.join(reportRoot, 'feature-test-report.md'), `# v3.1.1 independent browser features\n\nStatus: ${report.status}; scope: ${report.scope}\n\nEvidence: ${path.relative(reportRoot, output)}/results.json\n\n${transport}\n\nPermission timing uses a faithful Chrome API stub over an already-granted local test host. All media and retained pages are synthetic local fixtures.\n\n${results.map(result => `- ${result.status.toUpperCase()}: ${result.name}`).join('\n')}\n\nCounters: ${JSON.stringify(report.counters)}\n\nPage errors: ${errors.length}; unexpected external requests: ${report.unexpected.length}.\n${failure ? '\nFailure:\n```\n' + failure + '\n```\n' : ''}`);
+    fs.writeFileSync(path.join(reportRoot, 'feature-test-report.md'), `# v3.1.3 independent browser features\n\nStatus: ${report.status}; scope: ${report.scope}\n\nEvidence: ${path.relative(reportRoot, output)}/results.json\n\n${transport}\n\nPermission timing uses a faithful Chrome API stub over an already-granted local test host. All media and retained pages are synthetic local fixtures.\n\n${results.map(result => `- ${result.status.toUpperCase()}: ${result.name}`).join('\n')}\n\nCounters: ${JSON.stringify(report.counters)}\n\nPage errors: ${errors.length}; unexpected external requests: ${report.unexpected.length}.\n${failure ? '\nFailure:\n```\n' + failure + '\n```\n' : ''}`);
     console.log('Feature evidence: ' + output);
   }
 })();

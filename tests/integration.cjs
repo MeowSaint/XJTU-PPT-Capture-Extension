@@ -6,7 +6,7 @@ const {dependency, browserOptions} = require('./runtime.cjs');
 const {chromium} = dependency('playwright');
 const sharp = dependency('sharp');
 const {PDFDocument} = dependency('pdf-lib');
-const root = path.resolve(__dirname, '..'), output = path.join(root, '.test-output');
+const root = path.resolve(__dirname, '..'), output = process.env.PPT_TEST_OUTPUT || path.join(root, '.test-output');
 function command(exe, args) {
   const r = spawnSync(exe, args, {encoding: 'utf8'});
   if (r.status !== 0) throw Error(exe + ': ' + (r.stderr || r.error));
@@ -23,6 +23,7 @@ async function fixtures() {
   command('ffmpeg', ['-y', '-v', 'error', '-framerate', '2', '-i', path.join(output, 'frame%02d.png'), '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-g', '2', '-movflags', '+faststart', path.join(output, 'lecture_2.mp4')]);
   command('ffmpeg', ['-y', '-v', 'error', '-i', path.join(output, 'lecture_2.mp4'), '-c', 'copy', '-hls_time', '1', '-hls_playlist_type', 'vod', '-hls_segment_filename', path.join(output, 'segment%02d.ts'), path.join(output, 'lecture_2.m3u8')]);
   fs.copyFileSync(path.join(output, 'lecture_2.mp4'), path.join(output, '0-screen.mp4'));
+  fs.copyFileSync(path.join(output, 'lecture_2.mp4'), path.join(output, 'lecture_other.mp4'));
   command('ffmpeg', ['-y', '-v', 'error', '-loop', '1', '-i', path.join(output, 'slide1.png'), '-t', '8', '-r', '2', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-g', '2', '-movflags', '+faststart', path.join(output, '0-teacher.mp4')]);
   assert(!fs.readFileSync(path.join(output, '0-screen.mp4')).equals(fs.readFileSync(path.join(output, '0-teacher.mp4'))), 'fallback channels contain distinct actual videos');
 }
@@ -99,7 +100,7 @@ async function main() {
   const origin = `http://127.0.0.1:${server.address().port}`;
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'ppt-capture-test-')), ext = path.join(temp, 'extension');
   fs.mkdirSync(ext);
-  for (const name of ['manifest.json', 'background.js', 'media.js', 'course.js', 'batch.js', 'page-hook.js', 'content.js', 'capture.html', 'capture.js', 'page-store.js', 'library.js', 'disk-cache.js', 'workspace.js', 'extension-state.js', 'preflight.js', 'scanner.js', 'style.css', 'pdf.js', 'vendor', 'icons']) fs.cpSync(path.join(root, name), path.join(ext, name), {recursive: true});
+  for (const name of ['manifest.json', 'background.js', 'media.js', 'course.js', 'batch.js', 'page-hook.js', 'content.js', 'capture.html', 'capture.js', 'mp4-recovery.js', 'page-store.js', 'library.js', 'disk-cache.js', 'workspace.js', 'extension-state.js', 'preflight.js', 'scanner.js', 'style.css', 'motion.js', 'pdf.js', 'vendor', 'icons']) fs.cpSync(path.join(root, name), path.join(ext, name), {recursive: true});
   const manifest = JSON.parse(fs.readFileSync(path.join(ext, 'manifest.json'), 'utf8'));
   // Grant only fixture server access in this test copy to avoid a headless permission dialog.
   manifest.host_permissions.push('http://127.0.0.1/*', 'http://localhost/*');
@@ -121,9 +122,9 @@ async function main() {
       globalThis.fetch = (input, options) => {
         const url = typeof input === 'string' ? input : input.url;
         if (url.startsWith('https://api.github.com/')) return Promise.resolve(new Response(JSON.stringify({
-          tag_name: 'v3.1.1', draft: false, prerelease: false, published_at: '2026-11-05T00:00:00Z',
-          html_url: 'https://github.com/MeowSaint/XJTU-PPT-Capture-Extension/releases/tag/v3.1.1',
-          assets: [{name: 'ppt-capture.zip', browser_download_url: 'https://github.com/MeowSaint/XJTU-PPT-Capture-Extension/releases/download/v3.1.1/ppt-capture.zip'}]
+          tag_name: 'v3.1.3', draft: false, prerelease: false, published_at: '2026-11-05T00:00:00Z',
+          html_url: 'https://github.com/MeowSaint/XJTU-PPT-Capture-Extension/releases/tag/v3.1.3',
+          assets: [{name: 'ppt-capture.zip', browser_download_url: 'https://github.com/MeowSaint/XJTU-PPT-Capture-Extension/releases/download/v3.1.3/ppt-capture.zip'}]
         }), {headers: {'Content-Type': 'application/json'}}));
         return fetchFixture(input, options);
       };
@@ -146,7 +147,10 @@ async function main() {
     const course = await context.newPage();
     await course.route('https://rms-v5.xjtu.edu.cn/**', async route => {
       const requestURL = new URL(route.request().url()), pathname = requestURL.pathname;
-      if (pathname.endsWith('/fixture.json')) return route.fulfill({contentType: 'application/json', body: JSON.stringify({data: {video: origin + '/lecture_2.mp4', courseId: 16220, captureId: 477014, courseName, startTime: '2026-09-07 15:30:00'}})});
+      if (pathname.endsWith('/fixture.json')) {
+        const other = requestURL.searchParams.get('capture') === '477015';
+        return route.fulfill({contentType: 'application/json', body: JSON.stringify({data: {video: origin + (other ? '/lecture_other.mp4' : '/lecture_2.mp4'), courseId: 16220, captureId: other ? 477015 : 477014, courseName: other ? '另一门课程' : courseName, startTime: other ? '2026-09-08 08:00:00' : '2026-09-07 15:30:00'}})});
+      }
       if (pathname.endsWith('/sandbox-player')) return route.fulfill({contentType: 'text/html', body: `<!doctype html><video preload="none" src="${origin}/lecture_1.mp4"></video>`});
       if (pathname.endsWith('/study-capture-courses/16220/schedules')) return route.fulfill({contentType: 'application/json', body: JSON.stringify({data: [
         {id: 700001, capture_code: 'batch-a', status: 'FINISHED', start_time: '2026-09-10T02:10:00+00:00', course: {name: courseName}},
@@ -172,7 +176,7 @@ async function main() {
         {label: 'ENCODER', file_key: `12345/2-${batchCode}.mp4`, download_url: origin + '/lecture_2.mp4', size: 1024}
       ]}})});
       const changed = pathname.includes('/477015');
-      return route.fulfill({contentType: 'text/html; charset=utf-8', body: `<!doctype html><meta charset="utf-8"><title>资源管理平台</title>${changed ? '<h1 class="course-title">另一门课程</h1><p>2026.09.08 周二 08:00 - 09:40</p>' : ''}<video preload="none" src="${origin}/lecture_1.mp4"></video><video preload="none"></video><iframe sandbox="allow-scripts" src="https://rms-v5.xjtu.edu.cn/sandbox-player"></iframe><script>fetch('/fixture.json').then(r=>r.json());</script>`});
+      return route.fulfill({contentType: 'text/html; charset=utf-8', body: `<!doctype html><meta charset="utf-8"><title>资源管理平台</title>${changed ? '<h1 class="course-title">另一门课程</h1><p>2026.09.08 周二 08:00 - 09:40</p>' : ''}<video preload="none" src="${origin}/lecture_1.mp4"></video><video preload="none"></video><iframe sandbox="allow-scripts" src="https://rms-v5.xjtu.edu.cn/sandbox-player"></iframe><script>fetch('/fixture.json?capture=${changed ? 477015 : 477014}').then(r=>r.json());</script>`});
     });
     await course.goto('https://rms-v5.xjtu.edu.cn/my-capture-courses/16220/preview-detail/477014');
     const page = await context.newPage(); await page.goto(extensionOrigin + '/capture.html');
@@ -190,6 +194,7 @@ async function main() {
     assert.equal(await page.locator('#terms-dialog').isVisible(), true);
     assert.equal(await page.locator('#pages article').count(), 1, 'declining consent preserves the migrated legacy screenshot');
     await page.locator('#terms-agree').check(); await page.locator('#terms-accept').click();
+    await page.waitForFunction(() => !document.querySelector('.app-shell').inert);
     await page.locator('#source-show-all').check();
     await page.waitForFunction(() => document.querySelector('#sources').options.length >= 3);
     const badge = await worker.evaluate(async url => {
@@ -290,7 +295,7 @@ async function main() {
     // Loading the other source selects its own lesson and preserves the previous lesson exactly.
     const firstLesson = await storedPageSnapshot(page);
     await page.locator('summary').filter({hasText: '手动视频地址'}).click();
-    await page.locator('#url').fill(origin + '/lecture_2.mp4'); await page.locator('#load-url').click();
+    await page.locator('#url').fill(origin + '/lecture_other.mp4'); await page.locator('#load-url').click();
     await page.waitForFunction(() => !document.querySelector('#run').disabled);
     assert.equal(await page.locator('#pages article').count(), 0, 'new lesson starts with its own empty review list');
     assert.deepEqual(await storedPageSnapshot(page), firstLesson, 'course switch preserves original page bytes, metadata and order');
@@ -325,8 +330,35 @@ async function main() {
     assert.equal(await page.locator('#pages article').count(), 4);
     const originalOrder = await page.evaluate(() => pages.map(item => item.id));
     const firstCard = page.locator('#pages article').first(), lastCard = page.locator('#pages article').last();
-    const lastBox = await lastCard.boundingBox();
-    await firstCard.dragTo(lastCard, {targetPosition: {x: lastBox.width - 4, y: 12}});
+    await firstCard.scrollIntoViewIfNeeded();
+    await page.evaluate(() => {
+      window.__integrationFirstDrag = null;
+      document.querySelector('#pages').addEventListener('dragstart', event => {
+        window.__integrationFirstDrag = {id: event.target.closest('article')?.dataset.pageId, trusted: event.isTrusted};
+      }, {once: true, capture: true, passive: true});
+    });
+    const firstDragBox = await firstCard.boundingBox(), dragStartPoint = {x: firstDragBox.x + firstDragBox.width / 2, y: firstDragBox.y + firstDragBox.height / 2};
+    await page.mouse.move(dragStartPoint.x, dragStartPoint.y); await page.mouse.down();
+    try {
+      // Lock the native source before normal target scrolling moves other cards beneath the pointer.
+      await page.mouse.move(dragStartPoint.x + 12, dragStartPoint.y, {steps: 3});
+      await page.waitForFunction(() => window.__integrationFirstDrag);
+      const nativeSourceStart = await page.evaluate(() => window.__integrationFirstDrag);
+      assert.deepEqual(nativeSourceStart, {id: String(originalOrder[0]), trusted: true}, 'native drag starts on the original first card');
+      console.log('Native drag source:', JSON.stringify(nativeSourceStart));
+      await lastCard.scrollIntoViewIfNeeded();
+      const lastBox = await lastCard.boundingBox(), galleryBox = await page.locator('#pages').boundingBox(), viewport = page.viewportSize();
+      const left = Math.max(lastBox.x + lastBox.width / 2, galleryBox.x, 0), right = Math.min(lastBox.x + lastBox.width, galleryBox.x + galleryBox.width, viewport.width);
+      const top = Math.max(lastBox.y, galleryBox.y, 0), bottom = Math.min(lastBox.y + lastBox.height, galleryBox.y + galleryBox.height, viewport.height);
+      assert(right - left > 8 && bottom - top > 8, 'the last card has a visible right-half drop area inside the gallery and viewport');
+      const dropPoint = {x: Math.floor(right - 4), y: Math.floor((top + bottom) / 2)};
+      assert(dropPoint.x > left && dropPoint.x < right && dropPoint.y > top && dropPoint.y < bottom, 'rounded native drop coordinates stay inside that area');
+      assert.equal(await page.evaluate(({x, y}) => document.elementFromPoint(x, y)?.closest('#pages article')?.dataset.pageId, dropPoint), String(originalOrder.at(-1)), 'native drop point hits the intended last card');
+      console.log('Native drag target:', JSON.stringify({id: originalOrder.at(-1), point: dropPoint, visible: {left, right, top, bottom}}));
+      await page.mouse.move(dropPoint.x, dropPoint.y, {steps: 10});
+    } finally {
+      await page.mouse.up(); await page.evaluate(() => { delete window.__integrationFirstDrag; });
+    }
     await page.waitForFunction(id => pages.at(-1)?.id === id, originalOrder[0]);
     const draggedOrder = await page.evaluate(() => pages.map(item => item.id));
     assert.deepEqual(draggedOrder, [...originalOrder.slice(1), originalOrder[0]], 'dragging changes the export order');
@@ -336,7 +368,8 @@ async function main() {
     assert(crossDomainHeaders > 0, 'cross-domain HLS segments must carry course Referer');
     console.log('Cross-domain HLS scan: 4 unique slides; chronological fine-scan merge, drag order persistence and Referer verified');
     await page.locator('#tab-export').click();
-    await page.locator('#course-name').fill('手动HLS课程'); await page.locator('#course-start').fill('08:05:00');
+    assert.equal(await page.locator('#course-date').inputValue(), '', 'unmatched HLS source has no inherited recording date');
+    await page.locator('#course-name').fill('手动HLS课程'); await page.locator('#course-date').fill('2026-09-08'); await page.locator('#course-start').fill('08:05:00');
     await page.evaluate(() => namingSave);
     await verifyCacheRelease(page, 'HLS / manual naming');
     const releasedDownload = page.waitForEvent('download'); await page.locator('#pdf').click();
@@ -361,9 +394,20 @@ async function main() {
     assert.deepEqual(await storedPageSnapshot(page), stoppedPages, 'cancelling clear preserves all original screenshots');
     // Crop uses image coordinates, excluding letterbox margins, then restores controls.
     await page.locator('#crop-select').click();
-    const b = await page.locator('#overlay').boundingBox();
-    await page.mouse.move(b.x + b.width * 0.25, b.y + b.height * 0.25); await page.mouse.down();
-    await page.mouse.move(b.x + b.width * 0.75, b.y + b.height * 0.75); await page.mouse.up();
+    const cropInput = await page.locator('#overlay').evaluate(overlay => {
+      const video = document.querySelector('video'), box = overlay.getBoundingClientRect();
+      const client = {width: video.clientWidth, height: video.clientHeight}, raw = {width: video.videoWidth, height: video.videoHeight};
+      const scale = Math.min(client.width / raw.width, client.height / raw.height);
+      const image = {x: box.x + (client.width - raw.width * scale) / 2, y: box.y + (client.height - raw.height * scale) / 2, width: raw.width * scale, height: raw.height * scale};
+      return {client, raw, canvas: {width: overlay.width, height: overlay.height}, overlay: {x: box.x, y: box.y, width: box.width, height: box.height}, image,
+        start: {x: image.x + image.width * 0.25, y: image.y + image.height * 0.25}, end: {x: image.x + image.width * 0.75, y: image.y + image.height * 0.75},
+        wholeOverlayHalfHeight: raw.height * box.height / (2 * image.height)};
+    });
+    console.log('Public crop input geometry:', JSON.stringify(cropInput));
+    assert.equal(cropInput.raw.height, 720, 'local crop fixture retains its public native height');
+    await page.mouse.move(cropInput.start.x, cropInput.start.y); await page.mouse.down();
+    await page.mouse.move(cropInput.end.x, cropInput.end.y); await page.mouse.up();
+    console.log('Read-only crop after native input:', await page.evaluate(() => ({...crop})));
     assert.equal(await page.locator('#overlay').evaluate(el => el.style.pointerEvents), 'none');
     const oldCount = await page.locator('#pages article').count(); await page.locator('#shot').click();
     await page.waitForFunction(n => document.querySelectorAll('#pages article').length === n + 1, oldCount);
@@ -385,10 +429,19 @@ async function main() {
     // Opening only the course list page supplies 2- PPT videos and preserves a manual crop path for 0-only lessons.
     await course.goto('https://rms-v5.xjtu.edu.cn/my-capture-courses/16220/preview-detail');
     await page.locator('#discover').click();
-    await page.waitForFunction(() => batchJobs.length === 3 && document.querySelector('#batch-status').textContent.includes('读取完成'));
-    assert.equal(await page.locator('#batch-jobs .batch-job').count(), 3);
-    assert.match(await page.locator('#batch-status').textContent(), /跳过 1 个未完成/);
-    assert.match(await page.locator('#batch-status').textContent(), /1 节只有 0 路视频/);
+    await page.waitForFunction(() => !batchDiscovery && batchJobs.length === 4 && document.querySelector('#batch-status').textContent.includes('目录已列举完整')).catch(async error => {
+      console.error('Batch fixture diagnostics:', await page.evaluate(() => ({coursePage, sourceCourse, batchPage, jobs: batchJobs.map(job => ({id: job.id, state: job.state, reason: job.reason})), status: document.querySelector('#batch-status').textContent, sourceStatus: document.querySelector('#source-status').textContent})));
+      throw error;
+    });
+    assert.equal(await page.locator('#batch-jobs .batch-job').count(), 4);
+    assert.deepEqual(await page.evaluate(() => batchJobs.map(job => ({id: job.id, acquisition: job.discovery?.state}))), [
+      {id: 'batch-a', acquisition: 'ready'}, {id: 'batch-b', acquisition: 'ready'}, {id: 'batch-c', acquisition: 'ready'}, {id: '700004', acquisition: 'skipped'}
+    ], 'discovery retains the unfinished row and three usable recordings');
+    const skippedRow = page.locator('#batch-jobs .batch-job[data-job-id="700004"]');
+    assert.equal(await skippedRow.locator('input[type="checkbox"]').isDisabled(), true);
+    assert.equal(await page.evaluate(() => PPTBatch.automatic(batchJobs.find(job => job.id === '700004'))), false);
+    assert.match(await page.locator('#batch-status').textContent(), /跳过 1/);
+    assert.match(await page.locator('#batch-jobs .batch-job[data-job-id="batch-c"]').textContent(), /仅有 0 路视频/);
     assert.equal(await page.locator('#batch-jobs button').filter({hasText: '加载 0 路并框选'}).count(), 1);
     const currentLessonId = await page.evaluate(() => activeLesson.id), otherLessons = (await storedPageSnapshot(page)).filter(item => item.lessonId !== currentLessonId);
     assert(otherLessons.length > 0, 'batch regression begins with saved pages in other lessons');
@@ -399,24 +452,29 @@ async function main() {
     await page.locator('#mode').selectOption('0.5');
     await page.locator('#tab-source').click();
     holdBatchReply = true;
-    await page.evaluate(() => { globalThis.batchRaceFixture = {jobs: batchJobs, page: batchPage}; batchRaceFixture.refresh = discoverBatch(); });
+    await page.evaluate(() => { globalThis.batchRaceFixture = {refresh: discoverBatch()}; });
     await Promise.race([batchReplyHeld, new Promise((_, reject) => setTimeout(() => reject(Error('Batch discovery fixture was not held')), 5000))]);
+    assert.equal(await page.locator('#batch-start').isDisabled(), true, 'discovery prevents a concurrent batch start');
+    await page.locator('#stop').click(); await page.waitForFunction(() => !batchDiscovery);
+    assert.match(await page.locator('#batch-status').textContent(), /课程读取已停止/);
+    await page.evaluate(() => { batchRaceFixture.jobs = batchJobs; batchRaceFixture.page = batchPage; });
     await page.locator('#batch-start').click();
     await page.waitForFunction(() => batchRunning && ['loading', 'scanning'].includes(batchJobs[0].state));
     releaseBatchReply(); await page.evaluate(() => batchRaceFixture.refresh);
     assert.deepEqual(await page.evaluate(() => ({sameArray: batchJobs === batchRaceFixture.jobs,
       sameJobs: batchJobs.every((job, index) => job === batchRaceFixture.jobs[index]), samePage: batchPage === batchRaceFixture.page})),
     {sameArray: true, sameJobs: true, samePage: true}, 'a delayed list refresh cannot replace running batch objects or its course page');
-    await page.waitForFunction(() => !batchRunning && batchJobs.filter(job => !job.requiresCrop).every(job => job.state === 'done'), {timeout: 60000});
-    assert.deepEqual(await page.evaluate(() => batchJobs.map(job => batchPages(job).length)), [4, 4, 0]);
+    await page.waitForFunction(() => !batchRunning && batchJobs.filter(job => job.discovery?.state === 'ready' && !job.requiresCrop).every(job => job.state === 'done'), {timeout: 60000});
+    assert.deepEqual(await page.evaluate(() => batchJobs.map(job => batchPages(job).length)), [4, 4, 0, 0]);
     assert.equal((await savedBatchJob(page, 'batch-a')).state, 'done');
     assert.equal((await savedBatchJob(page, 'batch-b')).state, 'done', 'both original running jobs persist completion after the stale reply');
     await page.locator('#batch-discover').click();
-    await page.waitForFunction(() => document.querySelector('#batch-status').textContent.includes('读取完成'));
+    await page.waitForFunction(() => !batchDiscovery && document.querySelector('#batch-status').textContent.includes('目录已列举完整'));
     console.log('Delayed real batch discovery reply preserves running job identities, course page and both persisted completions');
     const originalIds = new Set(otherLessons.map(item => item.id));
     assert.deepEqual((await storedPageSnapshot(page)).filter(item => originalIds.has(item.id)), otherLessons, 'batch processing preserves previously saved lessons exactly');
-    assert.equal(await page.locator('#batch-jobs button').filter({hasText: '下载本节 PDF'}).count(), 3);
+    assert.equal(await page.locator('#batch-jobs button').filter({hasText: '下载本节 PDF'}).count(), 4);
+    assert.equal(await skippedRow.getByRole('button', {name: '下载本节 PDF'}).isDisabled(), true);
     const fallbackRow = page.locator('#batch-jobs .batch-job[data-job-id="batch-c"]'), screenName = '12345/0-batch-c-screen.mp4';
     assert.equal(await fallbackRow.locator('select option').count(), 2);
     assert.equal(await fallbackRow.locator('select').inputValue(), fallbackOptions[0].download_url, 'teacher channel is the default first option');
@@ -432,7 +490,7 @@ async function main() {
     await page.mouse.move(fallbackBox.x + fallbackBox.width * 0.8, fallbackBox.y + fallbackBox.height * 0.8); await page.mouse.up();
     const screenCrop = await page.evaluate(() => ({...crop}));
     assert.equal((await savedBatchJob(page, 'batch-c')).cropConfirmed, true, 'drawing a crop persists confirmation before any scan or later write');
-    await page.reload(); await page.waitForFunction(() => ready && batchJobs.length === 3);
+    await page.reload(); await page.waitForFunction(() => ready && batchJobs.length === 4);
     assert.equal(await page.evaluate(() => sourceReady), false, 'reload restores metadata without loading a video or resuming a scan');
     assert.equal((await savedBatchJob(page, 'batch-c')).sourceName, screenName);
     assert.equal((await savedBatchJob(page, 'batch-c')).cropConfirmed, true, 'crop confirmation survives an immediate reload');
@@ -447,7 +505,7 @@ async function main() {
     for (let refresh = 0; refresh < 2; refresh++) {
       const beforeURL = await fallbackRow.locator('select').inputValue(), revision = fallbackRevision;
       await page.locator('#batch-discover').click();
-      await page.waitForFunction(url => document.querySelector('#batch-status').textContent.includes('读取完成') && batchJobs.find(job => job.id === 'batch-c')?.url !== url, beforeURL);
+      await page.waitForFunction(url => !batchDiscovery && document.querySelector('#batch-status').textContent.includes('目录已列举完整') && batchJobs.find(job => job.id === 'batch-c')?.url !== url, beforeURL);
       assert(fallbackRevision > revision, 'refresh obtains a new signed URL from the real content discovery path');
       const selected = await savedBatchJob(page, 'batch-c');
       assert.equal(selected.sourceName, screenName, 'refresh retains the chosen second channel');
@@ -460,7 +518,7 @@ async function main() {
       assert.deepEqual(await page.evaluate(() => activeLesson.task), screenTask, 'the same channel retains its real paused checkpoint across URL renewals');
       assert.equal(await page.evaluate(() => canResume()), true);
     }
-    await page.reload(); await page.waitForFunction(() => ready && batchJobs.length === 3);
+    await page.reload(); await page.waitForFunction(() => ready && batchJobs.length === 4);
     assert.equal((await savedBatchJob(page, 'batch-c')).sourceName, screenName);
     assert.equal((await savedBatchJob(page, 'batch-c')).cropConfirmed, true);
     assert.deepEqual(await page.evaluate(() => activeLesson.task), screenTask);
@@ -480,7 +538,7 @@ async function main() {
     const beforeChannelChange = await storedPageSnapshot(page), oldScreenURL = await fallbackRow.locator('select').inputValue();
     screenAvailable = false;
     await page.locator('#batch-discover').click();
-    await page.waitForFunction(url => document.querySelector('#batch-status').textContent.includes('读取完成') && batchJobs.find(job => job.id === 'batch-c')?.url !== url, oldScreenURL);
+    await page.waitForFunction(url => !batchDiscovery && document.querySelector('#batch-status').textContent.includes('目录已列举完整') && batchJobs.find(job => job.id === 'batch-c')?.url !== url, oldScreenURL);
     const replacement = await savedBatchJob(page, 'batch-c');
     assert.equal(replacement.sourceName, '12345/0-batch-c-teacher.mp4');
     assert.equal(replacement.url, fallbackOptions[0].download_url);
@@ -499,7 +557,7 @@ async function main() {
     assert.equal(await page.evaluate(() => !!task), false, 'the old checkpoint is not resumed before confirming the new channel');
     await page.locator('#full').click();
     assert.equal((await savedBatchJob(page, 'batch-c')).cropConfirmed, true, 'using the full frame persists confirmation before any later write');
-    await page.reload(); await page.waitForFunction(() => ready && batchJobs.length === 3);
+    await page.reload(); await page.waitForFunction(() => ready && batchJobs.length === 4);
     assert.equal((await savedBatchJob(page, 'batch-c')).cropConfirmed, true);
     assert.equal((await savedBatchJob(page, 'batch-c')).sourceName, replacement.sourceName);
     assert.equal(await page.evaluate(() => activeLesson.task), null);
@@ -516,18 +574,18 @@ async function main() {
     const confirmedFallbackCrop = await page.evaluate(() => ({crop: activeLesson.crop, cropOverride: batchJobs.find(job => job.id === 'batch-c').cropOverride}));
     assert(confirmedFallbackCrop.cropOverride, 'the completed 0-only lesson has a reusable confirmed crop');
     page.once('dialog', dialog => dialog.accept()); await page.locator('#clear').click();
-    await page.waitForFunction(() => pages.length === 0 && !busy() && batchJobs.filter(job => !job.requiresCrop).every(job => job.state === 'done') && batchJobs.find(job => job.id === 'batch-c')?.state === 'pending' && batchJobs.find(job => job.id === 'batch-c').selected);
+    await page.waitForFunction(() => pages.length === 0 && !busy() && batchJobs.filter(job => job.discovery?.state === 'ready' && !job.requiresCrop).every(job => job.state === 'done') && batchJobs.find(job => job.id === 'batch-c')?.state === 'pending' && batchJobs.find(job => job.id === 'batch-c').selected);
     assert.deepEqual(await page.evaluate(() => {
       const job = batchJobs.find(job => job.id === 'batch-c');
       return {crop: activeLesson.crop, cropOverride: job.cropOverride, cropConfirmed: job.cropConfirmed, cropRejected: !!job.cropRejected,
         state: job.state, selected: job.selected, task: activeLesson.task, suspects: activeLesson.suspects};
     }), {...confirmedFallbackCrop, cropConfirmed: true, cropRejected: false, state: 'pending', selected: true, task: null, suspects: []}, 'clear retains the confirmed crop and queues the eligible 0-only lesson while resetting extraction state');
-    assert.deepEqual(await page.evaluate(() => batchJobs.map(job => batchPages(job).length)), [4, 4, 0]);
+    assert.deepEqual(await page.evaluate(() => batchJobs.map(job => batchPages(job).length)), [4, 4, 0, 0]);
     assert.deepEqual(await storedPageSnapshot(page), beforeFallbackClear.filter(item => item.lessonId !== fallbackLessonId), 'clearing the 0-only lesson preserves both completed automatic lessons and original data');
     assert.equal(await fallbackRow.locator('input[type="checkbox"]').isChecked(), true, 'the cleared eligible 0-only lesson checkbox reflects its selected model');
     await fallbackRow.locator('input[type="checkbox"]').uncheck();
     assert.equal(await page.evaluate(() => batchJobs.find(job => job.id === 'batch-c').selected), false, 'only the cleared 0-only lesson is explicitly deselected');
-    assert.deepEqual(await page.evaluate(() => batchJobs.filter(job => !job.requiresCrop).map(job => ({id: job.id, state: job.state}))), [{id: 'batch-a', state: 'done'}, {id: 'batch-b', state: 'done'}], 'both completed native lessons remain done');
+    assert.deepEqual(await page.evaluate(() => batchJobs.filter(job => job.discovery?.state === 'ready' && !job.requiresCrop).map(job => ({id: job.id, state: job.state}))), [{id: 'batch-a', state: 'done'}, {id: 'batch-b', state: 'done'}], 'both completed native lessons remain done');
     assert.equal(await page.locator('#batch-start').isDisabled(), true, 'completed automatic lessons are not queued again when the cleared 0-only lesson is unselected');
     const repeatLessonId = await page.evaluate(() => batchLesson(batchJobs.find(job => job.id === 'batch-a')).id);
     await page.locator('#lesson-select').selectOption(repeatLessonId);
@@ -535,11 +593,11 @@ async function main() {
     const beforeRepeat = (await storedPageSnapshot(page)).filter(item => item.lessonId !== repeatLessonId);
     page.once('dialog', dialog => dialog.accept()); await page.locator('#clear').click();
     await page.waitForFunction(() => pages.length === 0 && !busy() && batchJobs.find(job => job.id === 'batch-a').state === 'pending' && batchJobs.find(job => job.id === 'batch-a').selected);
-    assert.deepEqual(await page.evaluate(() => batchJobs.map(job => batchPages(job).length)), [0, 4, 0]);
+    assert.deepEqual(await page.evaluate(() => batchJobs.map(job => batchPages(job).length)), [0, 4, 0, 0]);
     assert.deepEqual(await storedPageSnapshot(page), beforeRepeat);
     await page.locator('#batch-start').click();
-    await page.waitForFunction(() => !batchRunning && batchJobs.filter(job => !job.requiresCrop).every(job => job.state === 'done'), {timeout: 60000});
-    assert.deepEqual(await page.evaluate(() => batchJobs.map(job => batchPages(job).length)), [4, 4, 0]);
+    await page.waitForFunction(() => !batchRunning && batchJobs.filter(job => job.discovery?.state === 'ready' && !job.requiresCrop).every(job => job.state === 'done'), {timeout: 60000});
+    assert.deepEqual(await page.evaluate(() => batchJobs.map(job => batchPages(job).length)), [4, 4, 0, 0]);
     assert.deepEqual((await storedPageSnapshot(page)).filter(item => item.lessonId !== repeatLessonId), beforeRepeat, 'rerunning one cleared lesson preserves completed lessons, original bytes and order');
     assert.equal(errors.length, 0, errors.join('\n')); assert.deepEqual(blocked, [], 'no external network requests');
     console.log('JSON-only discovery, local import, stop, cropping, isolated lesson clear, batch rerun and HTTP error preservation: passed; browser errors: 0');

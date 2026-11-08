@@ -5,8 +5,8 @@ const { randomUUID } = require('node:crypto');
 
 const files = [
   'manifest.json', 'background.js', 'media.js', 'course.js', 'batch.js', 'content.js',
-  'page-hook.js', 'capture.html', 'capture.js', 'scanner.js', 'pdf.js', 'style.css',
-  'extension-state.js', 'preflight.js', 'workspace.js', 'disk-cache.js', 'page-store.js', 'library.js',
+  'page-hook.js', 'capture.html', 'capture.js', 'mp4-recovery.js', 'scanner.js', 'pdf.js', 'style.css',
+  'extension-state.js', 'preflight.js', 'workspace.js', 'disk-cache.js', 'page-store.js', 'library.js', 'motion.js',
   'README.md', 'THIRD_PARTY_NOTICES.md', 'LICENSE', 'vendor/hls.min.js', 'vendor/hls.LICENSE',
   'icons/icon-16.png', 'icons/icon-32.png', 'icons/icon-48.png', 'icons/icon-128.png',
   'icons/browsers/chrome.svg', 'icons/browsers/edge.svg', 'icons/browsers/brave.svg',
@@ -207,6 +207,12 @@ function release(rootArgument) {
   const packageFile = path.join(root, 'package.json');
   checkFile(packageFile, root);
   if (parseJson(fs.readFileSync(packageFile)).version !== manifest.version) throw new Error('manifest.json and package.json versions differ');
+  const lockFile = path.join(root, 'package-lock.json');
+  checkFile(lockFile, root);
+  const lock = parseJson(fs.readFileSync(lockFile));
+  if (lock.version !== manifest.version || lock.packages?.['']?.version !== manifest.version) {
+    throw new Error('manifest.json and package-lock.json versions differ');
+  }
   const history = path.join(root, 'last-release');
   const temporary = path.join(root, 'tmp');
   for (const directory of [history, temporary]) {

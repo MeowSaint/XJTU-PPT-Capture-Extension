@@ -1,6 +1,9 @@
 /* Durable lesson metadata shares the existing settings store; image assets stay separate. */
 (function (root) {
   'use strict';
+  function pageLimit(value) {
+    return Number.isInteger(value) && value >= 100 && value <= 20000 ? value : 5000;
+  }
   function courseKey(page = '', course = {}) {
     try {
       const url = new URL(page), id = (url.pathname + url.hash).match(/\/(?:my|study)-capture-courses\/([^/?#]+)/)?.[1] || url.searchParams.get('courseId') || url.searchParams.get('course_id');
@@ -38,28 +41,142 @@
     }
     return merged;
   }
-  function transaction(db, stores, action) {
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction(stores, 'readwrite'); let result;
-      tx.oncomplete = () => resolve(typeof result === 'function' ? result() : result);
-      tx.onerror = tx.onabort = () => reject(tx.error || Error('课次信息保存失败'));
-      try { result = action(tx); } catch (error) { tx.abort(); reject(error); }
+  function knowledgeEvidence(lesson, pages) {
+    const source = lesson?.source;
+    const identifiable = source && [source.sourceKey, source.url, source.sourceName].some(value => typeof value === 'string' && value.trim());
+    return {sourceKey: source ? key(source) : lesson?.key || null,
+      trackKey: identifiable ? key({sourceKey: source.sourceKey || (source.url ? 'url:' + source.url : ''), sourceName: source.sourceName}) : null,
+      sourceDuration: Number.isFinite(source?.duration) && source.duration > 0 ? source.duration : null,
+      pageIds: pages.map(page => page.id)};
+  }
+  function knowledgeState(lesson, pages) {
+    if (!['has-content', 'no-content'].includes(lesson?.knowledgeReview)) return 'unreviewed';
+    const evidence = lesson.knowledgeReviewEvidence, current = knowledgeEvidence(lesson, pages);
+    if (!evidence || !['sourceKey', 'trackKey', 'sourceDuration', 'pageIds'].every(field => Object.hasOwn(evidence, field))
+      || evidence.sourceKey !== current.sourceKey || evidence.trackKey !== current.trackKey || evidence.sourceDuration !== current.sourceDuration
+      || !Array.isArray(evidence.pageIds) || evidence.pageIds.length !== current.pageIds.length
+      || new Set(evidence.pageIds).size !== current.pageIds.length || !current.pageIds.every(id => evidence.pageIds.includes(id))) return 'unreviewed';
+    return lesson.knowledgeReview;
+  }
+  function learningPages(pages, {view = 'raw', knowledgeReview = 'unreviewed'} = {}) {
+    return view === 'learning' ? knowledgeReview === 'no-content' ? [] : pages.filter(page => page.learningExcluded !== true) : pages.slice();
+  }
+  function integrity({batch, lessons = [], pages = [], view = 'raw', reviewPages = pages, exportedAt = null, format = null}) {
+    view = view === 'learning' ? 'learning' : 'raw';
+    // Project an explicit schema. Even legacy IDs and normalized source keys can contain signed URLs.
+    const aliases = new Map(), opaque = (kind, value) => {
+      if (!value) return null;
+      const identity = kind + ':' + String(value);
+      if (!aliases.has(identity)) aliases.set(identity, kind + '-' + (aliases.size + 1));
+      return aliases.get(identity);
+    };
+    const id = (kind, value) => Number.isSafeInteger(value) ? value : typeof value === 'string' && /^[\w-]{1,160}$/.test(value) ? value : opaque(kind, value);
+    const number = value => Number.isFinite(value) && value >= 0 ? value : null;
+    const code = value => typeof value === 'string' && /^[A-Z0-9_]{1,64}$/.test(value) ? value : '';
+    const ranges = values => (Array.isArray(values) ? values : []).filter(item => item && number(item.start) !== null && number(item.end) !== null && item.end >= item.start)
+      .map(item => ({start: item.start, end: item.end, ...(number(item.time) !== null ? {time: item.time} : {})}));
+    const discovery = value => ({state: ['ready', 'error', 'pending', 'skipped', 'unavailable'].includes(value?.state) ? value.state : 'unknown',
+      code: code(value?.code), attempts: number(value?.attempts)});
+    const jobs = batch?.jobs || [], rows = lessons.map(lesson => ({lesson, job: jobs.find(job => job.id === lesson.source?.batchJobId)}));
+    for (const job of jobs) if (!rows.some(row => row.job === job)) rows.push({lesson: null, job});
+    const result = rows.map(({lesson, job}) => {
+      const task = lesson?.task, coverage = task?.coverage, duration = number(task?.duration), source = lesson?.source || {};
+      const track = key({sourceKey: source.sourceKey || (source.url ? 'url:' + source.url : ''), sourceName: source.sourceName});
+      const validRanges = ranges(coverage?.ranges);
+      const verified = !!(coverage?.version === 1 && duration > 0 && coverage.duration === duration
+        && (!Number.isFinite(source.duration) || source.duration === duration) && coverage.sourceKey === key(source)
+        && coverage.trackKey === track && Array.isArray(coverage.ranges) && validRanges.length === coverage.ranges.length
+        && validRanges.every(range => range.end <= duration));
+      const merged = verified ? validRanges.reduce((list, range) => mergeRanges(list, range), []) : [];
+      const reachedEnd = verified && coverage.reachedEnd === true && merged[0]?.start === 0 && merged[0].end >= duration - Math.min(.05, duration / 2);
+      const raw = lesson ? reviewPages.filter(page => page.lessonId === lesson.id) : [];
+      const requested = lesson ? pages.filter(page => page.lessonId === lesson.id).sort((a, b) => (a.order ?? a.id) - (b.order ?? b.id)) : [];
+      const knowledgeReview = knowledgeState(lesson, raw), retained = learningPages(requested, {view, knowledgeReview});
+      return {lessonId: id('lesson', lesson?.id), jobId: id('job', job?.id || source.batchJobId), excluded: job?.selected === false || job?.discovery?.state === 'skipped',
+        discovery: discovery(job?.discovery), savedPages: raw.length,
+        rawCount: requested.length, excludedCount: requested.length - retained.length, exportedCount: retained.length,
+        knowledgeReview, comparisonVersion: ['local-v1', 'mixed'].includes(task?.comparisonVersion) ? task.comparisonVersion : 'unknown',
+        scan: {verified, reachedEnd, state: reachedEnd ? 'reached-end' : verified ? 'partial' : task ? 'legacy-unknown' : 'not-started',
+          taskState: ['running', 'paused', 'failed', 'done'].includes(task?.state) ? task.state : null, duration, checkpoint: number(task?.checkpoint),
+          coverage: coverage ? {version: 1, sourceKey: opaque('source', coverage.sourceKey), trackKey: opaque('track', coverage.trackKey),
+            duration: number(coverage.duration), ranges: merged, reachedEnd: verified && coverage.reachedEnd === true} : null,
+          suspects: ranges(lesson?.suspects)},
+        knowledge: {state: knowledgeReview},
+        exportPages: retained.map((page, index) => ({id: id('page', page.id), sourceTime: number(page.sourceTime), exportIndex: index + 1}))};
     });
+    const metadata = batch?.discovery;
+    const failures = (metadata?.failures || []).filter(item => !item.jobId).map(item => ({code: code(item.code), status: number(item.status), attempts: number(item.attempts)}));
+    const directory = {state: metadata?.complete === true ? 'complete' : metadata?.complete === false ? 'incomplete' : 'unknown',
+      total: Number.isSafeInteger(metadata?.total) && metadata.total >= 0 ? metadata.total : null, known: jobs.length, eligible: number(metadata?.eligible), failures};
+    const summary = {notReachedEnd: result.filter(item => !item.scan.reachedEnd).length, directoryFailures: failures.length,
+      directoryUnknown: directory.state === 'unknown' ? 1 : 0, discoveryFailures: result.filter(item => item.discovery.state === 'error').length,
+      discoveryUnknown: result.filter(item => ['unknown', 'pending', 'unavailable'].includes(item.discovery.state)).length,
+      suspectRanges: result.reduce((sum, item) => sum + item.scan.suspects.length, 0), emptyLessons: result.filter(item => !item.savedPages).length,
+      excluded: result.filter(item => item.excluded).length};
+    const snapshot = result.filter(item => item.exportPages.length).map(item => ({lessonId: item.lessonId, pages: item.exportPages}));
+    return {version: 1, view, rawCount: pages.length, exportedCount: snapshot.reduce((sum, item) => sum + item.pages.length, 0),
+      excludedCount: view === 'raw' ? 0 : pages.length - snapshot.reduce((sum, item) => sum + item.pages.length, 0),
+      knowledgeComplete: result.length > 0 && result.every(item => item.knowledgeReview !== 'unreviewed'),
+      complete: directory.state === 'complete' && directory.total === jobs.length && result.length > 0
+        && !summary.notReachedEnd && !summary.suspectRanges && !summary.directoryFailures && !summary.discoveryFailures && !summary.discoveryUnknown,
+      directory, summary, lessons: result.map(({exportPages, ...item}) => item), pageIds: snapshot.flatMap(item => item.pages.map(page => page.id)),
+      export: {exportedAt: typeof exportedAt === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(exportedAt) ? exportedAt : null,
+        format: ['pdf', 'zip'].includes(format) ? format : null, lessons: snapshot}};
+  }
+  function transaction(db, stores, action, signal) {
+    return new Promise((resolve, reject) => {
+      if (signal?.aborted) { reject(signal.reason); return; }
+      const tx = db.transaction(stores, 'readwrite'); let result, abortReason, settled = false;
+      const finish = (settle, value) => {
+        if (settled) return; settled = true;
+        signal?.removeEventListener('abort', abort);
+        tx.oncomplete = tx.onerror = tx.onabort = null; settle(value);
+      };
+      const abort = () => {
+        abortReason = signal.reason;
+        try { tx.abort(); }
+        catch (error) {
+          // A committed transaction cannot be rolled back; its completion still publishes the binding.
+          abortReason = undefined;
+          if (error.name !== 'InvalidStateError') finish(reject, error);
+        }
+      };
+      tx.oncomplete = () => finish(resolve, typeof result === 'function' ? result() : result);
+      tx.onerror = tx.onabort = () => finish(reject, abortReason ?? tx.error ?? Error('课次信息保存失败'));
+      signal?.addEventListener('abort', abort, {once: true});
+      try { result = action(tx); } catch (error) { tx.abort(); finish(reject, error); }
+    });
+  }
+  function saveBatch(settings, snapshot) {
+    const name = 'batch:' + snapshot.page;
+    if (snapshot.discovery !== undefined) { settings.put(snapshot, name); return; }
+    const read = settings.get(name);
+    read.onsuccess = () => {
+      if (read.result?.discovery !== undefined) snapshot.discovery = structuredClone(read.result.discovery);
+      settings.put(snapshot, name);
+    };
   }
   function put(db, lesson, relatedBatch = null) {
     const snapshot = structuredClone(lesson), batchSnapshot = relatedBatch && structuredClone(relatedBatch);
     return transaction(db, ['settings'], tx => {
       const settings = tx.objectStore('settings');
       settings.put(snapshot, 'lesson:' + snapshot.id);
-      if (batchSnapshot) settings.put(batchSnapshot, 'batch:' + batchSnapshot.page);
+      if (batchSnapshot) saveBatch(settings, batchSnapshot);
     });
   }
   function activate(db, id) {
     return transaction(db, ['settings'], tx => { tx.objectStore('settings').put(id, 'activeLesson'); });
   }
-  function batch(db, page, jobs) {
-    const snapshot = structuredClone({page, jobs});
-    return transaction(db, ['settings'], tx => { tx.objectStore('settings').put(snapshot, 'batch:' + page); });
+  function bind(db, lesson, {signal} = {}) {
+    const snapshot = structuredClone(lesson);
+    return transaction(db, ['settings'], tx => {
+      const settings = tx.objectStore('settings');
+      settings.put(snapshot, 'lesson:' + snapshot.id); settings.put(snapshot.id, 'activeLesson');
+    }, signal);
+  }
+  function batch(db, page, jobs, discovery = undefined) {
+    const snapshot = structuredClone({page, jobs, ...(discovery === undefined ? {} : {discovery})});
+    return transaction(db, ['settings'], tx => { saveBatch(tx.objectStore('settings'), snapshot); });
   }
   function restore(db) {
     return transaction(db, ['pages', 'settings'], tx => {
@@ -139,7 +256,7 @@
       return () => result;
     });
   }
-  const api = {key, courseKey, recover, mergeRanges, restore, put, activate, batch, remove};
+  const api = {pageLimit, key, courseKey, recover, mergeRanges, knowledgeEvidence, knowledgeState, learningPages, integrity, restore, put, activate, bind, batch, remove};
   root.PPTLibrary = api;
   if (typeof module !== 'undefined') module.exports = api;
 })(globalThis);

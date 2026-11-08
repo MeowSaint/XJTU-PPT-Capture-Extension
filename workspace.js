@@ -17,6 +17,12 @@
     el('preflight-authorize').disabled = locked || !items.length;
     el('source-show-all').disabled = locked;
     el('check-updates').disabled = !studyAccepted || checkingUpdate;
+    const source = items.find(item => item.url === el('sources').value);
+    el('selected-source-name').textContent = source ? source.name || source.url : '尚未选择视频';
+    const name = source ? source.name || new URL(source.url).pathname : '';
+    el('source-track-hint').textContent = /(?:^|\/)0-[^/]+/i.test(name) ? '0 路视频：加载后先框选 PPT 区域，确认画面后再提取。' :
+      /(?:^|\/)2-[^/]+/i.test(name) ? '2 路通常为 PPT 机位；加载后确认预览，再开始提取。' :
+      '选 2 路 PPT 视频；只有 0 路时，加载后先框选 PPT 区域。预检通过仅表示地址可用。';
   }
   function renderSources() {
     const select = el('sources'), selected = select.value;
