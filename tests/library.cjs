@@ -423,6 +423,72 @@ function zipEntries(bytes, {utf8 = true} = {}) {
       } finally { await page.evaluate(() => restoreLearningWriter()); }
     });
 
+    await test('learning native batch report file preserves batch scope, filtered mappings and public projection after reload', async () => {
+      const base = origin + '/study-capture-courses/42/preview-detail/native-report', currentPage = origin + '/study-capture-courses/99/preview-detail/current';
+      const privateURL = origin + '/private/native-report.mp4?signature=ROUND1_SIGNATURE&token=ROUND1_TOKEN';
+      const privateName = 'ROUND1_PRIVATE_SOURCE.mp4', privateNote = 'ROUND1_PRIVATE_NOTE', privateCredential = 'ROUND1_PRIVATE_CREDENTIAL';
+      const batchCourse = {...course, name: '批量原生报告'}, jobA = privateURL + '#job-a', jobB = privateURL + '#job-b';
+      const current = lesson('native-current', {page: currentPage, course: {...course, name: '当前课报告'}});
+      const makeLesson = (id, jobId, info) => lesson(id, {page: base, course: info, notes: privateNote, credentials: {token: privateCredential},
+        source: {kind: 'remote', page: base, url: privateURL, sourceKey: 'url:' + privateURL, sourceName: privateName, batchJobId: jobId, duration: 3}});
+      const a = makeLesson('native-batch-a', jobA, batchCourse), b = makeLesson('native-batch-b', jobB, {...batchCourse, date: '2026-11-05'});
+      await seed({lessons: [current, a, b], activeId: current.id, batches: [{page: base,
+        discovery: {complete: true, total: 2, eligible: 2, failures: []},
+        jobs: [{id: jobA, course: a.course, discovery: {state: 'ready'}, notes: privateNote}, {id: jobB, course: b.course, discovery: {state: 'ready'}}]}], pages: [
+        {id: 900, lessonId: current.id, sourceTime: 9, image: 0},
+        {id: 611, lessonId: a.id, sourceTime: .25, order: 1024, image: 0, learningExcluded: true},
+        {id: 612, lessonId: a.id, sourceTime: 2.25, order: 3072, image: 2}, {id: 613, lessonId: a.id, sourceTime: 1.25, order: 2048, image: 1},
+        {id: 621, lessonId: b.id, sourceTime: .5, image: 0},
+      ]});
+      await page.evaluate(async () => {
+        for (const lesson of lessons.filter(lesson => lesson.id.startsWith('native-batch-'))) {
+          lesson.knowledgeReview = lesson.id === 'native-batch-b' ? 'no-content' : 'has-content';
+          const evidence = PPTLibrary.knowledgeEvidence(lesson, allPages.filter(page => page.lessonId === lesson.id));
+          lesson.knowledgeReviewEvidence = evidence;
+          if (lesson.id === 'native-batch-a') lesson.task = {state: 'done', duration: 3, checkpoint: 3, comparisonVersion: 'local-v1',
+            coverage: {version: 1, sourceKey: evidence.sourceKey, trackKey: evidence.trackKey, duration: 3, ranges: [{start: 0, end: 3}], reachedEnd: true}};
+          await persistLesson(lesson);
+        }
+      });
+      await page.locator('#export-view').selectOption('learning'); await page.evaluate(() => exportViewSave); await settled();
+      const previousDocument = await page.evaluate(() => performance.timeOrigin);
+      await page.reload(); await idle();
+      assert(await page.evaluate(previous => performance.timeOrigin > previous, previousDocument), 'native consumer starts after a real document reload');
+      assert.equal(await page.locator('#export-view').inputValue(), 'learning');
+      const scope = await page.evaluate(() => ({active: activeLesson.id, currentKey: currentCourseKey(), batchKey: batchCourseKey(), batchPage, view: exportView}));
+      assert.equal(scope.active, current.id); assert.notEqual(scope.batchKey, scope.currentKey); assert.equal(scope.batchPage, base); assert.equal(scope.view, 'learning');
+      await page.locator('#learning-view').selectOption('excluded'); await count(0);
+      await page.locator('#batch-panel').evaluate(panel => { panel.open = true; });
+      assert.equal(await page.locator('#batch-course-report').isDisabled(), false);
+      // No downloadBlob/anchor/writer hook: consume this independent real button click's native file.
+      const [download] = await Promise.all([page.waitForEvent('download'), page.locator('#batch-course-report').click()]);
+      assert.equal(download.suggestedFilename(), '课程完整性报告.json'); assert(download.url().startsWith('blob:' + origin + '/'));
+      const actualFile = path.join(output, 'learning-native-batch-report.json'); await download.saveAs(actualFile);
+      assert.equal(await download.failure(), null); await idle();
+      const bytes = fs.readFileSync(actualFile), report = JSON.parse(bytes.toString('utf8'));
+      assert.deepEqual(Object.keys(report).sort(), ['version', 'view', 'rawCount', 'exportedCount', 'excludedCount', 'knowledgeComplete', 'complete', 'directory', 'summary', 'lessons', 'pageIds', 'export', 'lastExport'].sort());
+      assert.equal(report.version, 1); assert.equal(report.view, 'learning'); assert.equal(report.rawCount, 4); assert.equal(report.exportedCount, 2); assert.equal(report.excludedCount, 2);
+      assert.equal(report.knowledgeComplete, true); assert.equal(report.complete, false); assert.equal(report.lastExport, null);
+      assert.equal(report.directory.state, 'complete'); assert.equal(report.directory.total, 2); assert.equal(report.directory.known, 2);
+      assert.deepEqual(report.lessons.map(lesson => lesson.lessonId), [a.id, b.id]); assert.deepEqual(report.pageIds, [613, 612]);
+      assert.deepEqual(report.export.lessons, [{lessonId: a.id, pages: [{id: 613, sourceTime: 1.25, exportIndex: 1}, {id: 612, sourceTime: 2.25, exportIndex: 2}]}]);
+      assert.deepEqual(report.lessons.map(lesson => [lesson.savedPages, lesson.rawCount, lesson.exportedCount, lesson.excludedCount, lesson.knowledgeReview]),
+        [[3, 3, 2, 1, 'has-content'], [1, 1, 0, 1, 'no-content']]);
+      for (const lesson of report.lessons) {
+        assert.deepEqual(Object.keys(lesson).sort(), ['lessonId', 'jobId', 'excluded', 'discovery', 'savedPages', 'rawCount', 'excludedCount', 'exportedCount', 'knowledgeReview', 'comparisonVersion', 'scan', 'knowledge'].sort());
+        assert.match(lesson.jobId, /^job-\d+$/);
+      }
+      assert.equal(report.lessons[0].scan.verified, true); assert.match(report.lessons[0].scan.coverage.sourceKey, /^source-\d+$/); assert.match(report.lessons[0].scan.coverage.trackKey, /^track-\d+$/);
+      const text = bytes.toString('utf8');
+      for (const secret of [privateURL, 'url:' + privateURL, privateName, privateNote, privateCredential, 'ROUND1_SIGNATURE', 'ROUND1_TOKEN', fileKey, 'knowledgeReviewEvidence', 'sourceName', 'credentials', 'notes', 'signature=', 'token=']) assert.equal(text.includes(secret), false, `public native file must omit ${secret}`);
+      const sha256 = require('node:crypto').createHash('sha256').update(bytes).digest('hex');
+      fs.writeFileSync(path.join(output, 'native-batch-report-evidence.json'), JSON.stringify({trigger: 'real locator.click #batch-course-report after same-page/context reload',
+        downloadEvent: true, suggestedFilename: download.suggestedFilename(), downloadURL: download.url(), failure: null, actualFile, bytes: bytes.length, sha256, scope,
+        pageIds: report.pageIds, mappings: report.export.lessons, counts: {raw: report.rawCount, exported: report.exportedCount, excluded: report.excludedCount},
+        downloadBlobHook: false, anchorHook: false, writerHook: false, oldBurstReproducedOrFixed: false}, null, 2));
+      console.log(`NATIVE_BATCH_REPORT_FILE ${actualFile} SHA256 ${sha256}`);
+    });
+
     await test('learning controls visual, low-height Stop and keyboard inspection', async () => {
       await seed({lessons: [lesson('learning-visual')], pages: [
         {id: 501, lessonId: 'learning-visual', image: 0, sourceTime: .25}, {id: 502, lessonId: 'learning-visual', image: 1, sourceTime: 1.25, learningExcluded: true},
