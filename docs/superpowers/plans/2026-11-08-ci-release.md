@@ -2,15 +2,15 @@
 
 > For agentic workers: use subagent-driven-development, one fresh task implementer and fresh independent review.
 
-**Goal:** Resolve the observed Linux preflight cancellation acceptance failure without weakening cancellation or changing runtime.
-**Architecture:** Await the actual asynchronous discover onclick completion before sampling the held old generation, retain native clicks and cancellation, assert no queued old URL and no stale candidates. A proven runtime defect requires concrete context rather than guessing beyond scope.
+**Goal:** Resolve the observed Linux CI synchronization failures without weakening business assertions or changing runtime.
+**Architecture:** Await actual asynchronous completion at each named fixture boundary: discover completion, bounded ZIP generation/native delivery, and IndexedDB-backed library startup before treating an empty gallery as restored. Retain native actions, cancellation and all previous assertions. A proven runtime defect requires concrete context rather than guessing beyond scope.
 **Tech Stack:** Existing JS, Node20+, Playwright, installed Chromium, no dependencies added.
 **Spec:** docs/superpowers/specs/2026-11-08-ci-release-design.md
 
 ## Global Constraints
 
 - Chrome114+/Node20+, existing dependencies only; no installs or real school/profile access.
-- Only the explicitly named owning fixture per task (Task1 tests/features.cjs; Task2 tests/memory.cjs) plus its own report; runtime, version, assets, permissions and IDB unchanged.
+- Only the explicitly named owning fixture per task (Task1 tests/features.cjs; Task2 tests/memory.cjs; Task3 tests/library.cjs) plus its own report; runtime, version, assets, permissions and IDB unchanged.
 - Preserve all11 business cases and native click/cancel/stale-result assertions; no sleep or count relaxation to pass.
 - Preserve real RED/failures, actual inputs/results/cleanup; original final M2 remains disclosed.
 
@@ -21,6 +21,8 @@
 - Held requests: third queued old URL must never start after fresh cancellation.
 - Late old results: fresh valid candidates survive, no old options reappear.
 - Build scope: 35 shipped members and original ZIP SHA remain unchanged.
+- Empty startup: zero gallery cards and !busy() can both be true before ready; prove count(0) cannot settle during held real startup.
+- Restore readiness: keep the original enabled-empty-library assertion and every deletion/reload/storage assertion; do not wait on the assertion itself as a substitute for actual startup completion.
 
 ### Task 1: Await the correct preflight cancellation boundary
 
@@ -41,3 +43,13 @@
 - [ ] Exercise meaningful boundary controls using a small budget without replaying heavy suites; preserve actual native saveAs and every original ZIP/image/read/heap/cache/thumbnail/retention/append assertion. Observe relevant durations/status, no product/policy changes.
 - [ ] Run final FULL16 memory once on final fixture with existing browser; capture quartets/inputs/native producer-event timings/full2000-file integrity and all resources closed. No unaffected features or other suite repeats.
 - [ ] Verify exacttest+ownreport and unchanged35runtime/ZIP, self-review, source+report commits; fresh independent spec/quality/whole new-delta review before push and actual remoteCI.
+
+### Task 3: Wait for real library startup before accepting an empty gallery
+
+**Files:** Modify tests/library.cjs only. Create own .superpowers/sdd/2026-11-08-ci-release/task-3-report.md.
+**Interfaces:** Consumes actual ready/dbReady startup and existing count(n)/idle() helpers; produces unchanged deletion, empty-library-enabled and persistence assertions, with a deterministic held-startup regression.
+- [ ] Read supplied remote-job.log1194–1215 and library20–30/2189–2206 plus capture31–52/874–897; retain true Linux true!==false RED without claiming a local replay.
+- [ ] Prove zero cards/!busy can precede ready using bounded real held startup; old count(0) must demonstrably settle too early while the fixed helper remains pending until the actual startup completes. Restore every observer/IDB hook and close resources.
+- [ ] Make the smallest fixture-only readiness fix. Preserve exact requested counts, original enabled-empty-library/deletion/reload/disk assertions, and all existing cases. No sleeps, retries, product changes or direct control-state manipulation.
+- [ ] Run focused meaningful RED/GREEN and once final FULL library on final source with the existing browser. Preserve actual native exports, media/binding/coverage/1388/page-limit/management/crop cases and raw quartets/source epoch/resource cleanup. No unaffected suite repeats.
+- [ ] Verify library+ownreport scope, unchanged Task1/2 fixtures and35runtime/ZIP; self-review, source/report commits and fresh independent task/complete-new-stage review, then actual remoteCI.
