@@ -64,7 +64,7 @@ test('integrity freezes export page order and projects every identity without si
   item.lessonKey = secret; item.knowledge = {state: 'unreviewed', notes: secret};
   const pages = [{id: 2, lessonId: 'safe', order: 20, sourceTime: 8, sourceKey: secret}, {id: 1, lessonId: 'safe', order: 10, sourceTime: 2, token: secret}];
   const report = library.integrity({batch: {jobs: [{id: 'safe', discovery: {state: 'error', message: secret, code: 'TIMEOUT'}}], discovery: {complete: false, failures: [{code: 'NETWORK', message: secret}]}}, lessons: [item], pages, exportedAt: '2026-11-08T00:00:00.000Z', format: 'pdf'});
-  assert.deepEqual(report.pageIds, [1, 2]); assert.deepEqual(report.export.lessons[0].pages, [{id: 1, sourceTime: 2}, {id: 2, sourceTime: 8}]);
+  assert.deepEqual(report.pageIds, [1, 2]); assert.deepEqual(report.export.lessons[0].pages, [{id: 1, sourceTime: 2, exportIndex: 1}, {id: 2, sourceTime: 8, exportIndex: 2}]);
   pages[1].sourceTime = 99; item.task.coverage.ranges[0].end = 1;
   assert.equal(report.export.lessons[0].pages[0].sourceTime, 2); assert.equal(report.lessons[0].scan.coverage.ranges[0].end, 9.95);
   const encoded = JSON.stringify(report);
@@ -183,6 +183,63 @@ test('discovery metadata survives explicit batch, legacy batch and related lesso
 test('suspect ranges merge overlapping intervals, ignore invalid bounds and keep chronological order', () => {
   assert.deepEqual(library.mergeRanges([{start: 5,end: 7,time: 6},{start: 1,end: 2,time: 1}], {start: 1.5,end: 3,time: 2}), [{start: 1,end: 3,time: 1},{start: 5,end: 7,time: 6}]);
   assert.deepEqual(library.mergeRanges([], {start: NaN,end: 5,time: 4}), []);
+});
+
+function reviewEvidence(lesson, pages) {
+  return {sourceKey: lesson.source ? library.key(lesson.source) : lesson.key || null,
+    trackKey: lesson.source && (lesson.source.sourceKey || lesson.source.url || lesson.source.sourceName)
+      ? library.key({sourceKey: lesson.source.sourceKey || (lesson.source.url ? 'url:' + lesson.source.url : ''), sourceName: lesson.source.sourceName}) : null,
+    sourceDuration: Number.isFinite(lesson.source?.duration) && lesson.source.duration > 0 ? lesson.source.duration : null, pageIds: pages.map(p => p.id)};
+}
+test('learning helpers preserve originals and require four current whole-lesson review fields', () => {
+  const lesson = integrityLesson('review'); lesson.source.duration = 3;
+  const pages = [1, 2, 3].map(id => ({id, lessonId: lesson.id, order: id, learningExcluded: id === 2}));
+  lesson.knowledgeReview = 'no-content'; lesson.knowledgeReviewEvidence = reviewEvidence(lesson, pages);
+  const state = () => library.knowledgeState(lesson, pages);
+  assert.equal(state(), 'no-content'); assert.deepEqual(library.learningPages(pages), pages);
+  assert.equal(library.learningPages(pages)[0], pages[0]);
+  assert.deepEqual(library.learningPages(pages, {view: 'learning', knowledgeReview: state()}), []);
+  assert.deepEqual(library.learningPages(pages.slice(0, 2), {view: 'learning', knowledgeReview: state()}), []);
+  assert.equal(library.knowledgeState(lesson, [...pages].reverse()), 'no-content');
+  for (const field of ['sourceKey', 'trackKey', 'sourceDuration', 'pageIds']) {
+    const evidence = lesson.knowledgeReviewEvidence; lesson.knowledgeReviewEvidence = {...evidence}; delete lesson.knowledgeReviewEvidence[field];
+    assert.equal(state(), 'unreviewed', field); lesson.knowledgeReviewEvidence = evidence;
+  }
+  lesson.source.duration = 6; assert.equal(state(), 'unreviewed', 'same URL with longer current source, stale coverage stays unchanged');
+  lesson.knowledgeReviewEvidence = reviewEvidence(lesson, pages); assert.equal(state(), 'no-content');
+  lesson.source.sourceKey = lesson.source.sourceKey.replace('2-review', '0-review'); assert.equal(state(), 'unreviewed', 'same batch job with new track');
+  lesson.knowledgeReviewEvidence = reviewEvidence(lesson, pages); assert.equal(state(), 'no-content');
+  lesson.source.sourceKey = lesson.source.sourceKey.replace('secret', 'renewed'); assert.equal(state(), 'no-content', 'known signed renewal');
+  assert.equal(library.knowledgeState(lesson, [...pages, {id: 4}]), 'unreviewed');
+  lesson.knowledgeReview = 'has-content'; assert.deepEqual(library.learningPages(pages, {view: 'learning', knowledgeReview: state()}), [pages[0], pages[2]]);
+  for (const duration of [undefined, 0, -1, NaN, Infinity]) {
+    lesson.source.duration = duration; lesson.knowledgeReviewEvidence = reviewEvidence(lesson, pages); assert.equal(state(), 'has-content');
+    assert.equal(lesson.knowledgeReviewEvidence.sourceDuration, null);
+  }
+});
+test('learning integrity separates requested ranges, full review evidence, physical completion and safe mappings', () => {
+  const item = integrityLesson('learning'); item.source.duration = 10; item.task.comparisonVersion = 'mixed';
+  const pages = [3, 1, 2].map((id, order) => ({id, order, lessonId: item.id, sourceTime: id, learningExcluded: id === 1}));
+  item.knowledgeReview = 'no-content'; item.knowledgeReviewEvidence = reviewEvidence(item, pages);
+  const batch = {jobs: [{id: item.id, discovery: {state: 'ready'}}], discovery: {complete: true, total: 1}};
+  let report = library.integrity({batch, lessons: [item], pages: pages.slice(1), reviewPages: pages, view: 'learning'});
+  assert.equal(report.rawCount, 2); assert.equal(report.exportedCount, 0); assert.equal(report.excludedCount, 2); assert.equal(report.lessons[0].savedPages, 3);
+  assert.equal(report.lessons[0].knowledgeReview, 'no-content'); assert.equal(report.lessons[0].comparisonVersion, 'mixed');
+  assert.equal(report.complete, true); assert.equal(report.knowledgeComplete, true);
+  item.knowledgeReview = 'has-content';
+  report = library.integrity({batch, lessons: [item], pages, view: 'learning'});
+  assert.deepEqual(report.pageIds, [3, 2]); assert.deepEqual(report.export.lessons[0].pages, [{id: 3, sourceTime: 3, exportIndex: 1}, {id: 2, sourceTime: 2, exportIndex: 2}]);
+  assert.equal(report.lessons[0].rawCount, 3); assert.equal(report.lessons[0].excludedCount, 1); assert.equal(report.lessons[0].exportedCount, 2);
+  report = library.integrity({batch, lessons: [item], pages}); assert.equal(report.view, 'raw'); assert.equal(report.excludedCount, 0);
+  delete item.knowledgeReviewEvidence; report = library.integrity({batch, lessons: [item], pages}); assert.equal(report.complete, true); assert.equal(report.knowledgeComplete, false);
+  item.knowledgeReviewEvidence = reviewEvidence(item, pages); item.task.coverage.reachedEnd = false;
+  report = library.integrity({batch, lessons: [item], pages}); assert.equal(report.complete, false); assert.equal(report.knowledgeComplete, true);
+  const empty = integrityLesson('empty');
+  report = library.integrity({batch: {jobs: [{id: 'missing'}]}, lessons: [item, empty], pages});
+  assert.equal(report.knowledgeComplete, false); assert.equal(report.lessons[1].knowledgeReview, 'unreviewed'); assert.equal(report.lessons[2].knowledgeReview, 'unreviewed');
+  assert.equal(library.integrity({}).knowledgeComplete, false);
+  const publicJSON = JSON.stringify(library.integrity({lessons: [item], pages}));
+  for (const value of ['knowledgeReviewEvidence', 'secret', 'https:', 'sourceDuration', 'pageIds\":\"']) assert.equal(publicJSON.includes(value), false);
 });
 
 // Writes are staged until commit, as in IDB; holding a resolved promise would not model precommit Stop.

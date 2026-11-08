@@ -196,7 +196,7 @@ async function scanEvidence() {
       probe: structuredClone(longProbe), status: $('status').textContent, canResume: canResume()};
   });
 }
-function zipEntries(bytes) {
+function zipEntries(bytes, {utf8 = true} = {}) {
   const end = bytes.length - 22;
   assert.equal(bytes.readUInt32LE(end), 0x06054b50, 'ZIP end directory');
   const count = bytes.readUInt16LE(end + 10), entries = [];
@@ -205,7 +205,7 @@ function zipEntries(bytes) {
   for (let i = 0; i < count; i++) {
     assert.equal(bytes.readUInt32LE(central), 0x02014b50);
     assert.equal(bytes.readUInt16LE(central + 10), 0, 'PDF entries are stored intact');
-    assert(bytes.readUInt16LE(central + 8) & 0x800, 'Chinese ZIP names use UTF-8');
+    if (utf8) assert(bytes.readUInt16LE(central + 8) & 0x800, 'Chinese ZIP names use UTF-8');
     const size = bytes.readUInt32LE(central + 20), nameLength = bytes.readUInt16LE(central + 28);
     const local = bytes.readUInt32LE(central + 42), name = bytes.toString('utf8', central + 46, central + 46 + nameLength);
     assert.equal(bytes.readUInt32LE(local), 0x04034b50);
@@ -272,6 +272,187 @@ function zipEntries(bytes) {
     page.on('pageerror', error => errors.push(error.message));
     await open();
 
+
+    await test('learning metadata transaction rollback, original bytes, visible selection and review persistence', async () => {
+      const specs = [1, 2, 3].map((id, index) => ({id, lessonId: 'learning', image: index, sourceKey: fileKey, sourceName: path.basename(fixture), sourceTime: index + .25}));
+      await seed({lessons: [lesson('learning', {source: {...lesson('learning').source, duration: 3}})], pages: specs});
+      assert.equal(await page.locator('#learning-view').count(), 1, 'new reversible gallery controls exist');
+      const original = await page.evaluate(async () => {
+        const values = await PPTPageStore.assets(db, pages.map(p => p.id));
+        return Promise.all(values.map(async a => ({id: a.id, image: [...new Uint8Array(await a.image.arrayBuffer())], sig: [...a.sig]})));
+      });
+      const rollback = await page.evaluate(async () => {
+        const before = structuredClone(pages); let missing = false, failed = false;
+        try { await PPTPageStore.learning(db, [{id: 1, excluded: true}, {id: 999, excluded: true}]); } catch { missing = true; }
+        const tx1 = db.transaction('pages'), read1 = tx1.objectStore('pages').getAll(); await new Promise(r => tx1.oncomplete = r);
+        const put = IDBObjectStore.prototype.put;
+        IDBObjectStore.prototype.put = function(value, ...args) { if (this.name === 'pages' && value.id === 2) throw Error('injected learning put failure'); return put.call(this, value, ...args); };
+        try { await PPTPageStore.learning(db, [{id: 1, excluded: true}, {id: 2, excluded: true}]); } catch { failed = true; } finally { IDBObjectStore.prototype.put = put; }
+        const tx2 = db.transaction('pages'), read2 = tx2.objectStore('pages').getAll(); await new Promise(r => tx2.oncomplete = r);
+        let invalid = false;
+        try { await PPTPageStore.learning(db, [{id: 1, excluded: true}, {id: {invalid: true}, excluded: true}]); } catch { invalid = true; }
+        const tx3 = db.transaction('pages'), read3 = tx3.objectStore('pages').getAll(); await new Promise(r => tx3.oncomplete = r);
+        return {before, afterMissing: read1.result, afterWrite: read2.result, afterInvalid: read3.result, missing, failed, invalid};
+      });
+      assert.equal(rollback.missing, true); assert.equal(rollback.failed, true);
+      assert.deepEqual(rollback.afterMissing, rollback.before); assert.deepEqual(rollback.afterWrite, rollback.before); assert.equal(rollback.invalid, true); assert.deepEqual(rollback.afterInvalid, rollback.before, 'invalid ID cannot leave an earlier page flag committed');
+      await page.locator('#select-all').check(); await page.locator('#learning-exclude').click(); await idle();
+      assert.equal((await stored()).pages.every(p => p.learningExcluded), true);
+      await page.locator('#learning-view').selectOption('kept'); await count(0); assert.equal(await page.evaluate(() => selectedPages.size), 0);
+      await page.locator('#learning-view').selectOption('excluded'); await count(3); await page.locator('#select-all').check();
+      await page.locator('#learning-restore').click(); await idle(); await count(0);
+      await page.locator('#undo').click(); await idle(); await count(3);
+      await page.reload(); await idle(); assert.equal((await stored()).pages.every(p => p.learningExcluded), true);
+      await page.locator('#learning-view').selectOption('all'); await page.locator('#knowledge-review').selectOption('no-content'); await settled();
+      assert.equal(await page.evaluate(() => PPTLibrary.knowledgeState(activeLesson, pages)), 'no-content');
+      await page.reload(); await idle(); assert.equal(await page.locator('#knowledge-review').inputValue(), 'no-content');
+      await page.evaluate(async () => { await bindLesson({...activeLesson.source, duration: 6}); });
+      assert.equal(await page.locator('#knowledge-review').inputValue(), 'unreviewed');
+      await page.locator('#knowledge-review').selectOption('has-content'); await settled();
+      await page.evaluate(async () => {
+        const metadata = {...pages[0], id: 4, order: 4096, sourceTime: 4}; delete metadata.assetBytes;
+        await PPTPageStore.add(db, metadata, await PPTPageStore.asset(db, 1));
+        const put = PPTLibrary.put; PPTLibrary.put = async () => { throw Error('new page lesson write failure'); };
+        try { await persistLesson(); } catch {} finally { PPTLibrary.put = put; }
+      });
+      await page.reload(); await idle(); assert.equal(await page.locator('#knowledge-review').inputValue(), 'unreviewed', 'new ID invalidates review despite lesson save failure');
+      const retained = await page.evaluate(async () => {
+        const values = await PPTPageStore.assets(db, [1, 2, 3]);
+        return Promise.all(values.map(async a => ({id: a.id, image: [...new Uint8Array(await a.image.arrayBuffer())], sig: [...a.sig]})));
+      });
+      assert.deepEqual(retained, original, 'all original JPEG and signature bytes survive exclude/restore/undo/reload/review');
+      const transition = await page.evaluate(async () => {
+        await deletePages([4]); selectedPages = new Set([1]); selectionAnchor = 1; updateSelection(); controls();
+        const before = structuredClone({pages, undoState, selected: [...selectedPages], selectionAnchor}), put = IDBObjectStore.prototype.put;
+        IDBObjectStore.prototype.put = function(value, ...args) { if (this.name === 'pages' && value.id === 1) throw Error('learning transition failure'); return put.call(this, value, ...args); };
+        try { await setLearningExcluded([1], false); } finally { IDBObjectStore.prototype.put = put; }
+        const tx = db.transaction('assets'), asset = tx.objectStore('assets').get(4); await new Promise(r => tx.oncomplete = r);
+        return {before, after: structuredClone({pages, undoState, selected: [...selectedPages], selectionAnchor}), lease: !!asset.result};
+      });
+      assert.deepEqual(transition.after, transition.before); assert.equal(transition.lease, true, 'failed switch to flag undo retains old permanent-delete asset lease');
+      await page.locator('#undo').click(); await count(4);
+      await page.evaluate(async () => {
+        const put = PPTLibrary.put; PPTLibrary.put = async () => { throw Error('review settings failure'); };
+        try { $('knowledge-review').value = 'no-content'; await $('knowledge-review').onchange(); } finally { PPTLibrary.put = put; }
+      });
+      assert.equal(await page.locator('#knowledge-review').inputValue(), 'unreviewed', 'failed explicit review cannot publish evidence');
+    });
+
+    await test('learning export consumers share frozen filtered JPEGs, TOC, mappings and whole-lesson no-content evidence', async () => {
+      const base = origin + '/study-capture-courses/42/preview-detail/learning', a = lesson('learn-a', {page: base}), b = lesson('learn-b', {page: base, course: {...course, date: '2026-11-05'}});
+      a.source = {...a.source, batchJobId: 'learn-job', page: base, duration: 3}; b.source = {...b.source, batchJobId: 'skip-job', page: base, duration: 3};
+      await seed({lessons: [a, b], batches: [{page: base, jobs: [{id: 'learn-job', course, discovery: {state: 'ready'}}, {id: 'skip-job', course: b.course, discovery: {state: 'ready'}}]}], pages: [
+        {id: 11, lessonId: a.id, image: 0, order: 1024, sourceTime: .25, learningExcluded: true},
+        {id: 12, lessonId: a.id, image: 1, order: 2048, sourceTime: 1.25}, {id: 13, lessonId: a.id, image: 2, order: 3072, sourceTime: 2.25},
+        {id: 21, lessonId: b.id, image: 0, sourceTime: .5},
+      ]});
+      assert.equal(await page.locator('#export-view').inputValue(), 'raw');
+      await page.evaluate(async () => {
+        for (const lesson of lessons) { lesson.knowledgeReview = lesson.id === 'learn-b' ? 'no-content' : 'has-content'; lesson.knowledgeReviewEvidence = PPTLibrary.knowledgeEvidence(lesson, allPages.filter(p => p.lessonId === lesson.id)); await persistLesson(lesson); }
+        controls();
+      });
+      await page.locator('#export-view').selectOption('learning'); await page.evaluate(() => exportViewSave);
+      const pdfImages = async (bytes, expected) => {
+        const pdf = await PDFDocument.load(bytes); assert.equal(pdf.getPageCount(), expected.length);
+        for (const [index, image] of expected.entries()) {
+          const embedded = pdf.getPage(index).node.Resources().lookup(PDFName.of('XObject')).lookup(PDFName.of('Im0'));
+          assert.deepEqual(Buffer.from(embedded.contents), Buffer.from(images[image].split(',')[1], 'base64'), 'actual PDF JPEG bytes identify retained page and order');
+        }
+        return pdf;
+      };
+      let downloadIndex = 0;
+      const take = async action => {
+        const [download] = await Promise.all([page.waitForEvent('download'), action()]);
+        const target = path.join(output, `learning-export-${++downloadIndex}-${download.suggestedFilename()}`); await download.saveAs(target); await idle();
+        return {bytes: fs.readFileSync(target), filename: download.suggestedFilename()};
+      };
+      for (const [button, expected, zip] of [['#pdf', [1, 2], false], ['#export-zip', [1, 2], true], ['#selected-pdf', [2], false], ['#selected-zip', [2], true]]) {
+        await page.evaluate(() => { selectedPages = new Set([11, 13]); updateSelection(); controls(); });
+        const result = await take(() => page.locator(button).click());
+        if (!zip) await pdfImages(result.bytes, expected);
+        else { const entries = zipEntries(result.bytes, {utf8: false}); assert.equal(entries.length, expected.length); for (const [index, image] of expected.entries()) assert.deepEqual(entries[index].bytes, Buffer.from(images[image].split(',')[1], 'base64')); }
+      }
+      await page.locator('#learning-view').selectOption('excluded'); assert.deepEqual(await ids(), [11]);
+      await page.locator('#batch-panel').evaluate(panel => { panel.open = true; });
+      const readReceipt = () => page.evaluate(async () => { const tx = db.transaction('settings'), read = tx.objectStore('settings').get('courseExport:' + currentCourseKey()); await new Promise(r => tx.oncomplete = r); return read.result.lastExport; });
+      for (const button of ['#course-pdf', '#batch-course-pdf', '#course-zip', '#batch-course-zip', '[data-job-id="learn-job"] button:not(.batch-view)']) {
+        const result = await take(() => page.locator(button).click());
+        if (button.includes('zip')) { const entries = zipEntries(result.bytes); assert.equal(entries.length, 1); assert.match(entries[0].name, /001-模式识别-2026-11-04/); await pdfImages(entries[0].bytes, [1, 2]); }
+        else {
+          const pdf = await pdfImages(result.bytes, [1, 2]);
+          if (button.includes('course')) { const outlines = pdf.catalog.lookup(PDFName.of('Outlines')), root = pdf.context.lookup(outlines.get(PDFName.of('First'))), child = pdf.context.lookup(root.get(PDFName.of('First'))); assert.equal(child.get(PDFName.of('Title')).decodeText(), '第 1 课 · 2026-11-04 08:00:00'); assert.equal(child.get(PDFName.of('Next')), undefined); }
+        }
+        if (button.includes('course')) {
+          const receipt = await readReceipt(); assert.equal(receipt.view, 'learning'); assert.equal(receipt.rawCount, 4); assert.equal(receipt.exportedCount, 2); assert.equal(receipt.excludedCount, 2); assert.equal(receipt.knowledgeComplete, true);
+          assert.deepEqual(receipt.export.lessons[0].pages, [{id: 12, sourceTime: 1.25, exportIndex: 1}, {id: 13, sourceTime: 2.25, exportIndex: 2}]); assert.equal(receipt.export.lessons.length, 1); assert.equal(receipt.lessons[1].savedPages, 1); assert.equal(receipt.lessons[1].exportedCount, 0); assert.equal(receipt.lessons[1].knowledgeReview, 'no-content');
+        }
+      }
+      const nativeReport = await take(() => page.locator('#course-report').click());
+      await page.evaluate(() => { window.__learningDownload = downloadBlob; downloadBlob = (blob, name, cache) => { window.__learningReport = {blob, name}; return __learningDownload(blob, name, cache); }; });
+      let batchReport;
+      try {
+        await page.locator('#batch-course-report').click(); await page.waitForFunction(() => window.__learningReport); await idle();
+        batchReport = await page.evaluate(async () => ({text: await __learningReport.blob.text(), name: __learningReport.name}));
+        fs.writeFileSync(path.join(output, 'learning-batch-report-actual-blob.json'), batchReport.text); assert.equal(batchReport.name, '课程完整性报告.json');
+      } finally { await page.evaluate(() => { downloadBlob = __learningDownload; delete window.__learningReport; delete window.__learningDownload; }); }
+      for (const report of [JSON.parse(nativeReport.bytes), JSON.parse(batchReport.text)]) { assert.deepEqual(report.pageIds, [12, 13]); assert.deepEqual(report.lastExport.pageIds, [12, 13]); for (const text of ['knowledgeReviewEvidence', 'pageIds":[11', 'sourceName', fileKey, 'signature=']) assert.equal(JSON.stringify(report).includes(text), false); }
+      // Explicit full-lesson no-content must block a selected raw subset too.
+      await choose(b.id); await page.locator('#learning-view').selectOption('all'); await page.locator('#select-all').check();
+      assert.equal(await page.locator('#selected-pdf').isDisabled(), true); assert.equal(await page.locator('#pdf').isDisabled(), true);
+      await page.locator('#export-view').selectOption('raw'); await page.evaluate(() => exportViewSave);
+      // Reopen the tool for the raw restoration download; the preceding burst's second same-name JSON delivery remains separately unproven.
+      await page.reload(); await idle(); await page.locator('#select-all').check();
+      assert.equal(await page.locator('#export-view').inputValue(), 'raw'); assert.equal(await page.locator('#knowledge-review').inputValue(), 'no-content');
+      await pdfImages((await take(() => page.locator('#selected-pdf').click())).bytes, [0]);
+      // Freeze before the asynchronous writer: changing view, lesson, naming and metadata cannot rewrite the output or receipt.
+      await choose(a.id); await page.locator('#export-view').selectOption('learning'); await page.evaluate(() => exportViewSave);
+      const key = await page.evaluate(() => currentCourseKey());
+      await page.evaluate(() => {
+        const writer = writeCoursePDF; window.restoreLearningWriter = () => { writeCoursePDF = writer; };
+        writeCoursePDF = async (entries, options) => {
+          exportView = 'raw'; $('export-view').value = 'raw'; $('course-name').value = 'later-name';
+          pages.forEach(page => { page.sourceTime = 99; page.order = -page.order; page.learningExcluded = false; });
+          activeLesson = lessons.find(lesson => lesson.id === 'learn-b');
+          return writer(entries, options);
+        };
+      });
+      try {
+        const result = await take(() => page.evaluate(() => exportCoursePDF())); assert.equal(result.filename, course.name + '-整课.pdf'); await pdfImages(result.bytes, [1, 2]);
+        const receipt = await page.evaluate(async key => { const tx = db.transaction('settings'), read = tx.objectStore('settings').get('courseExport:' + key); await new Promise(r => tx.oncomplete = r); return read.result.lastExport; }, key);
+        assert.equal(receipt.view, 'learning'); assert.deepEqual(receipt.pageIds, [12, 13]); assert.deepEqual(receipt.export.lessons[0].pages.map(p => p.sourceTime), [1.25, 2.25]);
+      } finally { await page.evaluate(() => restoreLearningWriter()); }
+    });
+
+    await test('learning controls visual, low-height Stop and keyboard inspection', async () => {
+      await seed({lessons: [lesson('learning-visual')], pages: [
+        {id: 501, lessonId: 'learning-visual', image: 0, sourceTime: .25}, {id: 502, lessonId: 'learning-visual', image: 1, sourceTime: 1.25, learningExcluded: true},
+      ]});
+      await page.waitForFunction(() => !thumbnailReads && !thumbnailQueue.size);
+      const observations = [];
+      for (const [height, filename] of [[900, 'learning-normal-1440x900.png'], [720, 'learning-low-1440x720.png']]) {
+        await page.setViewportSize({width: 1440, height}); await page.locator('#batch-panel').evaluate(panel => { panel.open = true; });
+        await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+        await page.waitForFunction(() => !thumbnailReads && !thumbnailQueue.size);
+        await page.screenshot({path: path.join(output, filename)});
+        const geometry = await page.evaluate(() => {
+          const ids = ['learning-view', 'knowledge-review', 'learning-suggest', 'learning-exclude', 'learning-restore', 'export-view', 'stop'];
+          return ids.map(id => { const element = $(id), r = element.getBoundingClientRect(); return {id, text: element.textContent, disabled: element.disabled, top: r.top, bottom: r.bottom, left: r.left, right: r.right, reachable: r.top >= 0 && r.bottom <= innerHeight && r.left >= 0 && r.right <= innerWidth}; });
+        });
+        assert(geometry.every(control => control.reachable), JSON.stringify(geometry)); observations.push({height, geometry});
+      }
+      await page.locator('#learning-view').focus(); await page.keyboard.press('ArrowDown'); await page.keyboard.press('Enter');
+      await page.locator('#learning-view').selectOption('kept'); assert.deepEqual(await ids(), [501]);
+      await page.locator('#select-all').focus(); await page.keyboard.press('Space'); assert.equal(await page.evaluate(() => selectedPages.size), 1);
+      await page.locator('#learning-exclude').focus(); await page.keyboard.press('Enter'); await idle(); await count(0);
+      await page.keyboard.press('ControlOrMeta+z'); await count(1);
+      await page.locator('#learning-suggest').focus(); await page.keyboard.press('Enter'); await page.waitForFunction(() => !$('learning-status').textContent.includes('正在检查'));
+      await page.screenshot({path: path.join(output, 'learning-suggestions-low-1440x720.png')});
+      await page.keyboard.press('Escape'); assert.equal(await page.locator('#learning-dialog').isVisible(), false);
+      await page.setViewportSize({width: 1440, height: 900}); await page.locator('#learning-view').selectOption('all');
+      await page.locator('#knowledge-review').selectOption('no-content'); await settled(); await page.locator('#export-view').selectOption('learning'); await page.evaluate(() => exportViewSave);
+      assert.equal(await page.locator('#pdf').isDisabled(), true); await page.screenshot({path: path.join(output, 'learning-empty-disabled-1440x900.png')});
+      fs.writeFileSync(path.join(output, 'learning-visual.json'), JSON.stringify({observations, keyboard: ['view select', 'visible select-all Space', 'exclude Enter', 'undo ControlOrMeta+z', 'suggestions Enter', 'cancel Escape'], emptyLearningPDFDisabled: true}, null, 2));
+    });
 
     await test('media native fixed AAC configuration differential and conservative controls', async () => {
       const media = {}, log = [];
@@ -897,7 +1078,7 @@ function zipEntries(bytes) {
       assert.deepEqual(restored.crop, edited.crop); assert.deepEqual(restored.settings, edited.settings);
       assert.equal(await page.locator('#course-name').inputValue(), '甲课次手工名称');
       assert.equal(await page.evaluate(() => sourceReady), false);
-      await page.locator('#pages article button').first().click(); await count(1); assert.deepEqual(await ids(), [41]);
+      await page.locator('#pages article').getByRole('button', {name: '删除', exact: true}).first().click(); await count(1); assert.deepEqual(await ids(), [41]);
       page.once('dialog', dialog => dialog.accept()); await page.locator('#clear').click(); await count(0);
       const cleared = await stored(); assert.deepEqual(cleared.pages.filter(page => page.lessonId === secondId), other);
       assert(!cleared.assets.some(asset => [41, 7].includes(asset.id)), 'clear removes only this lesson and its undo assets');

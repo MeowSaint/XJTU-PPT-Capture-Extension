@@ -8,7 +8,7 @@ const {PDFDocument, PDFName} = dependency('pdf-lib');
 const root = path.resolve(__dirname, '..');
 let browser, server, page, passed = 0;
 const blocked = [];
-async function test(name, run) { await run(); passed++; console.log('PASS ' + name); }
+async function test(name, run) { if (process.env.PPT_TEST_FILTER && !new RegExp(process.env.PPT_TEST_FILTER).test(name)) return; await run(); passed++; console.log('PASS ' + name); }
 (async () => {
   try {
     server = http.createServer((req, res) => {
@@ -23,6 +23,53 @@ async function test(name, run) { await run(); passed++; console.log('PASS ' + na
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
     const origin = `http://127.0.0.1:${server.address().port}`;
     browser = await chromium.launch(browserOptions());
+    await test('learning neutral suggestions preserve local details and require separate confirmation', async () => {
+      const local = await browser.newContext({viewport: {width: 1440, height: 900}, reducedMotion: 'reduce'}), p = await local.newPage();
+      await local.route('**/*', route => route.request().url().startsWith(origin + '/') ? route.continue() : route.abort());
+      try {
+        await p.goto(origin + '/capture.html'); await p.waitForFunction(() => ready); await p.locator('#terms-agree').check(); await p.locator('#terms-accept').click();
+        const result = await p.evaluate(async () => {
+          activeLesson = {id: 'suggestions', source: {sourceKey: 'synthetic', sourceName: 'synthetic'}, course: {}, crop: {x: 0, y: 0, w: 1, h: 1}, suspects: []}; lessons = [activeLesson]; pages = []; allPages = [];
+          const canvas = document.createElement('canvas'); canvas.width = 192; canvas.height = 108;
+          const ctx = canvas.getContext('2d'); ctx.fillStyle = '#808080'; ctx.fillRect(0, 0, 192, 108); const asset = await PPTPageStore.encode(canvas);
+          const plain = ctx.getImageData(0, 0, 192, 108).data, detail = plain.slice(); detail[40] += 64;
+          for (let i = 0; i < 41; i++) { const page = {lessonId: activeLesson.id, order: i * 1024, w: 192, h: 108, sourceKey: 'synthetic', sourceName: 'synthetic', sourceTime: i < 8 ? i : 100 + i * 30, signatureCrop: {...activeLesson.crop}, learningExcluded: false}; page.id = await PPTPageStore.add(db, page, {...asset, sig: i === 2 ? detail : plain}); pages.push(page); }
+          syncAllPages(); render(); controls(); await persistLesson();
+          const reads = [], releases = [], get = PPTPageStore.assets;
+          PPTPageStore.assets = async (db, ids) => { reads.push(ids.length); const values = await get(db, ids); return new Proxy(values, {set(target, key, value) { if (value === null) releases.push(target[key]?.id); return Reflect.set(target, key, value); }}); };
+          try { await $('learning-suggest').onclick(); } finally { PPTPageStore.assets = get; }
+          const rows = [...$('learning-suggestions').children].map(row => ({type: row.dataset.type, ids: [...row.querySelectorAll('input')].map(input => Number(input.value)), text: row.textContent}));
+          const cut = plain.slice(), pixels = cut.length / 4;
+          for (let i = 0; i < Math.floor(pixels * .05); i++) cut.fill(200, i * 4, i * 4 + 3);
+          const at95 = lowChangeSignature(cut), mask = new Uint8Array(pixels); mask.fill(1, 0, Math.ceil(pixels * .05));
+          cut.fill(200, Math.floor(pixels * .05) * 4, Math.floor(pixels * .05) * 4 + 3);
+          return {rows, ids: pages.map(p => p.id), reads, releases, at95, below95: lowChangeSignature(cut), ignored: lowChangeSignature(cut, mask), flags: pages.map(p => p.learningExcluded), review: activeLesson.knowledgeReview || null};
+        });
+        assert(result.reads.every(n => n <= 32)); assert.equal(result.releases.length, 41); assert.equal(result.at95, true); assert.equal(result.below95, false); assert.equal(result.ignored, true);
+        assert.deepEqual([...new Set(result.rows.map(row => row.type))].sort(), ['adjacent', 'dense', 'low-change']);
+        assert(result.rows.some(row => row.type === 'adjacent' && row.ids.join() === result.ids.slice(0, 2).join()));
+        assert(!result.rows.some(row => row.type === 'adjacent' && row.ids.includes(result.ids[2])), 'single local addition remains a distinct page');
+        assert.deepEqual(result.rows.filter(row => row.type === 'dense').map(row => row.ids[0]), result.ids.slice(0, 8));
+        assert(result.flags.every(flag => flag === false)); assert.equal(result.review, null);
+        assert(!result.rows.some(row => /桌面|公式无效|无知识/.test(row.text)));
+        await p.getByRole('button', {name: '对照两页', exact: true}).first().click(); await p.waitForFunction(() => !$('similar-pair').hidden); await p.locator('#similar-cancel').click();
+        await p.locator('#learning-suggestions input:not(:disabled)').first().check(); await p.locator('#learning-cancel').click();
+        await p.locator('#learning-suggest').click(); await p.waitForFunction(() => $('learning-status').textContent.includes('条线索'));
+        assert.equal(await p.locator('#learning-suggestions input:checked').count(), 0); assert.equal(await p.locator('#learning-confirm').isDisabled(), true);
+        assert.equal(await p.evaluate(() => pages.some(page => page.learningExcluded)), false);
+        await p.locator('#learning-suggestions input:not(:disabled)').first().check(); await p.locator('#learning-confirm').click(); await p.waitForFunction(() => !busy());
+        assert.deepEqual(await p.evaluate(() => pages.filter(page => page.learningExcluded).map(page => page.id)), [result.ids[0]]);
+        await p.locator('#undo').click(); await p.waitForFunction(() => !busy()); assert.equal(await p.evaluate(() => pages.some(page => page.learningExcluded)), false);
+        await p.evaluate(async () => { await setLearningExcluded([pages[0].id], true); $('learning-view').value = 'kept'; $('learning-view').onchange(); });
+        await p.locator('#learning-suggest').click(); await p.waitForFunction(() => $('learning-status').textContent.includes('条线索'));
+        await p.locator(`.learning-suggestion[data-type="low-change"]:has(input[value="${result.ids[0]}"]) button`).click();
+        assert.equal(await p.locator('#lightbox').isVisible(), true, 'suggestions can preview an original page hidden by the gallery view');
+        await p.waitForFunction(() => $('lightbox-img').complete && $('lightbox-img').naturalWidth > 0);
+        await p.locator('#lightbox-close').click(); await p.locator('#learning-cancel').click(); await p.locator('#undo').click(); await p.waitForFunction(() => !busy());
+        fs.mkdirSync(process.env.PPT_TEST_OUTPUT || path.join(root, '.test-output', 'learning-task-2'), {recursive: true});
+        fs.writeFileSync(path.join(process.env.PPT_TEST_OUTPUT || path.join(root, '.test-output', 'learning-task-2'), 'suggestions.json'), JSON.stringify(result, null, 2));
+      } finally { await local.close(); }
+    });
     await test('local detail Canvas/scanner/save pipeline and comparison provenance', async () => {
       const local = await browser.newContext({viewport: {width: 1440, height: 1000}});
       const errors = []; const localPage = await local.newPage(); localPage.on('pageerror', error => errors.push(error.message));
@@ -117,7 +164,7 @@ async function test(name, run) { await run(); passed++; console.log('PASS ' + na
             return {saved, scan, distances, knowledgeVersion, detailCandidate, controls, manualIds, duplicateCandidate, manualAfter, resumes};
           } finally { closeSimilar(); releaseDedupeContext(); CanvasRenderingContext2D.prototype.drawImage = drawImage; sourceReady = false; }
         });
-        const evidenceRoot = path.join(root, '.test-output', 'learning-task-1'); fs.mkdirSync(evidenceRoot, {recursive: true});
+        const evidenceRoot = process.env.PPT_TEST_OUTPUT || path.join(root, '.test-output', 'learning-task-1'); fs.mkdirSync(evidenceRoot, {recursive: true});
         const output = fs.mkdtempSync(path.join(evidenceRoot, 'canvas-'));
         result.saved.forEach((p, i) => {
           fs.writeFileSync(path.join(output, `knowledge-${i}-${p.id}.jpg`), Buffer.from(p.image));
@@ -427,7 +474,7 @@ async function test(name, run) { await run(); passed++; console.log('PASS ' + na
     const errors = []; page.on('pageerror', error => errors.push(error.message));
     await page.goto(origin + '/capture.html'); await page.waitForFunction(() => ready);
     await page.locator('#terms-agree').check(); await page.locator('#terms-accept').click();
-    const scratch = path.join(root, '.test-output', 'v3.1.2'); fs.mkdirSync(scratch, {recursive: true});
+    const scratch = process.env.PPT_TEST_OUTPUT || path.join(root, '.test-output', 'v3.1.2'); fs.mkdirSync(scratch, {recursive: true});
     const output = fs.mkdtempSync(path.join(scratch, 'task4-')); console.log('Task4 artifacts: ' + output);
     const idle = () => page.waitForFunction(() => ready && !busy());
     const download = async (selector, label) => {
@@ -520,7 +567,8 @@ async function test(name, run) { await run(); passed++; console.log('PASS ' + na
       assert.match(await page.locator('#current-lesson').textContent(), /当前整理.*Synthetic A/);
       assert.match(await page.locator('#current-course-context').textContent(), /当前课次所属课程.*Synthetic A/);
       assert.match(await page.locator('#batch-course-context').textContent(), /批量列表课程.*Synthetic B/);
-      assert.match(await page.locator('#export-scope').textContent(), /本节全部.*3 页/);
+      assert.equal(await page.locator('#export-view').inputValue(), 'raw');
+      assert.equal(await page.locator('#export-scope').textContent(), '原始全部 · 3 / 3 页');
       const all = await download('#pdf', 'default-all'); assert(!all.name.includes('-selected'));
       await inspectPDF(all.bytes, [images[2], images[0], images[1]]);
       await page.locator('#tab-export').click();
@@ -795,6 +843,21 @@ async function test(name, run) { await run(); passed++; console.log('PASS ' + na
         const request = db.transaction('settings').objectStore('settings').get('lesson:A');
         return new Promise(resolve => request.onsuccess = () => resolve(request.result.course));
       }), {});
+    });
+    await test('main course requests reject an owner change during pending saves before creating a writer', async () => {
+      const result = await page.evaluate(async () => {
+        await namingSave; await lessonSave;
+        const owner = activeLesson, originalSave = namingSave, create = PPTDiskCache.create; let calls = 0, release;
+        namingSave = new Promise(resolve => release = resolve);
+        PPTDiskCache.create = async () => { calls++; throw Error('synthetic writer must not start after owner change'); };
+        try {
+          const request = exportCoursePDF(PPTLibrary.courseKey(owner.page, owner.course), 'batch-status', owner.page);
+          activeLesson = lessons.find(lesson => lesson.id !== owner.id); release(); await request;
+          return {calls, message: $('batch-status').textContent, exporting: exportBusy};
+        } finally { activeLesson = owner; namingSave = originalSave; PPTDiskCache.create = create; controls(); }
+      });
+      assert.equal(result.calls, 0, 'pending save cannot redirect a course request to another active lesson');
+      assert.match(result.message, /当前课次已变化/); assert.equal(result.exporting, false);
     });
     assert.deepEqual(errors, []); await exportContext.close();
     assert.deepEqual(blocked, []); console.log(`${passed} focused improvement groups passed; no external requests.`);

@@ -237,6 +237,7 @@
           </div>
           <div class="result-export">
             <div class="export-row">
+              <label class="export-view">导出范围 <select id="export-view"><option value="raw">原始保留页</option><option value="learning">学习版</option></select></label>
               <span id="export-scope" class="scope-label">本节全部 · 0 页</span>
               <div class="export-actions" role="group" aria-label="导出本节全部保留页面">
                 <button id="pdf" type="button" disabled>本节 PDF</button>
@@ -258,7 +259,14 @@
               </div>
             </div>
           </div>
+          <div class="learning-tools" role="group" aria-label="学习整理">
+            <label>显示 <select id="learning-view"><option value="all">全部页</option><option value="kept">保留页</option><option value="excluded">已排除页</option></select></label>
+            <label>本节内容复核 <select id="knowledge-review" disabled><option value="unreviewed">尚未核验</option><option value="has-content">有独立知识内容</option><option value="no-content">无独立知识内容（学习版跳过本节）</option></select></label>
+            <button id="learning-suggest" type="button" disabled>查看整理建议</button>
+          </div>
           <div class="review-tools" role="group" aria-label="页面筛选">
+            <button id="learning-exclude" type="button" disabled>排除所选</button>
+            <button id="learning-restore" type="button" disabled>恢复所选</button>
             <label class="select-all"><input id="select-all" type="checkbox" disabled><span>全选</span></label>
             <span id="selected-count" aria-live="polite">已选 0 页</span>
             <button id="clear-selection" class="button-quiet" type="button" disabled>取消选择</button>
@@ -312,6 +320,13 @@
       <span class="note">← → 翻页 · Delete 删除 · Esc 关闭</span>
     </div>
     <p id="lightbox-status" class="note" role="status" aria-live="polite"></p>
+  </dialog>
+  <dialog id="learning-dialog" class="workspace-dialog" aria-labelledby="learning-title" aria-describedby="learning-status">
+    <h2 id="learning-title">整理建议</h2>
+    <p class="note">按画面差异和保存时间提供线索，请逐页查看。建议不判断知识内容，也不会自动排除页面。</p>
+    <p id="learning-status" role="status" aria-live="polite"></p>
+    <div id="learning-suggestions"></div>
+    <div class="dialog-actions"><button id="learning-cancel" type="button" autofocus>取消</button><button id="learning-confirm" type="button" disabled>确认排除勾选页</button></div>
   </dialog>
   <dialog id="similar-dialog" class="workspace-dialog" aria-labelledby="similar-title" aria-describedby="similar-status">
     <h2 id="similar-title">比较相邻的相似页</h2>

@@ -7,7 +7,15 @@ let realtimeTimer = null, realtimeBusy = false, candidate = null, candidateSince
 let ignoreRect = null, selectionMode = null, selectionRect = null, dedupeContext = null;
 let draggedPageId = null, reviewBusy = false, exportBusy = false, pageWrites = 0, undoState = null;
 let selectedPages = new Set(), selectionAnchor = null, previewPageId = null, previewReturn = null, loadedIdentity = null;
-let similarReview = null;
+let similarReview = null, learningSuggestion = null;
+let exportView = 'raw', exportViewSave = Promise.resolve();
+function visiblePages() {
+  const view = $('learning-view').value;
+  return pages.filter(page => view === 'all' || (page.learningExcluded === true) === (view === 'excluded'));
+}
+function learningRange(list, lesson = activeLesson, reviewPages = pages, view = exportView) {
+  return PPTLibrary.learningPages(list, {view, knowledgeReview: PPTLibrary.knowledgeState(lesson, reviewPages)});
+}
 let batchJobs = [], batchPage = '', batchRunning = false, batchStopRequested = false, activeBatchJob = null, batchDiscoverySerial = 0;
 let batchDiscovery = null;
 const referrerRule = 16220;
@@ -22,14 +30,15 @@ let mediaRecovery = {omitAudio: true}, mediaRecoverySave = Promise.resolve(), me
 const manualStorageGuard = {committed: 0, checked: false};
 const dbReady = PPTPageStore.open({blocked: () => status('请先关掉其他已打开的截取工具页，再刷新本页。')}).then(async database => {
   db = database;
-  const {pdf, limits, recovery} = await new Promise((resolve, reject) => {
+  const {pdf, limits, recovery, view} = await new Promise((resolve, reject) => {
     const tx = db.transaction('settings'), settings = tx.objectStore('settings');
-    const pdf = settings.get('exportPDF'), limits = settings.get('captureLimits'), recovery = settings.get('mediaRecovery');
-    tx.oncomplete = () => resolve({pdf: pdf.result, limits: limits.result, recovery: recovery.result}); tx.onerror = tx.onabort = () => reject(tx.error || Error('提取设置读取失败'));
+    const pdf = settings.get('exportPDF'), limits = settings.get('captureLimits'), recovery = settings.get('mediaRecovery'), view = settings.get('exportView');
+    tx.oncomplete = () => resolve({pdf: pdf.result, limits: limits.result, recovery: recovery.result, view: view.result}); tx.onerror = tx.onabort = () => reject(tx.error || Error('提取设置读取失败'));
   });
   captureLimits = {maxPages: PPTLibrary.pageLimit(limits?.maxPages)}; $('page-limit').value = captureLimits.maxPages;
   mediaRecovery = {omitAudio: recovery?.omitAudio !== false}; $('video-only').checked = mediaRecovery.omitAudio;
   applyPDFOptions(pdf); savedPDFOptions = pdfOptions();
+  exportView = view === 'learning' ? 'learning' : 'raw'; $('export-view').value = exportView;
   await PPTPageStore.prune(db);
   const saved = await PPTLibrary.restore(db);
   allPages = saved.pages; lessons = saved.lessons; savedBatches = saved.batches;
@@ -243,7 +252,7 @@ $('library-delete').onclick = async () => {
   $('library-dialog').querySelectorAll('button').forEach(button => { button.disabled = true; });
   let committed = false;
   const request = libraryRemoval, activeRemoved = request.lessonIds.includes(activeLesson?.id);
-  const undoIds = undoState?.removed.filter(item => request.lessonIds.includes(item.page.lessonId)).map(item => item.page.id) || [];
+  const undoIds = undoState?.removed?.filter(item => request.lessonIds.includes(item.page.lessonId)).map(item => item.page.id) || [];
   try {
     await namingSave.catch(() => {}); await lessonSave.catch(() => {});
     const saved = await PPTLibrary.remove(db, {...request, undoIds}); committed = true;
@@ -297,7 +306,7 @@ function syncWorkspace() {
   $('preview-empty').hidden = sourceReady || !!stream;
   document.body.classList.toggle('has-pages', pages.length > 0);
   $('current-lesson').textContent = '当前整理 · ' + (activeLesson ? lessonLabel({course: namingInfo(), source: activeLesson.source}) : '尚未选择课次');
-  $('export-scope').textContent = `本节全部 · ${pages.length} 页`;
+  $('export-scope').textContent = `${exportView === 'learning' ? '学习版' : '原始全部'} · ${learningRange(pages).length} / ${pages.length} 页`;
   $('current-course-context').textContent = '当前课次所属课程 · ' + lessonLabel({course: activeLesson ? namingInfo() : sourceCoursePage === coursePage ? sourceCourse : namingInfo()});
   $('batch-course-context').textContent = '批量列表课程 · ' + (batchJobs[0]?.course?.name || (batchPage ? '未命名课程' : '尚未读取'));
   const selectedJobs = batchJobs.filter(job => PPTBatch.automatic(job) && job.selected && job.state !== 'done').length;
@@ -440,7 +449,7 @@ function busy() { return !studyAccepted || !!task || !!realtimeTimer || realtime
 function namingSnapshot() { return {course: namingInfo(), page: namingPage, manual: namingManual}; }
 function restoreNaming(snapshot) { namingManual = snapshot.manual; setNaming(snapshot.course, snapshot.page); }
 function forgetUndo() {
-  const removed = undoState?.removed.map(item => item.page.id) || []; undoState = null;
+  const removed = undoState?.removed?.map(item => item.page.id) || []; undoState = null;
   if (removed.length) PPTPageStore.discard(db, removed).catch(() => {}); // Startup also reclaims orphaned assets.
 }
 function invalidateUndo() { forgetUndo(); selectedPages.clear(); selectionAnchor = null; updateSelection(); }
@@ -449,8 +458,8 @@ async function reviewTransaction({remove = [], restore = [], naming, clear = fal
   const lesson = activeLesson && {...activeLesson, course: naming.course, namingManual: naming.manual, page: naming.page, ...(clear ? {task: null, suspects: []} : {})};
   await new Promise((resolve, reject) => {
     const tx = db.transaction(['pages', 'settings', 'assets'], 'readwrite'), store = tx.objectStore('pages'), assets = tx.objectStore('assets');
-    if (clear) { pages.forEach(page => { store.delete(page.id); assets.delete(page.id); }); undoState?.removed.forEach(item => assets.delete(item.page.id)); }
-    else if (remove.length) undoState?.removed.forEach(item => assets.delete(item.page.id));
+    if (clear) { pages.forEach(page => { store.delete(page.id); assets.delete(page.id); }); undoState?.removed?.forEach(item => assets.delete(item.page.id)); }
+    else if (remove.length) undoState?.removed?.forEach(item => assets.delete(item.page.id));
     remove.forEach(id => store.delete(id)); restore.forEach(page => store.put(page));
     tx.objectStore('settings').put(naming, 'exportNaming');
     if (lesson) tx.objectStore('settings').put(lesson, 'lesson:' + lesson.id);
@@ -479,7 +488,17 @@ async function deletePages(ids) {
 async function undoDelete() {
   if (busy() || !undoState) return;
   reviewBusy = true; controls();
-  const snapshot = undoState, restored = pages.slice();
+  const snapshot = undoState;
+  if (snapshot.flags) {
+    try {
+      await PPTPageStore.learning(db, snapshot.flags);
+      for (const item of snapshot.flags) { const page = pages.find(page => page.id === item.id); if (page) page.learningExcluded = item.excluded; }
+      syncAllPages(); undoState = null; render(); status('已撤销页面排除设置。');
+    } catch (error) { status('撤销失败：' + error.message); }
+    finally { reviewBusy = false; controls(); }
+    return;
+  }
+  const restored = pages.slice();
   snapshot.removed.forEach(item => restored.splice(item.index, 0, item.page));
   try {
     await reviewTransaction({restore: snapshot.removed.map(item => item.page), naming: snapshot.naming});
@@ -488,6 +507,50 @@ async function undoDelete() {
   } catch (e) { status('撤销失败：' + e.message); }
   finally { reviewBusy = false; controls(); }
 }
+async function setLearningExcluded(ids, excluded) {
+  if (busy() || !ready) return;
+  const wanted = new Set(ids), updates = pages.filter(page => wanted.has(page.id) && (page.learningExcluded === true) !== excluded).map(page => ({id: page.id, excluded}));
+  if (!updates.length) return;
+  reviewBusy = true; controls();
+  try {
+    const flags = await PPTPageStore.learning(db, updates);
+    forgetUndo(); undoState = {flags};
+    for (const item of updates) pages.find(page => page.id === item.id).learningExcluded = item.excluded;
+    syncAllPages(); render(); status(`已${excluded ? '排除' : '恢复'} ${updates.length} 页，可撤销；原始截图仍保留。`);
+  } catch (error) { status('页面排除设置保存失败：' + error.message); }
+  finally { reviewBusy = false; controls(); }
+}
+$('learning-exclude').onclick = () => setLearningExcluded([...selectedPages], true);
+$('learning-restore').onclick = () => setLearningExcluded([...selectedPages], false);
+$('learning-view').onchange = () => {
+  if (busy()) return;
+  selectedPages.clear(); selectionAnchor = null; render(); controls();
+};
+$('export-view').onchange = () => {
+  if (busy()) { $('export-view').value = exportView; return; }
+  const previous = exportView, next = $('export-view').value === 'learning' ? 'learning' : 'raw';
+  exportView = next; controls();
+  exportViewSave = exportViewSave.catch(() => {}).then(async () => {
+    await dbReady;
+    const tx = db.transaction('settings', 'readwrite'); tx.objectStore('settings').put(next, 'exportView');
+    await new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onerror = tx.onabort = () => reject(tx.error || Error('导出范围保存失败')); });
+  }).catch(error => { if (exportView === next) { exportView = previous; $('export-view').value = previous; controls(); } status(error.message); });
+};
+$('knowledge-review').onchange = async () => {
+  if (busy() || !activeLesson) return;
+  const state = $('knowledge-review').value;
+  reviewBusy = true; controls();
+  try {
+    await namingSave; await lessonSave;
+    const snapshot = {...activeLesson, knowledgeReview: state};
+    if (state === 'unreviewed') delete snapshot.knowledgeReviewEvidence;
+    else snapshot.knowledgeReviewEvidence = PPTLibrary.knowledgeEvidence(snapshot, pages);
+    await persistLesson(snapshot); Object.assign(activeLesson, snapshot);
+    if (state === 'unreviewed') delete activeLesson.knowledgeReviewEvidence;
+    status('本节内容复核已保存；新增页面或更换来源后需要重新复核。');
+  } catch (error) { status('内容复核保存失败：' + error.message); }
+  finally { reviewBusy = false; controls(); }
+};
 function sameTimeline(a, b) {
   return typeof a.sourceKey === 'string' && !!a.sourceKey.trim() && a.sourceKey === b.sourceKey && !!a.sourceName?.trim() && a.sourceName === b.sourceName && (a.coursePage || '') === (b.coursePage || '') && (a.batchJobId || '') === (b.batchJobId || '');
 }
@@ -539,7 +602,7 @@ function releaseSimilarImages(review) {
 function closeSimilar() {
   if (!similarReview) return;
   releaseSimilarImages(similarReview); similarReview = null;
-  $('similar-dialog').close(); reviewBusy = false; controls();
+  $('similar-dialog').close(); $('similar-cancel').textContent = '取消'; reviewBusy = !!learningSuggestion; controls();
 }
 async function nextSimilar(review) {
   releaseSimilarImages(review); review.pair = null;
@@ -606,14 +669,112 @@ $('similar-confirm').onclick = async () => {
   const remove = similarReview.remove; closeSimilar();
   if (remove.length) await deletePages(remove); else status('已保留全部页面。');
 };
+function lowChangeSignature(sig, mask) {
+  const means = [0, 0, 0]; let count = 0, close = 0;
+  for (let i = 0; i < sig.length; i += 4) if (!mask?.[i / 4]) { count++; for (let c = 0; c < 3; c++) means[c] += sig[i + c]; }
+  if (!count) return false;
+  for (let c = 0; c < 3; c++) means[c] /= count;
+  for (let i = 0; i < sig.length; i += 4) if (!mask?.[i / 4] && means.every((mean, c) => Math.abs(sig[i + c] - mean) <= 6)) close++;
+  return close / count >= .95;
+}
+async function findLearningSuggestions(review) {
+  const found = [], groups = new Map(); let previous = null;
+  for (const page of review.pages) if (Number.isFinite(page.sourceTime) && page.sourceTime >= 0 && page.sourceKey && page.sourceName) {
+    const key = JSON.stringify([page.sourceKey, page.sourceName, page.coursePage || '', page.batchJobId || '']);
+    if (!groups.has(key)) groups.set(key, []); groups.get(key).push(page);
+  }
+  const dense = new Set();
+  for (const group of groups.values()) {
+    group.sort((a, b) => a.sourceTime - b.sourceTime); let start = 0;
+    for (let end = 0; end < group.length; end++) {
+      while (group[end].sourceTime - group[start].sourceTime > 15) start++;
+      if (end - start + 1 >= 8) for (let i = start; i <= end; i++) dense.add(group[i].id);
+    }
+  }
+  for (let offset = 0; offset < review.pages.length; offset += 32) {
+    const batch = review.pages.slice(offset, offset + 32), records = await PPTPageStore.assets(db, batch.map(page => page.id));
+    if (learningSuggestion !== review) return [];
+    for (let i = 0; i < batch.length; i++) {
+      const page = batch[i], sig = records[i]?.sig; records[i] = null; // Release each JPEG before processing the next record.
+      const mask = comparisonMask(page.signatureCrop, page.signatureCrop, review.crop, review.mask);
+      if (validSignature({...page, sig})) {
+        if (previous && sameTimeline(previous.page, page) && previous.page.w === page.w && previous.page.h === page.h
+          && Number.isFinite(previous.page.sourceTime) && Number.isFinite(page.sourceTime) && previous.page.sourceTime < page.sourceTime
+          && PPTCore.similar(previous.sig, sig, review.threshold, comparisonMask(previous.page.signatureCrop, page.signatureCrop, review.crop, review.mask))) {
+          found.push({type: 'adjacent', ids: [previous.page.id, page.id], reason: '相邻近似页：请对照两张截图，核对是否有新增内容。'});
+        }
+        if (lowChangeSignature(sig, mask)) found.push({type: 'low-change', ids: [page.id], reason: '低变化画面：大部分像素接近画面均值，请查看内容。'});
+        previous = {page, sig};
+      } else previous = null;
+      if (dense.has(page.id)) found.push({type: 'dense', ids: [page.id], reason: '短时间多页：15 秒内至少保存 8 页，可能是动态操作或快速推导，请逐页核对。'});
+    }
+  }
+  return found;
+}
+function closeLearningSuggestions() {
+  learningSuggestion = null; $('learning-suggestions').replaceChildren(); $('learning-dialog').close(); reviewBusy = false; controls();
+}
+async function viewLearningPair(ids) {
+  const pair = ids.map(id => pages.find(page => page.id === id)), review = {urls: [], pair};
+  similarReview = review; $('similar-pair').hidden = true; $('similar-choices').hidden = true; $('similar-confirm').hidden = true;
+  $('similar-cancel').textContent = '返回整理建议'; $('similar-status').textContent = '正在读取截图…'; $('similar-dialog').showModal();
+  try {
+    const records = await PPTPageStore.assets(db, ids);
+    if (similarReview !== review) return;
+    for (const [index, side] of ['earlier', 'later'].entries()) {
+      const image = $('similar-' + side + '-img'), label = `第 ${pages.indexOf(pair[index]) + 1} 页 · ${timecode(pair[index].sourceTime)}`;
+      $('similar-' + side + '-meta').textContent = label; image.alt = label;
+      const url = URL.createObjectURL(records[index].image); review.urls.push(url); image.src = url;
+    }
+    await Promise.all(['earlier', 'later'].map(side => $('similar-' + side + '-img').decode()));
+    if (similarReview !== review) return;
+    $('similar-pair').hidden = false; $('similar-status').textContent = '请核对局部新增内容；返回后可分别勾选要排除的页。';
+  } catch (error) { if (similarReview === review) $('similar-status').textContent = '图片读取失败：' + error.message; }
+}
+$('learning-suggest').onclick = async () => {
+  if (busy() || !pages.length) return;
+  const review = {pages: pages.slice(), crop: {...crop}, mask: PPTCore.ignoreMask(ignoreRect), threshold: Math.max((Number($('diff').value) || 1.2) * 2.5, 3)};
+  learningSuggestion = review; reviewBusy = true; controls(); $('learning-suggestions').replaceChildren();
+  $('learning-confirm').disabled = true; $('learning-status').textContent = '正在检查已保存页面…'; $('learning-dialog').showModal();
+  try {
+    const found = await findLearningSuggestions(review);
+    if (learningSuggestion !== review) return;
+    $('learning-status').textContent = found.length ? `共 ${found.length} 条线索；勾选后还需确认排除。` : '没有发现符合这三种规则的候选，请按需自行复核。';
+    const fragment = document.createDocumentFragment();
+    for (const item of found) {
+      const row = document.createElement('div'); row.className = 'learning-suggestion'; row.dataset.type = item.type;
+      const reason = document.createElement('p'); reason.textContent = item.reason; row.append(reason);
+      for (const id of item.ids) {
+        const page = review.pages.find(page => page.id === id), label = document.createElement('label'), check = document.createElement('input');
+        check.type = 'checkbox'; check.value = id; check.disabled = page.learningExcluded === true;
+        label.append(check, `第 ${review.pages.indexOf(page) + 1} 页 · ${Number.isFinite(page.sourceTime) ? timecode(page.sourceTime) : '无视频时间'}${check.disabled ? '（已排除）' : ''}`); row.append(label);
+      }
+      const view = document.createElement('button'); view.type = 'button'; view.textContent = item.ids.length === 2 ? '对照两页' : '查看此页';
+      view.onclick = () => {
+        if (item.ids.length === 2) viewLearningPair(item.ids);
+        else { reviewBusy = false; openPreview(review.pages.find(page => page.id === item.ids[0])); reviewBusy = true; controls(); }
+      };
+      row.append(view); fragment.append(row);
+    }
+    $('learning-suggestions').append(fragment);
+  } catch (error) { if (learningSuggestion === review) $('learning-status').textContent = '整理建议读取失败：' + error.message; }
+};
+$('learning-suggestions').onchange = () => { $('learning-confirm').disabled = !$('learning-suggestions').querySelector('input:checked'); };
+$('learning-cancel').onclick = closeLearningSuggestions;
+$('learning-dialog').addEventListener('cancel', event => { event.preventDefault(); closeLearningSuggestions(); });
+$('learning-confirm').onclick = async () => {
+  const ids = [...new Set([...$('learning-suggestions').querySelectorAll('input:checked')].map(input => Number(input.value)))];
+  closeLearningSuggestions(); await setLearningExcluded(ids, true);
+};
 function updateSelection() {
-  selectedPages = new Set([...selectedPages].filter(id => pages.some(page => page.id === id)));
-  if (!pages.some(page => page.id === selectionAnchor)) selectionAnchor = null;
+  const visible = visiblePages(), visibleIds = new Set(visible.map(page => page.id));
+  selectedPages = new Set([...selectedPages].filter(id => visibleIds.has(id)));
+  if (!visibleIds.has(selectionAnchor)) selectionAnchor = null;
   $('lightbox-select').textContent = selectedPages.has(previewPageId) ? '取消选中 (S)' : '选中此页 (S)';
   $('lightbox-select').setAttribute('aria-pressed', String(selectedPages.has(previewPageId)));
   $('selected-count').textContent = `已选 ${selectedPages.size} 页`;
-  $('select-all').checked = pages.length > 0 && selectedPages.size === pages.length;
-  $('select-all').indeterminate = selectedPages.size > 0 && selectedPages.size < pages.length;
+  $('select-all').checked = visible.length > 0 && selectedPages.size === visible.length;
+  $('select-all').indeterminate = selectedPages.size > 0 && selectedPages.size < visible.length;
   const changed = [];
   document.querySelectorAll('#pages article').forEach(card => {
     const selected = selectedPages.has(Number(card.dataset.pageId));
@@ -642,9 +803,9 @@ async function seekPage(page) {
 }
 function updatePreview(direction = 0) {
   if (!$('lightbox').open) return;
-  const index = pages.findIndex(page => page.id === previewPageId), page = pages[index];
+  const visible = learningSuggestion?.pages || visiblePages(), index = visible.findIndex(page => page.id === previewPageId), page = visible[index];
   if (!page) { $('lightbox').close(); return; }
-  $('lightbox-meta').textContent = `第 ${index + 1} / ${pages.length} 页 · ${page.sourceName || '历史截图'}${Number.isFinite(page.sourceTime) ? ' · ' + timecode(page.sourceTime) : ''}`;
+  $('lightbox-meta').textContent = `第 ${index + 1} / ${visible.length} 页 · ${page.sourceName || '历史截图'}${Number.isFinite(page.sourceTime) ? ' · ' + timecode(page.sourceTime) : ''}`;
   $('lightbox-img').alt = `第 ${index + 1} 页放大预览`;
   if (previewLoadingId !== page.id) {
     previewLoadingId = page.id; const revision = ++previewRevision;
@@ -658,7 +819,7 @@ function updatePreview(direction = 0) {
       previewURL = URL.createObjectURL(record.image); $('lightbox-img').src = previewURL;
     }).catch(e => { if (revision === previewRevision) $('lightbox-status').textContent = '图片读取失败：' + e.message; });
   }
-  $('lightbox-prev').disabled = busy() || index === 0; $('lightbox-next').disabled = busy() || index === pages.length - 1;
+  $('lightbox-prev').disabled = busy() || index === 0; $('lightbox-next').disabled = busy() || index === visible.length - 1;
   $('lightbox-delete').disabled = busy(); $('lightbox-seek').disabled = busy(); $('lightbox-select').disabled = busy();
   updateSelection();
   if (!$('lightbox').contains(document.activeElement)) $('lightbox-close').focus();
@@ -670,10 +831,10 @@ function openPreview(page) {
 }
 function movePreview(delta) {
   if (busy()) return;
-  const index = pages.findIndex(page => page.id === previewPageId), page = pages[index + delta];
+  const visible = visiblePages(), index = visible.findIndex(page => page.id === previewPageId), page = visible[index + delta];
   if (page) { previewPageId = page.id; $('lightbox-status').textContent = ''; updatePreview(delta); }
 }
-$('select-all').onchange = () => { if (busy()) return; selectedPages = new Set($('select-all').checked ? pages.map(page => page.id) : []); updateSelection(); controls(); };
+$('select-all').onchange = () => { if (busy()) return; selectedPages = new Set($('select-all').checked ? visiblePages().map(page => page.id) : []); updateSelection(); controls(); };
 $('clear-selection').onclick = () => { if (busy()) return; selectedPages.clear(); selectionAnchor = null; updateSelection(); controls(); };
 $('delete-selected').onclick = () => deletePages([...selectedPages]);
 $('undo').onclick = undoDelete; $('clean-similar').onclick = cleanSimilar;
@@ -711,7 +872,14 @@ document.addEventListener('keydown', event => {
   if (event.key.toLowerCase() === 'v') { event.preventDefault(); $('lightbox-seek').click(); }
 });
 function controls() {
-  const active = busy();
+  const active = busy(), retained = learningRange(pages), selectedRetained = learningRange(pages.filter(page => selectedPages.has(page.id)));
+  $('learning-view').disabled = active; $('export-view').disabled = active;
+  $('knowledge-review').disabled = active || !activeLesson;
+  $('knowledge-review').value = PPTLibrary.knowledgeState(activeLesson, pages);
+  $('learning-exclude').disabled = active || !pages.some(page => selectedPages.has(page.id) && page.learningExcluded !== true);
+  $('learning-restore').disabled = active || !pages.some(page => selectedPages.has(page.id) && page.learningExcluded === true);
+  $('learning-suggest').disabled = active || !pages.length;
+  $('undo').textContent = undoState?.flags ? '撤销排除/恢复' : '撤销删除';
   for (const id of ['load-url', 'url', 'file', 'share', 'sources', 'course', 'discover', 'mode', 'diff', 'dedupe', 'stable', 'page-limit', 'video-only', 'full', 'course-name', 'course-date', 'course-start', 'pdf-layout', 'pdf-timestamps', 'pdf-bookmarks']) $(id).disabled = active;
   $('load').disabled = active || !$('sources').value;
   $('full').disabled = active || !sourceReady;
@@ -730,8 +898,9 @@ function controls() {
   $('crop-reuse').disabled = active || !canReuseCrop();
   $('resume-load').disabled = active || !ready;
   $('restart-scan').hidden = !activeLesson?.task || !!stream; $('restart-scan').disabled = active || !sourceReady;
-  $('course-zip').disabled = active || !currentCourseLessons().some(lesson => allPages.some(page => page.lessonId === lesson.id));
-  $('batch-course-zip').disabled = active || !batchCourseKey();
+  const hasCourseOutput = key => currentCourseLessons(key).some(lesson => { const raw = allPages.filter(page => page.lessonId === lesson.id); return learningRange(raw, lesson, raw).length > 0; });
+  $('course-zip').disabled = active || !hasCourseOutput(currentCourseKey());
+  $('batch-course-zip').disabled = active || !batchCourseKey() || !hasCourseOutput(batchCourseKey());
   $('course-pdf').disabled = $('course-zip').disabled;
   $('batch-course-pdf').disabled = $('batch-course-zip').disabled;
   $('course-report').disabled = active || !currentCourseLessons().length;
@@ -740,15 +909,15 @@ function controls() {
   $('stop').disabled = !task && !realtimeTimer && !batchRunning && !batchDiscovery;
   $('shot').disabled = active || !sourceReady || !ready;
   $('clear').disabled = active || !ready || !pages.length;
-  $('pdf').disabled = active || !pages.length; $('export-zip').disabled = active || !pages.length;
+  $('pdf').disabled = active || !retained.length; $('export-zip').disabled = active || !retained.length;
   $('undo').disabled = active || !undoState;
   $('clean-similar').disabled = active || pages.length < 2;
-  $('select-all').disabled = active || !pages.length;
+  $('select-all').disabled = active || !visiblePages().length;
   $('clear-selection').disabled = active || !selectedPages.size; $('delete-selected').disabled = active || !selectedPages.size;
-  $('selected-pdf').disabled = active || !selectedPages.size; $('selected-zip').disabled = active || !selectedPages.size;
+  $('selected-pdf').disabled = active || !selectedRetained.length; $('selected-zip').disabled = active || !selectedRetained.length;
   document.querySelectorAll('#pages article').forEach(card => {
     card.draggable = !active;
-    card.querySelector('button').disabled = active; card.querySelector('.page-select').disabled = active;
+    card.querySelectorAll('button, .page-select').forEach(control => { control.disabled = active; });
     card.querySelector('img').setAttribute('aria-disabled', String(active)); card.querySelector('.slide-time').setAttribute('aria-disabled', String(active));
   });
   $('end').disabled = !stream || active;
@@ -765,7 +934,7 @@ function controls() {
   document.querySelectorAll('#batch-jobs .batch-manual select, #batch-jobs .batch-manual button').forEach(control => { control.disabled = active; });
   document.querySelectorAll('#batch-jobs .batch-job > button').forEach(button => {
     const job = batchJobs.find(item => item.id === button.parentElement.dataset.jobId);
-    button.disabled = active || !job || (button.classList.contains('batch-view') ? !batchLesson(job) : !batchPageCount(job));
+    button.disabled = active || !job || (button.classList.contains('batch-view') ? !batchLesson(job) : !learningRange(batchPages(job), batchLesson(job), batchPages(job)).length);
   });
   updatePreview();
   video.controls = sourceReady && !active && !stream;
@@ -826,8 +995,8 @@ function addCard(page, index) {
   choose.type = 'checkbox'; choose.className = 'page-select'; choose.setAttribute('aria-label', `选择第 ${index + 1} 页`);
   choose.onclick = event => {
     if (busy()) { event.preventDefault(); return; }
-    const anchor = pages.findIndex(item => item.id === selectionAnchor), end = pages.findIndex(item => item.id === page.id);
-    const range = event.shiftKey && anchor >= 0 ? pages.slice(Math.min(anchor, end), Math.max(anchor, end) + 1) : [page];
+    const visible = visiblePages(), anchor = visible.findIndex(item => item.id === selectionAnchor), end = visible.findIndex(item => item.id === page.id);
+    const range = event.shiftKey && anchor >= 0 ? visible.slice(Math.min(anchor, end), Math.max(anchor, end) + 1) : [page];
     for (const item of range) { if (choose.checked) selectedPages.add(item.id); else selectedPages.delete(item.id); }
     if (!event.shiftKey) selectionAnchor = page.id;
     updateSelection(); controls();
@@ -859,7 +1028,11 @@ function addCard(page, index) {
   };
   article.ondragend = () => { draggedPageId = null; document.querySelectorAll('#pages article').forEach(card => card.classList.remove('dragging', 'drop-before', 'drop-after')); };
   button.onclick = () => deletePages([page.id]);
-  article.append(handle, image, choose, label, button);
+  const learning = document.createElement('button'); learning.className = 'learning-toggle'; learning.type = 'button';
+  learning.onclick = () => setLearningExcluded([page.id], page.learningExcluded !== true);
+  learning.textContent = page.learningExcluded === true ? '恢复' : '排除';
+  learning.setAttribute('aria-label', `${learning.textContent}第 ${index + 1} 页`);
+  article.append(handle, image, choose, label, learning, button);
   thumbnailStates.set(image, {id: page.id, url: null, visible: false, loading: false, revision: 0});
   $('pages').append(article); thumbnailObserver.observe(image);
   return article;
@@ -878,23 +1051,25 @@ function revealCards(cards, options) {
 function render({revealNew = false} = {}) {
   const container = $('pages'), scrollTop = container.scrollTop;
   const existing = new Map([...container.children].map(card => [Number(card.dataset.pageId), card]));
-  const retained = new Set(pages.map(page => page.id));
+  const visible = visiblePages(), retained = new Set(visible.map(page => page.id));
   for (const [id, card] of existing) if (!retained.has(id)) {
     const image = card.querySelector('img'); thumbnailObserver.unobserve(image); thumbnailQueue.delete(image);
     PPTMotion.cancel(card); releaseThumbnail(image); thumbnailStates.delete(image); card.remove();
   }
   const added = [];
-  pages.forEach((page, index) => {
+  visible.forEach((page, index) => {
     const card = existing.get(page.id) || addCard(page, index), image = card.querySelector('img'), label = card.querySelector('.slide-time');
     if (revealNew && !existing.has(page.id)) added.push(card);
     image.alt = `第 ${index + 1} 页`; image.setAttribute('aria-label', `放大第 ${index + 1} 页`);
     label.textContent = `${index + 1} · ${Number.isFinite(page.sourceTime) ? timecode(page.sourceTime) : new Date(page.time).toLocaleTimeString()}`;
     label.setAttribute('aria-label', `回看第 ${index + 1} 页${Number.isFinite(page.sourceTime) ? ' ' + timecode(page.sourceTime) : ''}`);
     card.querySelector('.page-select').setAttribute('aria-label', `选择第 ${index + 1} 页`);
+    const learning = card.querySelector('.learning-toggle'); learning.textContent = page.learningExcluded === true ? '恢复' : '排除';
+    learning.setAttribute('aria-label', `${learning.textContent}第 ${index + 1} 页`); card.classList.toggle('learning-excluded', page.learningExcluded === true);
     if (container.children[index] !== card) container.insertBefore(card, container.children[index] || null);
   });
-  $('count').textContent = `共 ${pages.length} 页`;
-  container.scrollTop = scrollTop; $('review-notice').hidden = !pages.length;
+  $('count').textContent = `显示 ${visible.length} / ${pages.length} 页`;
+  container.scrollTop = scrollTop; $('review-notice').hidden = !visible.length;
   updateSelection(); renderLibrary(); controls();
   revealCards(added);
 }
@@ -1042,7 +1217,7 @@ async function save(f, context = null) {
   check();
   const asset = {...await PPTPageStore.encode(f.canvas), sig: f.sig};
   check();
-  const page = {lessonId, signatureCrop: f.signatureCrop && {...f.signatureCrop}, scanId, w: f.canvas.width, h: f.canvas.height, time: Date.now(), sourceTime: f.sourceTime, sourceName, sourceKey: loadedIdentity?.sourceKey || '', course: {...sourceCourse}, coursePage, batchJobId: activeBatchJob?.id || ''};
+  const page = {lessonId, learningExcluded: false, signatureCrop: f.signatureCrop && {...f.signatureCrop}, scanId, w: f.canvas.width, h: f.canvas.height, time: Date.now(), sourceTime: f.sourceTime, sourceName, sourceKey: loadedIdentity?.sourceKey || '', course: {...sourceCourse}, coursePage, batchJobId: activeBatchJob?.id || ''};
   let insertAt = pages.length, lastMatch = -1;
   if (Number.isFinite(page.sourceTime)) {
     for (let i = 0; i < pages.length; i++) {
@@ -1066,9 +1241,9 @@ async function save(f, context = null) {
   storageGuard.committed++; cacheSignature(context, page.id, f.sig);
   const append = insertAt === pages.length;
   pages.splice(insertAt, 0, page); syncAllPages(); forgetUndo(); last = f.sig;
-  if (append) {
-    const container = $('pages'), scrollTop = container.scrollTop, card = addCard(page, insertAt);
-    $('count').textContent = `共 ${pages.length} 页`; $('review-notice').hidden = false;
+  if (append && $('learning-view').value !== 'excluded') {
+    const container = $('pages'), scrollTop = container.scrollTop, visible = visiblePages(), card = addCard(page, visible.length - 1);
+    $('count').textContent = `显示 ${visible.length} / ${pages.length} 页`; $('review-notice').hidden = false;
     container.scrollTop = scrollTop; updateSelection(); renderLibrary(); controls(); revealCards([card]);
   } else render({revealNew: true});
   return true;
@@ -1361,6 +1536,7 @@ window.addEventListener('pagehide', () => {
   if (objectURL) URL.revokeObjectURL(objectURL); objectURL = null;
   for (const url of downloadURLs) URL.revokeObjectURL(url);
   if (previewURL) URL.revokeObjectURL(previewURL);
+  if (similarReview) releaseSimilarImages(similarReview); similarReview = null; learningSuggestion = null;
   for (const [image, state] of thumbnailStates) releaseThumbnail(image, state);
 });
 async function downloadPages(list, name, {kind = 'pdf', layout = 'single', timestamps = false, bookmarks = false} = {}) {
@@ -1381,20 +1557,40 @@ async function downloadPages(list, name, {kind = 'pdf', layout = 'single', times
     throw error;
   }
 }
-async function downloadPDF(list, course, options = pdfOptions()) {
-  const name = PPTCourse.filename(course);
+async function downloadPDF(list, course, options = pdfOptions(), lesson = activeLesson) {
+  const name = PPTCourse.filename(course), reviewPages = structuredClone(list), frozenLesson = structuredClone(lesson);
+  const retained = learningRange(reviewPages, frozenLesson, reviewPages, exportView);
   if (!name) throw Error('请先补填课程名称、上课日期和开始时间');
-  await downloadPages(list.map(page => ({...page})), name, options);
+  if (!retained.length) throw Error('当前导出范围没有保留页');
+  await downloadPages(retained, name, {...options});
+}
+function freezeCourse(courseKey, directoryPage, format) {
+  const pool = structuredClone(lessons), current = pool.find(lesson => lesson.id === activeLesson?.id);
+  if (courseKey === undefined) courseKey = PPTLibrary.courseKey(current?.page || '', current?.course || namingInfo());
+  if (!courseKey) throw Error('请先读取课程录像列表');
+  const course = pool.filter(lesson => PPTLibrary.courseKey(lesson.page || '', lesson.course) === courseKey)
+    .sort((a, b) => (a.course?.date || '').localeCompare(b.course?.date || '') || (a.course?.start || '').localeCompare(b.course?.start || '') || a.created - b.created);
+  const ids = new Set(course.map(lesson => lesson.id));
+  const reviewPages = structuredClone([...allPages.filter(page => page.lessonId !== activeLesson?.id), ...pages]).filter(page => ids.has(page.lessonId));
+  const view = exportView, entries = course.map((lesson, index) => {
+    const raw = reviewPages.filter(page => page.lessonId === lesson.id).sort((a, b) => a.order - b.order), info = PPTCourse.normalize(lesson.course || {});
+    return {title: `第 ${index + 1} 课 · ${info.date || '未知日期'} ${info.start || '未知时间'}`,
+      name: `${String(index + 1).padStart(3, '0')}-${PPTCourse.filename(lesson.course) || lessonLabel(lesson) + '.pdf'}`,
+      raw, pages: learningRange(raw, lesson, raw, view)};
+  });
+  const snapshot = courseIntegrity(courseKey, course, entries.flatMap(entry => entry.raw), {view, reviewPages, format, directoryPage: directoryPage === undefined ? current?.page || '' : directoryPage});
+  return {courseKey, course, entries, snapshot, title: PPTCourse.normalize(course[0]?.course || {}).name || '未命名课程'};
 }
 async function exportRetained(kind, selected = false) {
   if (busy()) return;
-  const list = pages.filter(page => !selected || selectedPages.has(page.id)).map(page => ({...page}));
-  if (!list.length) return;
+  const reviewPages = structuredClone(pages), lesson = structuredClone(activeLesson), view = exportView;
+  const requested = reviewPages.filter(page => !selected || selectedPages.has(page.id));
+  const list = learningRange(requested, lesson, reviewPages, view), name = PPTCourse.filename(namingInfo());
+  if (!list.length) { status('当前导出范围没有保留页。'); return; }
   const options = pdfOptions();
   exportBusy = true; controls();
   try {
-    await namingSave.catch(() => {});
-    const name = PPTCourse.filename(namingInfo());
+    await namingSave; await lessonSave;
     if (!name) {
       activateTab('tab-export');
       const missing = ['course-name', 'course-date', 'course-start'].find(id => !$(id).value) || 'course-name';
@@ -1435,7 +1631,7 @@ function integrityHint(snapshot) {
   const retained = snapshot.lessons.filter(row => row.savedPages > 0 && !row.scan.reachedEnd);
   const unfinished = retained.filter(row => ['running', 'paused', 'failed'].includes(row.scan.taskState)).length;
   const legacy = retained.filter(row => row.scan.taskState === 'done').length, unverified = retained.length - unfinished - legacy;
-  return `未确认到尾部 ${s.notReachedEnd} 节；目录失败/未知 ${unknown} 项；待复核 ${s.suspectRanges} 段。${unfinished ? `其中 ${unfinished} 节尚未完成本次扫描。` : ''}${legacy ? `旧任务尾部待核对 ${legacy} 节。` : ''}${unverified ? `有截图但覆盖证据待核对 ${unverified} 节。` : ''}知识内容尚需核验。`;
+  return `未确认到尾部 ${s.notReachedEnd} 节；目录失败/未知 ${unknown} 项；待复核 ${s.suspectRanges} 段。${unfinished ? `其中 ${unfinished} 节尚未完成本次扫描。` : ''}${legacy ? `旧任务尾部待核对 ${legacy} 节。` : ''}${unverified ? `有截图但覆盖证据待核对 ${unverified} 节。` : ''}${snapshot.complete && snapshot.knowledgeComplete ? '本课程学习版已完成核验。' : snapshot.knowledgeComplete ? '知识内容已核验，扫描完整性仍需核对。' : '知识内容尚需核验。'}`;
 }
 async function saveCourseReceipt(courseKey, snapshot) {
   snapshot.export.exportedAt = new Date().toISOString();
@@ -1445,12 +1641,14 @@ async function saveCourseReceipt(courseKey, snapshot) {
 }
 async function exportCourseReport(courseKey, statusId = 'status', directoryPage) {
   if (busy()) return;
+  const owner = activeLesson?.id;
   exportBusy = true; controls();
   try {
-    await namingSave; await lessonSave; syncAllPages();
-    if (courseKey === undefined) courseKey = currentCourseKey();
-    if (!courseKey) throw Error('请先选择课程');
-    const snapshot = courseIntegrity(courseKey, undefined, undefined, {directoryPage}), tx = db.transaction('settings'), read = tx.objectStore('settings').get('courseExport:' + courseKey);
+    await namingSave; await lessonSave;
+    if (activeLesson?.id !== owner) throw Error('当前课次已变化，请重新导出');
+    const frozen = freezeCourse(courseKey, directoryPage, null), snapshot = frozen.snapshot;
+    courseKey = frozen.courseKey;
+    const tx = db.transaction('settings'), read = tx.objectStore('settings').get('courseExport:' + courseKey);
     await new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onerror = tx.onabort = () => reject(tx.error || Error('导出记录未能读取')); });
     snapshot.lastExport = read.result?.lastExport || null;
     downloadBlob(new Blob([JSON.stringify(snapshot, null, 2) + '\n'], {type: 'application/json;charset=utf-8'}), '课程完整性报告.json');
@@ -1461,22 +1659,16 @@ async function exportCourseReport(courseKey, statusId = 'status', directoryPage)
 async function exportCoursePDF(courseKey, statusId = 'status', directoryPage) {
   if (busy()) return;
   const report = message => { status(message); if (statusId !== 'status') $(statusId).textContent = message; };
-  const {layout, timestamps} = pdfOptions();
+  const {layout, timestamps} = pdfOptions(), owner = activeLesson?.id;
   exportBusy = true; controls(); let cache;
   try {
-    await namingSave; await lessonSave; syncAllPages();
-    if (courseKey === undefined) courseKey = currentCourseKey();
-    if (!courseKey) throw Error('请先读取课程录像列表');
-    const course = structuredClone(currentCourseLessons(courseKey)).sort((a, b) => (a.course?.date || '').localeCompare(b.course?.date || '') || (a.course?.start || '').localeCompare(b.course?.start || '') || a.created - b.created);
-    const title = PPTCourse.normalize(course[0]?.course || {}).name || '未命名课程';
-    const entries = course.map((lesson, index) => {
-      const info = PPTCourse.normalize(lesson.course || {});
-      return {title: `第 ${index + 1} 课 · ${info.date || '未知日期'} ${info.start || '未知时间'}`,
-        pages: allPages.filter(page => page.lessonId === lesson.id).sort((a, b) => a.order - b.order).map(page => ({...page}))};
-    });
+    await namingSave; await lessonSave;
+    if (activeLesson?.id !== owner) throw Error('当前课次已变化，请重新导出');
+    const frozen = freezeCourse(courseKey, directoryPage, 'pdf'), {entries, snapshot, title} = frozen;
+    courseKey = frozen.courseKey;
     const nonempty = entries.filter(entry => entry.pages.length), total = nonempty.reduce((sum, entry) => sum + entry.pages.length, 0);
-    if (!total) throw Error('本课程还没有截图');
-    const snapshot = courseIntegrity(courseKey, course, entries.flatMap(entry => entry.pages), {format: 'pdf', directoryPage}), empty = snapshot.summary.emptyLessons;
+    if (!total) throw Error(snapshot.view === 'raw' ? '本课程还没有截图' : '当前课程导出范围没有保留页');
+    const empty = snapshot.summary.emptyLessons;
     cache = await PPTDiskCache.create('export'); let count = 0;
     await writeCoursePDF(entries, {title, layout, timestamps, write: cache.write, readImage: async page => {
       report(`正在合并整课 PDF：第 ${++count} / ${total} 页…`); $('progress').value = (count - 1) / total;
@@ -1494,18 +1686,16 @@ async function exportCoursePDF(courseKey, statusId = 'status', directoryPage) {
 async function exportCourseZIP(courseKey, statusId = 'status', directoryPage) {
   if (busy()) return;
   const report = message => { status(message); if (statusId !== 'status') $(statusId).textContent = message; };
-  const options = pdfOptions();
+  const options = pdfOptions(), owner = activeLesson?.id;
   exportBusy = true; controls(); let cache;
   try {
-    await namingSave; await lessonSave; syncAllPages();
-    // Local lessons are grouped by name, which pending saves may change.
-    if (courseKey === undefined) courseKey = currentCourseKey();
-    if (!courseKey) throw Error('请先读取课程录像列表');
-    const course = structuredClone(currentCourseLessons(courseKey)).sort((a, b) => (a.course?.date || '').localeCompare(b.course?.date || '') || (a.course?.start || '').localeCompare(b.course?.start || '') || a.created - b.created);
-    const entries = course.map((lesson, index) => ({name: `${String(index + 1).padStart(3, '0')}-${PPTCourse.filename(lesson.course) || lessonLabel(lesson) + '.pdf'}`, pages: allPages.filter(page => page.lessonId === lesson.id).sort((a, b) => a.order - b.order).map(page => ({...page}))}));
+    await namingSave; await lessonSave;
+    if (activeLesson?.id !== owner) throw Error('当前课次已变化，请重新导出');
+    const frozen = freezeCourse(courseKey, directoryPage, 'zip'), {entries, snapshot, course} = frozen;
+    courseKey = frozen.courseKey;
     const nonempty = entries.filter(entry => entry.pages.length), total = nonempty.reduce((sum, entry) => sum + entry.pages.length, 0);
-    if (!nonempty.length) throw Error('本课程还没有截图');
-    const snapshot = courseIntegrity(courseKey, course, entries.flatMap(entry => entry.pages), {format: 'zip', directoryPage}), empty = snapshot.summary.emptyLessons;
+    if (!nonempty.length) throw Error(snapshot.view === 'raw' ? '本课程还没有截图' : '当前课程导出范围没有保留页');
+    const empty = snapshot.summary.emptyLessons;
     cache = await PPTDiskCache.create('export'); let count = 0;
     await writeCourseZIP(entries, {...options, write: cache.write, readImage: async page => {
       report(`正在打包课程 PDF：第 ${++count} / ${total} 页…`); $('progress').value = (count - 1) / total;
@@ -1681,7 +1871,7 @@ function renderBatchJobs() {
     download.onclick = async () => {
       if (busy()) return;
       exportBusy = true; controls();
-      try { await downloadPDF(batchPages(job), batchLesson(job)?.course || job.course); }
+      try { await downloadPDF(batchPages(job), batchLesson(job)?.course || job.course, pdfOptions(), batchLesson(job)); }
       catch (error) { $('batch-status').textContent = '导出失败：' + error.message; }
       finally { exportBusy = false; controls(); }
     };

@@ -41,7 +41,28 @@
     }
     return merged;
   }
-  function integrity({batch, lessons = [], pages = [], exportedAt = null, format = null}) {
+  function knowledgeEvidence(lesson, pages) {
+    const source = lesson?.source;
+    const identifiable = source && [source.sourceKey, source.url, source.sourceName].some(value => typeof value === 'string' && value.trim());
+    return {sourceKey: source ? key(source) : lesson?.key || null,
+      trackKey: identifiable ? key({sourceKey: source.sourceKey || (source.url ? 'url:' + source.url : ''), sourceName: source.sourceName}) : null,
+      sourceDuration: Number.isFinite(source?.duration) && source.duration > 0 ? source.duration : null,
+      pageIds: pages.map(page => page.id)};
+  }
+  function knowledgeState(lesson, pages) {
+    if (!['has-content', 'no-content'].includes(lesson?.knowledgeReview)) return 'unreviewed';
+    const evidence = lesson.knowledgeReviewEvidence, current = knowledgeEvidence(lesson, pages);
+    if (!evidence || !['sourceKey', 'trackKey', 'sourceDuration', 'pageIds'].every(field => Object.hasOwn(evidence, field))
+      || evidence.sourceKey !== current.sourceKey || evidence.trackKey !== current.trackKey || evidence.sourceDuration !== current.sourceDuration
+      || !Array.isArray(evidence.pageIds) || evidence.pageIds.length !== current.pageIds.length
+      || new Set(evidence.pageIds).size !== current.pageIds.length || !current.pageIds.every(id => evidence.pageIds.includes(id))) return 'unreviewed';
+    return lesson.knowledgeReview;
+  }
+  function learningPages(pages, {view = 'raw', knowledgeReview = 'unreviewed'} = {}) {
+    return view === 'learning' ? knowledgeReview === 'no-content' ? [] : pages.filter(page => page.learningExcluded !== true) : pages.slice();
+  }
+  function integrity({batch, lessons = [], pages = [], view = 'raw', reviewPages = pages, exportedAt = null, format = null}) {
+    view = view === 'learning' ? 'learning' : 'raw';
     // Project an explicit schema. Even legacy IDs and normalized source keys can contain signed URLs.
     const aliases = new Map(), opaque = (kind, value) => {
       if (!value) return null;
@@ -68,16 +89,20 @@
         && validRanges.every(range => range.end <= duration));
       const merged = verified ? validRanges.reduce((list, range) => mergeRanges(list, range), []) : [];
       const reachedEnd = verified && coverage.reachedEnd === true && merged[0]?.start === 0 && merged[0].end >= duration - Math.min(.05, duration / 2);
-      const retained = lesson ? pages.filter(page => page.lessonId === lesson.id).sort((a, b) => (a.order ?? a.id) - (b.order ?? b.id)) : [];
+      const raw = lesson ? reviewPages.filter(page => page.lessonId === lesson.id) : [];
+      const requested = lesson ? pages.filter(page => page.lessonId === lesson.id).sort((a, b) => (a.order ?? a.id) - (b.order ?? b.id)) : [];
+      const knowledgeReview = knowledgeState(lesson, raw), retained = learningPages(requested, {view, knowledgeReview});
       return {lessonId: id('lesson', lesson?.id), jobId: id('job', job?.id || source.batchJobId), excluded: job?.selected === false || job?.discovery?.state === 'skipped',
-        discovery: discovery(job?.discovery), savedPages: retained.length,
+        discovery: discovery(job?.discovery), savedPages: raw.length,
+        rawCount: requested.length, excludedCount: requested.length - retained.length, exportedCount: retained.length,
+        knowledgeReview, comparisonVersion: ['local-v1', 'mixed'].includes(task?.comparisonVersion) ? task.comparisonVersion : 'unknown',
         scan: {verified, reachedEnd, state: reachedEnd ? 'reached-end' : verified ? 'partial' : task ? 'legacy-unknown' : 'not-started',
           taskState: ['running', 'paused', 'failed', 'done'].includes(task?.state) ? task.state : null, duration, checkpoint: number(task?.checkpoint),
           coverage: coverage ? {version: 1, sourceKey: opaque('source', coverage.sourceKey), trackKey: opaque('track', coverage.trackKey),
             duration: number(coverage.duration), ranges: merged, reachedEnd: verified && coverage.reachedEnd === true} : null,
           suspects: ranges(lesson?.suspects)},
-        knowledge: {state: ['reviewed', 'partial'].includes(lesson?.knowledge?.state) ? lesson.knowledge.state : 'unreviewed'},
-        exportPages: retained.map(page => ({id: id('page', page.id), sourceTime: number(page.sourceTime)}))};
+        knowledge: {state: knowledgeReview},
+        exportPages: retained.map((page, index) => ({id: id('page', page.id), sourceTime: number(page.sourceTime), exportIndex: index + 1}))};
     });
     const metadata = batch?.discovery;
     const failures = (metadata?.failures || []).filter(item => !item.jobId).map(item => ({code: code(item.code), status: number(item.status), attempts: number(item.attempts)}));
@@ -89,7 +114,10 @@
       suspectRanges: result.reduce((sum, item) => sum + item.scan.suspects.length, 0), emptyLessons: result.filter(item => !item.savedPages).length,
       excluded: result.filter(item => item.excluded).length};
     const snapshot = result.filter(item => item.exportPages.length).map(item => ({lessonId: item.lessonId, pages: item.exportPages}));
-    return {version: 1, complete: directory.state === 'complete' && directory.total === jobs.length && result.length > 0
+    return {version: 1, view, rawCount: pages.length, exportedCount: snapshot.reduce((sum, item) => sum + item.pages.length, 0),
+      excludedCount: view === 'raw' ? 0 : pages.length - snapshot.reduce((sum, item) => sum + item.pages.length, 0),
+      knowledgeComplete: result.length > 0 && result.every(item => item.knowledgeReview !== 'unreviewed'),
+      complete: directory.state === 'complete' && directory.total === jobs.length && result.length > 0
         && !summary.notReachedEnd && !summary.suspectRanges && !summary.directoryFailures && !summary.discoveryFailures && !summary.discoveryUnknown,
       directory, summary, lessons: result.map(({exportPages, ...item}) => item), pageIds: snapshot.flatMap(item => item.pages.map(page => page.id)),
       export: {exportedAt: typeof exportedAt === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(exportedAt) ? exportedAt : null,
@@ -228,7 +256,7 @@
       return () => result;
     });
   }
-  const api = {pageLimit, key, courseKey, recover, mergeRanges, integrity, restore, put, activate, bind, batch, remove};
+  const api = {pageLimit, key, courseKey, recover, mergeRanges, knowledgeEvidence, knowledgeState, learningPages, integrity, restore, put, activate, bind, batch, remove};
   root.PPTLibrary = api;
   if (typeof module !== 'undefined') module.exports = api;
 })(globalThis);

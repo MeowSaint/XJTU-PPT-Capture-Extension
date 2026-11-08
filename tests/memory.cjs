@@ -7,7 +7,7 @@ const crypto = require('node:crypto');
 const {dependency, browserOptions} = require('./runtime.cjs');
 const {chromium} = dependency('playwright');
 const root = path.resolve(__dirname, '..');
-const output = path.join(root, '.test-output', 'v3.1.2', `memory-${Date.now()}`);
+const output = path.join(process.env.PPT_TEST_OUTPUT || path.join(root, '.test-output', 'v3.1.2'), `memory-${Date.now()}`);
 fs.mkdirSync(output, {recursive: true});
 const report = {node: process.version, platform: process.platform, results: [], errors: [], heap: {}, evidence: [],
   scope: 'Fresh Chromium contexts, localhost, synthetic images, injected failures, 256 MiB generated stream; JSHeapUsedSize is not RSS.'};
@@ -486,6 +486,55 @@ async function longWorkspace() {
   } finally { await dispose(context); }
 }
 
+async function learningMemory() {
+  const {context, page} = await fresh(); let cdp;
+  try {
+    await page.evaluate(async () => {
+      const fixture = await __memory.fixture(), db = await PPTPageStore.open(), sig = new Uint8ClampedArray(192 * 108 * 4).fill(128);
+      for (let i = 0; i < 1001; i++) await PPTPageStore.add(db, {w: 1280, h: 720, order: i * 1024, sourceTime: i * 30, sourceName: 'synthetic.mp4', sourceKey: 'learning-memory', course: {name: 'Learning memory'}, time: i}, {image: fixture.image, thumbnail: fixture.thumbnail, sig});
+      db.close();
+    });
+    await page.goto(origin + '/capture.html'); await page.waitForFunction(() => ready);
+    await page.locator('#terms-agree').check(); await page.locator('#terms-accept').click(); await page.waitForFunction(() => !busy());
+    await settleThumbnails(page); cdp = await context.newCDPSession(page); await cdp.send('Performance.enable');
+    const before = await heap(cdp);
+    const result = await page.evaluate(async () => {
+      const get = PPTPageStore.assets, batches = []; let live = 0, peak = 0, released = 0;
+      PPTPageStore.assets = async (db, ids) => {
+        const records = await get(db, ids); batches.push(ids.length); live += records.length; peak = Math.max(peak, live);
+        return new Proxy(records, {set(target, key, value) { if (value === null && target[key]) { live--; released++; } return Reflect.set(target, key, value); }});
+      };
+      const metadata = JSON.stringify(pages);
+      try {
+        await $('learning-suggest').onclick();
+        const suggestions = $('learning-suggestions').children.length;
+        closeLearningSuggestions();
+        return {batches, peak, live, released, suggestions, unchanged: metadata === JSON.stringify(pages), cache: dedupeContext?.signatures.size || 0, fullRaw: allPages.length};
+      } finally { PPTPageStore.assets = get; closeLearningSuggestions(); }
+    });
+    assert.equal(result.batches.reduce((a, b) => a + b, 0), 1001); assert.equal(Math.max(...result.batches), 32);
+    assert.equal(result.peak, 32); assert.equal(result.live, 0); assert.equal(result.released, 1001); assert.equal(result.cache, 0); assert.equal(result.fullRaw, 1001); assert.equal(result.unchanged, true); assert(result.suggestions > 0);
+    const after = await heap(cdp); assert(after - before < 24 * 1024 * 1024, 'closed suggestions do not retain 1001 signature buffers or JPEGs');
+    const cancelled = await page.evaluate(async () => {
+      const get = PPTPageStore.assets; let release;
+      PPTPageStore.assets = async (...args) => { const records = await get(...args); await new Promise(resolve => { release = resolve; }); return records; };
+      try {
+        const running = $('learning-suggest').onclick();
+        while (!release) await new Promise(resolve => requestAnimationFrame(resolve));
+        closeLearningSuggestions(); release(); await running;
+        return {closed: learningSuggestion === null && !$('learning-dialog').open, flags: pages.some(page => page.learningExcluded), nodes: $('learning-suggestions').children.length};
+      } finally { PPTPageStore.assets = get; }
+    });
+    assert.deepEqual(cancelled, {closed: true, flags: false, nodes: 0});
+    await page.emulateMedia({reducedMotion: 'reduce'});
+    await page.evaluate(async () => { await setLearningExcluded(pages.slice(0, 2).map(page => page.id), true); $('learning-view').value = 'kept'; $('learning-view').onchange(); });
+    assert.equal(await page.locator('#pages article').count(), 999); assert.equal(await page.evaluate(() => pages.length), 1001);
+    await page.locator('#select-all').check(); assert.equal(await page.evaluate(() => selectedPages.size), 999);
+    await page.locator('#learning-view').selectOption('excluded'); assert.equal(await page.evaluate(() => selectedPages.size), 0); assert.equal(await page.locator('#pages article').count(), 2);
+    return {...result, cancelled, heapBefore: before, heapAfter: after, reducedMotion: true};
+  } finally { await cdp?.detach(); await dispose(context); }
+}
+
 async function main() {
   server = http.createServer(async (request, response) => {
     try {
@@ -505,6 +554,7 @@ async function main() {
     await test('v2 migration preserves JPEG/PNG/WebP and converts non-JPEG images when exporting', () => migration(2));
     await test('failed migration rolls back the full upgrade and keeps the v2 database intact', failedMigration);
     await test('real OPFS startup reclaims unlocked sessions and protects another active page', cacheSessions);
+    await test('learning suggestions stream 1001 assets, cancel safely and preserve bounded gallery views', learningMemory);
     await workspace();
     await test('2000 pages restore with bounded caches, thumbnails and byte-correct streaming ZIP', longWorkspace);
   } catch (error) { report.errors.push(error.stack || String(error)); }
