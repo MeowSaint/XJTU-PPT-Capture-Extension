@@ -18,7 +18,7 @@ const passed = [], errors = [], blocked = [];
 let browser, context, page, server, origin, images, fileKey;
 
 async function idle() { await page.waitForFunction(() => ready && !busy()); }
-async function count(n) { await page.waitForFunction(n => !busy() && document.querySelectorAll('#pages article').length === n, n); }
+async function count(n) { await page.waitForFunction(n => ready && !busy() && document.querySelectorAll('#pages article').length === n, n); }
 async function ids() { return page.locator('#pages article').evaluateAll(cards => cards.map(card => Number(card.dataset.pageId))); }
 async function settled() { await page.evaluate(async () => { await namingSave; await lessonSave; }); await idle(); }
 async function open() {
@@ -272,6 +272,66 @@ function zipEntries(bytes, {utf8 = true} = {}) {
     page.on('pageerror', error => errors.push(error.message));
     await open();
 
+
+    await test('empty gallery count waits for real held IndexedDB startup', async () => {
+      await seed();
+      // Arm only this reload. Hold the actual native open success, not ready or controls.
+      await page.evaluate(() => sessionStorage.setItem('hold-library-startup', '1'));
+      await context.addInitScript(() => {
+        if (!sessionStorage.getItem('hold-library-startup')) return;
+        sessionStorage.removeItem('hold-library-startup');
+        const open = IDBFactory.prototype.open;
+        const probe = window.libraryStartupProbe = {entered: false, released: false, automatic: false, delivered: 0, timerActive: true};
+        let request, event;
+        const intercept = nativeEvent => { nativeEvent.stopImmediatePropagation(); event = nativeEvent; probe.entered = true; };
+        const timer = setTimeout(() => probe.release(true), 8000);
+        probe.release = (automatic = false) => {
+          clearTimeout(timer); probe.timerActive = false;
+          IDBFactory.prototype.open = open; probe.hookRestored = IDBFactory.prototype.open === open;
+          request?.removeEventListener('success', intercept, {capture: true});
+          if (probe.released) return;
+          probe.released = true; probe.automatic = automatic;
+          if (event) { probe.delivered++; request.onsuccess.call(request, event); }
+        };
+        IDBFactory.prototype.open = function(...args) {
+          const result = open.apply(this, args);
+          if (args[0] === 'course-ppt' && !request) {
+            request = result; probe.database = args[0]; probe.version = args[1];
+            request.addEventListener('success', intercept, {capture: true});
+          }
+          return result;
+        };
+      });
+      let waiting, settled = false;
+      const evidence = {};
+      try {
+        await page.reload();
+        await page.waitForFunction(() => window.libraryStartupProbe?.entered);
+        evidence.held = await page.evaluate(() => ({ready, busy: busy(), cards: document.querySelectorAll('#pages article').length,
+          disabled: $('library-manage').disabled, database: libraryStartupProbe.database, version: libraryStartupProbe.version}));
+        assert.deepEqual(evidence.held, {ready: false, busy: false, cards: 0, disabled: true, database: 'course-ppt', version: 3});
+        await page.waitForFunction(() => !busy() && document.querySelectorAll('#pages article').length === 0);
+        evidence.oldPredicateSettled = true;
+        waiting = count(0).then(() => { settled = true; });
+        // Give the helper multiple actual polling frames while native startup is held.
+        await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+        evidence.countSettledWhileHeld = settled;
+        assert.equal(settled, false, 'count(0) must remain pending until actual IndexedDB startup finishes');
+      } finally {
+        await page.evaluate(() => window.libraryStartupProbe?.release());
+        if (waiting) await waiting;
+        await page.evaluate(() => dbReady);
+        evidence.released = await page.evaluate(() => ({ready, busy: busy(), cards: document.querySelectorAll('#pages article').length,
+          disabled: $('library-manage').disabled, released: libraryStartupProbe.released, automatic: libraryStartupProbe.automatic,
+          delivered: libraryStartupProbe.delivered, hookRestored: libraryStartupProbe.hookRestored, timerActive: libraryStartupProbe.timerActive}));
+        fs.writeFileSync(path.join(output, 'held-startup.json'), JSON.stringify(evidence, null, 2));
+        await page.evaluate(() => { delete window.libraryStartupProbe; sessionStorage.removeItem('hold-library-startup'); });
+      }
+      assert.deepEqual(evidence.released, {ready: true, busy: false, cards: 0, disabled: false, released: true,
+        automatic: false, delivered: 1, hookRestored: true, timerActive: false});
+      assert.equal(settled, true);
+      assert.deepEqual((await stored()).pages, []);
+    });
 
     await test('learning metadata transaction rollback, original bytes, visible selection and review persistence', async () => {
       const specs = [1, 2, 3].map((id, index) => ({id, lessonId: 'learning', image: index, sourceKey: fileKey, sourceName: path.basename(fixture), sourceTime: index + .25}));
