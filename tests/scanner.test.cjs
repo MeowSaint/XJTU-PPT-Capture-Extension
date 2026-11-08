@@ -583,6 +583,20 @@ test('seeked cannot expose old pixels, including an already queued old frame cal
   assert.equal(frame.requested, 4); assert.equal(frame.nativeTime, 4); assert.equal(frame.pixel, 'red'); f.clean();
 });
 
+test('queued same-target seeking retains a confirmed frame until seeked', async () => {
+  const f = presentedVideo({time: 2.5}), controller = new AbortController(), pending = f.scanner.seek(1.25, controller.signal);
+  pending.catch(() => {});
+  try {
+    f.frame({mediaTime: 1.2}); f.v.dispatchEvent(new Event('seeking')); f.seeked();
+    await Promise.resolve();
+    assert.equal(f.captures.length, 1, 'the queued seeking event must retain the already confirmed target frame');
+    assert.deepEqual(await pending, {requested: 1.25, nativeTime: 1.25, pixel: 'red'}); f.clean();
+  } finally {
+    controller.abort(); await pending.catch(() => {}); f.clean();
+    assert.equal(require('node:events').getEventListeners(controller.signal, 'abort').length, 0);
+  }
+});
+
 test('frame and seeked may arrive in either order without imposing a frame-rate tolerance', async () => {
   for (const first of ['frame', 'seeked']) {
     const f = presentedVideo(), pending = f.scanner.seek(4);

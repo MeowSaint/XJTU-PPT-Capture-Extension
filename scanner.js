@@ -96,7 +96,7 @@ class PPTScanner {
           if (!sameSource()) { finish(failure()); return; }
           if (seeked && presented && v.readyState >= 2 && !v.seeking && v.currentTime === nativeTime) finish();
         };
-        const moved = () => { if (v.currentTime !== nativeTime) { finish(failure()); return; } seeked = false; presented = !framed; };
+        const moved = () => { if (v.currentTime !== nativeTime) { finish(failure()); return; } seeked = false; };
         const done = () => {
           if (settled) return;
           if (!sameSource()) { finish(failure()); return; }
