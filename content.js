@@ -24,6 +24,7 @@
   window.addEventListener('popstate', onNavigation);
   window.addEventListener('hashchange', onNavigation);
   function pageRoute(href = location.href) {
+    if (!core.isCoursePage(href)) return {courseId: '', captureCode: ''};
     try {
       const url = new URL(href);
       const match = (url.pathname + url.hash).match(/\/(?:my|study)-capture-courses\/([^/?#]+)\/preview-detail(?:\/([^/?#]+))?/);
@@ -93,6 +94,7 @@
   }
   function startDiscovery(message) {
     checkPage();
+    if (!core.isCoursePage(page)) throw Error('当前网站支持单视频提取；整课目录暂仅支持思源学堂');
     if (window !== window.top || !globalThis.PPTBatch) throw Error('批量读取只能在课程列表主页面运行');
     if (!PPTBatch.courseId(page)) throw Error('请回到这门课的录像列表页，再读取课次');
     if (discovery?.pending && discovery.page === page) return discovery;
@@ -105,7 +107,10 @@
     }, error => { current.error = {code: error.code || 'DISCOVERY', message: error.message}; }).finally(() => { current.pending = false; });
     return current;
   }
-  function metadata() { return globalThis.PPTCourse ? (window === window.top ? {...PPTCourse.fromDocument(document), ...hookCourse, ...apiCourse} : {...hookCourse, ...apiCourse}) : {}; }
+  function metadata() {
+    if (!core.isCoursePage(location.href)) return window === window.top && document.title ? {name: document.title.trim().slice(0, 120)} : {};
+    return globalThis.PPTCourse ? (window === window.top ? {...PPTCourse.fromDocument(document), ...hookCourse, ...apiCourse} : {...hookCourse, ...apiCourse}) : {};
+  }
   function add(raw) { const info = core.mediaInfo(raw, document.baseURI || location.href); if (info) found.add(info.url); }
   function mediaReply() {
     const course = metadata(), urls = [...found].slice(-150);
@@ -178,7 +183,7 @@
     });
     return true;
   });
-  window.__pptContentCollector = () => { last = ''; lastCourse = ''; report(); probeCurrentPageApi(); };
+  window.__pptContentCollector = async () => { last = ''; lastCourse = ''; report(); await probeCurrentPageApi(); return mediaReply(); };
   setInterval(report, 2000);
   report();
   probeCurrentPageApi();

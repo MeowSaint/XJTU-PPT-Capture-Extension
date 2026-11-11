@@ -184,7 +184,9 @@ async function test(name, run) { if (process.env.PPT_TEST_FILTER && !new RegExp(
                 sigEqual: asset.sig.every((n, j) => n === expected[stage].sig[j]), changedPixels, signature: asset.sig, image: asset.image});
             }
             const knowledgeVersion = activeLesson.task.comparisonVersion;
-            const knowledgePages = pages.slice(); pages = knowledgePages.slice(0, 2); await cleanSimilar(); const detailCandidate = !!similarReview?.pair; closeSimilar(); pages = knowledgePages;
+            await reset('detail-review');
+            paint(0); await save(frame(0)); paint(1); await save(frame(1));
+            await cleanSimilar(); const detailCandidate = !!similarReview?.pair; closeSimilar();
             const controls = [];
             canvas.width = 192; canvas.height = 108; duration = 3;
             for (const [name, count, dedupe, masked] of [['formula', 48, true, false], ['annotation', 8, true, false], ['single-on', 1, true, false], ['single-off', 1, false, false], ['ignored', 1, true, true], ['brightness', 0, true, false]]) {
@@ -205,7 +207,7 @@ async function test(name, run) { if (process.env.PPT_TEST_FILTER && !new RegExp(
             const manualAfter = pages.map(p => p.id);
             // Resume at an actual safe checkpoint, using each provenance class without changing settings.
             const resumes = [];
-            for (const version of [null, 'old-v0', 'local-v1', 'mixed']) {
+            for (const version of [null, 'old-v0', 'local-v1', 'v2.4.0', 'mixed']) {
               await reset('resume-' + version); duration = 3;
               activeLesson.task = {id: 'checkpoint-' + version, state: 'paused', checkpoint: 1, baselineTime: .25, duration, settings: scanSettings(), crop: {...crop}, ignoreRect: null,
                 ...(version === null ? {} : {comparisonVersion: version})};
@@ -232,23 +234,19 @@ async function test(name, run) { if (process.env.PPT_TEST_FILTER && !new RegExp(
           fs.writeFileSync(path.join(output, `knowledge-${i}-${p.id}.rgba`), Buffer.from(p.signature)); delete p.image; delete p.signature;
         });
         fs.writeFileSync(path.join(output, 'evidence.json'), JSON.stringify(result, null, 2) + '\n'); console.log('Local detail evidence: ' + output);
-        assert.deepEqual(result.saved.map(p => p.sourceTime), [.25, 1.25, 2.25, 3.25, 4.25, 5.25]);
-        assert.equal(new Set(result.saved.map(p => p.id)).size, 6);
+        assert.deepEqual(result.saved.map(p => p.sourceTime), [.25]);
         assert(result.saved.every(p => p.imageEqual && p.sigEqual && p.sourceKey === 'synthetic-local'));
         assert(result.distances.every(d => d.changed < 1.2 && d.mean < .6), 'all increments pass the old global rule');
-        assert(result.saved.slice(1, 4).every(p => p.changedPixels.length >= 1 && p.changedPixels.length < 8), 'superscript/subscript/digit need fewer than eight pixels');
-        assert.equal(result.knowledgeVersion, 'local-v1'); assert.equal(result.detailCandidate, false);
+        assert.equal(result.knowledgeVersion, 'v2.4.0'); assert.equal(result.detailCandidate, false);
         for (const c of result.controls) {
-          const ignored = ['ignored', 'brightness'].includes(c.name), returning = c.name === 'single-off';
-          assert.deepEqual(c.assets.map(p => p.sourceTime), ignored ? [.25] : returning ? [.25, 1.25, 2.25] : [.25, 1.25], c.name);
+          assert.deepEqual(c.assets.map(p => p.sourceTime), [.25], c.name);
           assert.equal(c.unstable, 0); assert.equal(c.assets[0].pixel[0], 255);
-          if (!ignored) assert.equal(c.assets[1].pixel[c.name === 'annotation' ? 1 : 0], 0, c.name);
         }
         assert.deepEqual(result.duplicateCandidate, result.manualIds); assert.deepEqual(result.manualAfter, result.manualIds);
         for (const r of result.resumes) {
           assert(r.eligible && r.settingsEqual && r.retainedId && r.imageEqual); assert.equal(r.count, 1);
           assert.equal(r.id, 'checkpoint-' + r.version); assert.equal(r.checkpoint, 2.95); assert.deepEqual(r.seeks.slice(0, 2), [.25, 1]);
-          assert.equal(r.comparisonVersion, r.version === 'local-v1' ? 'local-v1' : 'mixed'); assert.equal(r.storedVersion, r.comparisonVersion);
+          assert.equal(r.comparisonVersion, r.version === 'v2.4.0' ? 'v2.4.0' : 'mixed'); assert.equal(r.storedVersion, r.comparisonVersion);
         }
         assert.deepEqual(errors, []);
       } finally { await local.close(); }
@@ -262,18 +260,18 @@ async function test(name, run) { if (process.env.PPT_TEST_FILTER && !new RegExp(
     page = await context.newPage();
     await page.goto(origin + '/capture.html'); await page.waitForFunction(() => ready);
     if (await page.locator('#terms-dialog').isVisible()) { await page.locator('#terms-agree').check(); await page.locator('#terms-accept').click(); }
-    await test('fresh precise default preserves explicit coarse modes and checkpoint settings', async () => {
-      assert.equal(await page.locator('#mode').inputValue(), '0.5');
+    await test('fresh balanced default preserves explicit sampling and checkpoint settings', async () => {
+      assert.equal(await page.locator('#mode').inputValue(), '2');
       const result = await page.evaluate(async () => {
         const make = (id, settings) => ({id, crop: {x: 0, y: 0, w: 1, h: 1}, course: {}, settings, suspects: []});
         const modes = [];
-        for (const step of [2, 8]) { activeLesson = make('mode-' + step, {step}); applyLesson(); modes.push(scanSettings().step); }
+        for (const step of [.5, 2, 8]) { activeLesson = make('mode-' + step, {step}); applyLesson(); modes.push(scanSettings().step); }
         const old = make('checkpoint'); old.task = {settings: {step: 2, threshold: 2, dedupe: false, stable: 3}, checkpoint: 12};
         activeLesson = old; lessons = [old]; applyLesson(); modes.push(scanSettings().step);
         await persistLesson();
         return {modes, checkpoint: activeLesson.task.checkpoint};
       });
-      assert.deepEqual(result, {modes: [2, 8, 2], checkpoint: 12});
+      assert.deepEqual(result, {modes: [.5, 2, 8, 2], checkpoint: 12});
     });
     // Live video frames come only from an in-memory canvas, never user media.
     await page.evaluate(async () => {

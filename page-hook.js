@@ -9,7 +9,7 @@
   function collect(value, endpoint) {
     resetPage();
     for (const url of core.extractUrls(value, document.baseURI || location.href)) if (found.size < 300) found.add(url);
-    if (globalThis.PPTCourse) {
+    if (globalThis.PPTCourse && core.isCoursePage(location.href)) {
       if (window === window.top) course = {...course, ...PPTCourse.fromResponse(value, location.href, endpoint)};
       candidates = PPTCourse.mergeCandidates(candidates, PPTCourse.mediaCandidates(value, location.href, endpoint));
     }

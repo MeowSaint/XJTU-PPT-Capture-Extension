@@ -6,7 +6,7 @@ const vm = require('node:vm');
 const Scanner = vm.runInNewContext(fs.readFileSync(require.resolve('../scanner.js'), 'utf8') + '\nPPTScanner', {
   PPTCore: {...require('../media.js'), similar: (a, b) => a === b},
 });
-test('real comparator retains one-pixel A-B-A changes with dedupe, stable and ignore controls', async () => {
+test('isolated pixel noise never creates a slide, and a large unstable transition is flagged', async () => {
   const core = require('../media.js');
   const RealScanner = vm.runInNewContext(fs.readFileSync(require.resolve('../scanner.js'), 'utf8') + '\nPPTScanner', {PPTCore: core});
   const a = new Uint8ClampedArray(82944).fill(255), b = a.slice(); b[400] = b[401] = b[402] = 0;
@@ -15,11 +15,12 @@ test('real comparator retains one-pixel A-B-A changes with dedupe, stable and ig
     const scanner = new RealScanner({duration: 3}, null);
     scanner.seek = async time => ({sig: time >= 1 && time < 2 ? b : a, sourceTime: time});
     const result = await scanner.scan(options({step: .5, dedupe, compare: (x, y, t) => core.similar(x, y, t, mask), save: async frame => saved.push(frame)}));
-    assert.deepEqual(saved.map(f => f.sourceTime), masked ? [.25] : dedupe ? [.25, 1.25] : [.25, 1.25, 2.25]);
-    assert.deepEqual(saved.map(f => f.sig[400]), masked ? [255] : dedupe ? [255, 0] : [255, 0, 255]);
+    assert.deepEqual(saved.map(f => f.sourceTime), [.25]);
+    assert.deepEqual(saved.map(f => f.sig[400]), [255]);
     assert.equal(result.unstable, 0);
   }
   const scanner = new RealScanner({duration: 1}, null), saved = [], suspects = [];
+  b.fill(0, 0, 400 * 4);
   scanner.seek = async time => ({sig: time === 0 ? a : b, sourceTime: time});
   const result = await scanner.scan(options({step: .5, save: async frame => saved.push(frame.sourceTime), suspect: async item => suspects.push(item.time)}));
   assert.equal(result.unstable, 1); assert.deepEqual(suspects, [0]); assert.deepEqual(saved, [.75]);
@@ -46,11 +47,17 @@ test('failed or cancelled final checkpoint never returns completedTo success', a
   }
 });
 
-test('default precise sampling retains a one-second A to B to A excursion', async () => {
-  const {scanner} = rangeFixture(4, time => time >= 1 && time < 2 ? 'B' : 'A');
+test('balanced default checks two-second endpoints and refines changed intervals', async () => {
+  for (const [step, expected] of [[undefined, ['A']], [.5, ['A', 'B', 'A']]]) {
+    const {scanner} = rangeFixture(4, time => time >= 1 && time < 2 ? 'B' : 'A');
+    const saved = [];
+    await scanner.scan(options({step, dedupe: false, save: async frame => saved.push(frame.sig)}));
+    assert.deepEqual(saved, expected);
+  }
+  const {scanner} = rangeFixture(4, time => time < .5 ? 'A' : time < 1.5 ? 'B' : 'C');
   const saved = [];
-  await scanner.scan(options({step: undefined, dedupe: false, save: async frame => saved.push(frame.sig)}));
-  assert.deepEqual(saved, ['A', 'B', 'A']);
+  await scanner.scan(options({step: undefined, save: async frame => saved.push(frame.sourceTime)}));
+  assert.deepEqual(saved, [.25, .75, 1.75]);
 });
 test('optional comparator masks animation in transitions, confirmations and fallback dedupe', async () => {
   const core = require('../media.js'), mask = core.ignoreMask({x: .5, y: 0, w: .5, h: 1}, 4, 2);
@@ -63,7 +70,7 @@ test('optional comparator masks animation in transitions, confirmations and fall
     }
     return {sig, sourceTime: time};
   };
-  const result = await scanner.scan(options({step: undefined,
+  const result = await scanner.scan(options({step: .5,
     compare: (a, b, threshold) => { thresholds.add(threshold); return core.similar(a, b, threshold, mask); },
     save: async frame => saved.push(frame.sourceTime)}));
   assert.equal(result.unstable, 0); assert.deepEqual(saved, [.25, 1.25]);

@@ -1249,7 +1249,7 @@ function zipEntries(bytes, {utf8 = true} = {}) {
       assert(cleared.assets.some(asset => asset.id === 99) && cleared.assets.some(asset => asset.id === 13));
       await choose(secondId); await count(2); assert.deepEqual(await ids(), [99, 13]);
       assert.equal(await page.locator('#course-name').inputValue(), course.name);
-      assert.equal(await page.locator('#mode').inputValue(), '0.5'); assert.equal(await page.locator('#dedupe').isChecked(), true);
+      assert.equal(await page.locator('#mode').inputValue(), '2'); assert.equal(await page.locator('#dedupe').isChecked(), true);
       assert.deepEqual(await page.evaluate(() => crop), full);
       await page.reload(); await count(2); assert.deepEqual(await ids(), [99, 13]);
     });
@@ -1582,7 +1582,7 @@ function zipEntries(bytes, {utf8 = true} = {}) {
       await page.locator('#tab-extraction').click(); await page.locator('#page-limit').fill('100.5');
       await page.evaluate(() => $('page-limit').onchange());
       assert.equal(await page.locator('#page-limit').inputValue(), '5000');
-      assert.deepEqual(await page.evaluate(() => ({limits: captureLimits, settings: scanSettings()})), {limits: {maxPages: 5000}, settings: {...settings, step: .5}});
+      assert.deepEqual(await page.evaluate(() => ({limits: captureLimits, settings: scanSettings()})), {limits: {maxPages: 5000}, settings});
       const failed = await page.evaluate(async () => {
         const put = IDBObjectStore.prototype.put;
         IDBObjectStore.prototype.put = function(value, key) { if (key === 'captureLimits') throw Error('synthetic limit setting write failure'); return put.apply(this, arguments); };

@@ -3,7 +3,7 @@ const test = require('node:test'), assert = require('node:assert/strict');
 const fs = require('node:fs'), vm = require('node:vm');
 global.PPTCourse = require('../course.js');
 const batch = require('../batch.js');
-const page = 'http://127.0.0.1/study-capture-courses/42/preview-detail';
+const page = 'https://rms-v5.xjtu.edu.cn/study-capture-courses/42/preview-detail';
 const rows = n => Array.from({length: n}, (_, i) => ({id: String(i + 1), capture_code: 'c' + (i + 1), status: 'FINISHED', start_time: `2026-10-${String(i + 1).padStart(2, '0')}T08:00:00+08:00`, course: {name: 'Synthetic course'}}));
 const capture = id => ({data: {lesson_videos: [{file_key: `2-${id}.mp4`, download_url: `http://127.0.0.1/2-${id}.mp4`}]}});
 const response = (value, status = 200, type = 'application/json') => ({ok: status < 400, status, headers: {get: () => type}, json: async () => value});
@@ -150,7 +150,7 @@ function contentHarness(fetchImpl, {hasConsent = async () => true, initialPage =
   const context = vm.createContext({URL, AbortController, DOMException, structuredClone, setTimeout, clearTimeout, queueMicrotask,
     setInterval(fn) { ticks.push(fn); }, performance: {now: () => 0, getEntriesByType: () => []}, location,
     document: {baseURI: initialPage, title: '资源管理平台', body: {innerText: text}, querySelector: () => null, querySelectorAll: () => []}, fetch: fetchImpl,
-    PPTCore: {mediaInfo: url => url ? {url} : null, extractUrls: payload => payload.urls || [], postLocalMessage() {}, isLocalMessage: () => false},
+    PPTCore: {isCoursePage: require('../media.js').isCoursePage, mediaInfo: url => url ? {url} : null, extractUrls: payload => payload.urls || [], postLocalMessage() {}, isLocalMessage: () => false},
     PPTState: {hasConsent},
     chrome: {runtime: {id: 'synthetic', sendMessage: async message => { messages.push(message); }, onMessage: {addListener: fn => { listener = fn; }}}}});
   context.window = context; context.top = context; context.addEventListener = (name, fn) => { events[name] = fn; };
@@ -159,6 +159,17 @@ function contentHarness(fetchImpl, {hasConsent = async () => true, initialPage =
   vm.runInContext(fs.readFileSync(require.resolve('../content.js'), 'utf8'), context);
   return {send: message => new Promise(resolve => listener(message, {}, resolve)), events, location, tick: () => ticks.forEach(fn => fn()), messages};
 }
+
+test('generic pages with course-like routes never call XJTU APIs or expose batch discovery', async () => {
+  let calls = 0;
+  const h = contentHarness(async () => { calls++; throw Error('unexpected API request'); }, {initialPage: 'https://lectures.example/study-capture-courses/42/preview-detail?courseId=42'});
+  const reply = await h.send({type: 'PPT_DISCOVER'});
+  assert.equal(calls, 0);
+  assert.deepEqual(JSON.parse(JSON.stringify(reply.course)), {name: '资源管理平台'});
+  const batchReply = await h.send({type: 'PPT_BATCH_DISCOVER'});
+  assert.equal(batchReply.ok, false);
+  assert.match(batchReply.error, /暂仅支持思源学堂/);
+});
 
 async function acquisitionVM({transport, directory = false, recordingTime = false}) {
   const base = page + (directory ? '' : '/a'), endpoint = '/api/v1/rms-service/study-capture-courses/42';
@@ -415,7 +426,7 @@ for (const navigation of ['popstate', 'hashchange']) {
     });
     try {
       await new Promise(setImmediate); assert.equal(calls.length, 1);
-      h.location.href = navigation === 'hashchange' ? 'http://127.0.0.1/#/study-capture-courses/43/preview-detail' : page.replace('/42/', '/43/');
+      h.location.href = navigation === 'hashchange' ? 'https://rms-v5.xjtu.edu.cn/#/study-capture-courses/43/preview-detail' : page.replace('/42/', '/43/');
       h.events[navigation](); h.tick(); await new Promise(setImmediate);
       assert.equal(calls.length, 2, 'the navigation event must not consume automatic fallback detection');
       assert(calls[1].path.endsWith('/43'));
