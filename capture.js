@@ -79,7 +79,7 @@ function applyLesson() {
   crop = {...(activeLesson.crop || {x: 0, y: 0, w: 1, h: 1})};
   ignoreRect = normalizedIgnore(activeLesson.ignoreRect);
   const saved = activeLesson.settings || activeLesson.task?.settings || {};
-  const settings = {step: [0.5, 2, 8].includes(saved.step) ? saved.step : 0.5,
+  const settings = {step: [0.5, 2, 8].includes(saved.step) ? saved.step : 2,
     threshold: Number.isFinite(saved.threshold) && saved.threshold >= 0.2 && saved.threshold <= 10 ? saved.threshold : 1.2,
     dedupe: typeof saved.dedupe === 'boolean' ? saved.dedupe : true,
     stable: Number.isFinite(saved.stable) && saved.stable >= 0.5 && saved.stable <= 10 ? saved.stable : 1.5};
@@ -113,7 +113,7 @@ async function bindLesson(source, detectedCourse = sourceCourse, signal) {
   if (!lesson) {
     // A course-level form is not a manual override for a newly selected batch lesson.
     const manual = !source.batchJobId && !activeLesson && namingManual && namingPage === (source.page || '');
-    next = {id: crypto.randomUUID(), course: PPTCourse.forBinding(detected, namingInfo(), {manual, sameSource: manual}), page: source.page || '', source, crop: {x: 0,y: 0,w: 1,h: 1}, settings: {...scanSettings(), step: 0.5}, suspects: [], created: Date.now(), namingManual: manual};
+    next = {id: crypto.randomUUID(), course: PPTCourse.forBinding(detected, namingInfo(), {manual, sameSource: manual}), page: source.page || '', source, crop: {x: 0,y: 0,w: 1,h: 1}, settings: {...scanSettings(), step: 2}, suspects: [], created: Date.now(), namingManual: manual};
   } else {
     const course = PPTCourse.forBinding(detected, lesson.course, {manual: lesson.namingManual, sameSource: true});
     next = {...lesson, course, source: {...lesson.source, ...source}, ...(changedChannel ? {crop: {x: 0,y: 0,w: 1,h: 1}, ignoreRect: null, task: null, suspects: []} : {})};
@@ -345,8 +345,12 @@ settingTabs.forEach((tab, index) => {
     event.preventDefault(); activateTab(settingTabs[next].id, true);
   };
 });
+function singleFilename(info, page) {
+  const genericPage = PPTCore.isWebPage(page) && !PPTCore.isCoursePage(page);
+  return PPTCourse.filename(info) || (genericPage && info.name ? info.name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_') + '.pdf' : '');
+}
 function previewName() {
-  const name = PPTCourse.filename(namingInfo());
+  const name = singleFilename(namingInfo(), activeLesson?.page || namingPage || coursePage);
   $('filename-preview').textContent = name ? `下载文件名：${name}` : '填好课程名称、上课日期和开始时间后，这里会显示导出文件名。';
   syncWorkspace();
 }
@@ -611,7 +615,7 @@ async function nextSimilar(review) {
       if (sameTimeline(a, b) && Number.isFinite(a.sourceTime) && Number.isFinite(b.sourceTime) && a.sourceTime < b.sourceTime && a.w === b.w && a.h === b.h) {
         const [first, second] = await PPTPageStore.assets(db, [a.id, b.id]);
         if (similarReview !== review) return;
-        if (validSignature({...a, sig: first?.sig}) && validSignature({...b, sig: second?.sig}) && PPTCore.similar(first.sig, second.sig, review.threshold, comparisonMask(a.signatureCrop, b.signatureCrop))) {
+        if (validSignature({...a, sig: first?.sig}) && validSignature({...b, sig: second?.sig}) && PPTCore.similarForReview(first.sig, second.sig, review.threshold, comparisonMask(a.signatureCrop, b.signatureCrop))) {
           if (!first.image || !second.image) throw Error('候选截图不可用，请重新提取');
           review.pair = [a, b]; review.found = true;
           for (const [index, side] of ['earlier', 'later'].entries()) {
@@ -697,7 +701,7 @@ async function findLearningSuggestions(review) {
       if (validSignature({...page, sig})) {
         if (previous && sameTimeline(previous.page, page) && previous.page.w === page.w && previous.page.h === page.h
           && Number.isFinite(previous.page.sourceTime) && Number.isFinite(page.sourceTime) && previous.page.sourceTime < page.sourceTime
-          && PPTCore.similar(previous.sig, sig, review.threshold, comparisonMask(previous.page.signatureCrop, page.signatureCrop, review.crop, review.mask))) {
+          && PPTCore.similarForReview(previous.sig, sig, review.threshold, comparisonMask(previous.page.signatureCrop, page.signatureCrop, review.crop, review.mask))) {
           found.push({type: 'adjacent', ids: [previous.page.id, page.id], reason: '相邻近似页：请对照两张截图，核对是否有新增内容。'});
         }
         if (lowChangeSignature(sig, mask)) found.push({type: 'low-change', ids: [page.id], reason: '低变化画面：大部分像素接近画面均值，请查看内容。'});
@@ -919,7 +923,8 @@ function controls() {
   });
   $('end').disabled = !stream || active;
   $('release-cache').disabled = active || !(sourceReady || objectURL || hls || stream || videoCache);
-  $('batch-discover').disabled = active;
+  $('source-authorize').disabled = active || !PPTCore.isWebPage(coursePage);
+  $('batch-discover').disabled = active || !PPTCore.isCoursePage(coursePage);
   $('batch-discover').textContent = batchDiscovery ? '正在读取课次…' : '读取课程课次';
   $('batch-retry').disabled = active || !batchJobs.some(job => job.discovery?.state === 'error');
   $('batch-select').disabled = active || !batchJobs.length;
@@ -1442,6 +1447,7 @@ async function inspectPlaylist(url, signal, visited = new Set(), depth = 0, orig
   if (!response.ok) throw Error(`播放列表返回 HTTP ${response.status}，请重新捕获视频地址`);
   const text = await response.text();
   if (!text.trimStart().startsWith('#EXTM3U')) throw Error('该地址不是 HLS 播放列表，可能已过期或需要登录');
+  if (text.split(/\r?\n/).some(line => /^#EXT-X-(?:SESSION-)?KEY:/.test(line) && !/(?:^|[:,])METHOD=NONE(?:,|$)/.test(line))) throw Error('当前仅支持未加密的点播 HLS；可使用实时共享画面随播放截取');
   if (!/#EXT-X-ENDLIST/.test(text) && !/#EXT-X-STREAM-INF/.test(text)) throw Error('检测到直播流；快速提取需要已录制完成、可跳转的视频');
   const children = [];
   for (const line of text.split(/\r?\n/)) {
@@ -1599,7 +1605,7 @@ async function exportRetained(kind, selected = false) {
   if (busy()) return;
   const reviewPages = structuredClone(pages), lesson = structuredClone(activeLesson), view = exportView;
   const requested = reviewPages.filter(page => !selected || selectedPages.has(page.id));
-  const list = learningRange(requested, lesson, reviewPages, view), name = PPTCourse.filename(namingInfo());
+  const list = learningRange(requested, lesson, reviewPages, view), name = singleFilename(namingInfo(), lesson?.page);
   if (!list.length) { status('当前导出范围没有保留页。'); return; }
   const options = pdfOptions();
   exportBusy = true; controls();
@@ -1737,7 +1743,7 @@ async function fastScan({restart = false, range = null} = {}) {
   if (!range) {
     const coverage = resume && activeLesson.task.coverage ? structuredClone(activeLesson.task.coverage)
       : {version: 1, sourceKey: PPTLibrary.key(activeLesson.source), trackKey: PPTBatch.trackKey(activeLesson.source), duration: video.duration, ranges: [], reachedEnd: false};
-    const comparisonVersion = resume && activeLesson.task.comparisonVersion !== 'local-v1' ? 'mixed' : 'local-v1';
+    const comparisonVersion = resume && activeLesson.task.comparisonVersion !== 'v2.4.0' ? 'mixed' : 'v2.4.0';
     activeLesson.task = {id: scanId, state: 'running', checkpoint: start, baselineTime, duration: video.duration, settings, crop: {...crop}, ignoreRect: ignoreRect && {...ignoreRect}, coverage, comparisonVersion};
   }
   let coveredTo = start;
@@ -2013,6 +2019,7 @@ async function applyDiscovery(session, result) {
 }
 async function discoverBatch(tabId = Number($('course').value), automatic = false, retryOnly = false) {
   if (busy() || !tabId) return;
+  if (!PPTCore.isCoursePage(coursePage)) { $('batch-status').textContent = '当前网站支持单视频提取；整课目录暂仅支持思源学堂。'; return; }
   const serial = ++batchDiscoverySerial, selected = $('course').value, lessonId = activeLesson?.id;
   const session = {tabId, page: coursePage, retryOnly, previousDiscovery: structuredClone(savedBatches.find(item => item.page === coursePage)?.discovery), controller: new AbortController(), requestId: '', stopRequested: false};
   session.current = () => batchDiscovery === session && serial === batchDiscoverySerial && $('course').value === selected && activeLesson?.id === lessonId && coursePage === session.page;
@@ -2226,12 +2233,22 @@ async function discover() {
   const revision = ++discoverySerial;
   try {
     const selected = $('course').value || new URLSearchParams(location.search).get('tab');
-    const tabs = await chrome.tabs.query({url: 'https://rms-v5.xjtu.edu.cn/*'});
+    // Without the tabs permission, Chrome only exposes URLs for activeTab or
+    // explicitly granted hosts. Keep the toolbar's source tab selected.
+    const tabs = (await chrome.tabs.query({})).filter(tab => PPTCore.isWebPage(tab.url));
     if (revision !== discoverySerial) return;
     $('course').replaceChildren();
     for (const tab of tabs) { const option = document.createElement('option'); option.value = String(tab.id); option.textContent = tab.title || tab.url; $('course').append(option); }
     if (tabs.some(t => String(t.id) === selected)) $('course').value = selected;
-    if (!tabs.length) { coursePage = ''; acceptCourse({}, ''); sources = []; updateSources(); $('source-status').textContent = '未找到课程标签页，请先在此浏览器打开课程网站并登录。'; return; }
+    if (!tabs.length || (selected && !tabs.some(tab => String(tab.id) === selected))) {
+      if (selected) {
+        const missing = document.createElement('option'); missing.value = selected; missing.textContent = '原来源页不可访问，请回视频页重新点击扩展';
+        $('course').prepend(missing); $('course').value = selected;
+      }
+      if (sourceReady) await releaseSource();
+      coursePage = ''; acceptCourse({}, ''); sources = []; updateSources(true);
+      $('source-status').textContent = '来源页已关闭或访问权限已失效。请回到视频页重新点击扩展图标；也可以导入本地视频。'; return;
+    }
     const id = Number($('course').value), nextPage = tabs.find(t => t.id === id)?.url || '';
     if (coursePage !== nextPage) { invalidateUndo(); updateSelection(); }
     // A previously loaded video belongs to the old course, not the new selector.
@@ -2240,12 +2257,22 @@ async function discover() {
     coursePage = nextPage;
     if (batchPage && batchPage !== coursePage) { batchPage = ''; batchJobs = []; renderBatchJobs(); }
     acceptCourse({}, coursePage);
-    await chrome.scripting.executeScript({target: {tabId: id, allFrames: true}, world: 'MAIN', files: ['media.js', 'course.js', 'page-hook.js']}).catch(() => {});
-    await chrome.scripting.executeScript({target: {tabId: id, allFrames: true}, files: ['media.js', 'course.js', 'batch.js', 'extension-state.js', 'content.js']}).catch(() => {});
+    let injectionError = '';
+    try {
+      await chrome.scripting.executeScript({target: {tabId: id, allFrames: true}, world: 'MAIN', files: ['media.js', 'course.js', 'page-hook.js']});
+      await chrome.scripting.executeScript({target: {tabId: id, allFrames: true}, files: ['media.js', 'course.js', 'batch.js', 'extension-state.js', 'content.js']});
+    } catch (error) { injectionError = error.message; }
+    // Collect accessible child frames directly; the top frame cannot see their DOM.
+    const frameReplies = await chrome.scripting.executeScript({target: {tabId: id, allFrames: true},
+      func: async () => typeof window.__pptContentCollector === 'function' ? await window.__pptContentCollector() : null
+    }).catch(() => []);
     let discovered = await chrome.tabs.sendMessage(id, {type: 'PPT_DISCOVER'}, {frameId: 0}).catch(() => null);
     const courseReply = await chrome.tabs.sendMessage(id, {type: 'PPT_COURSE'}, {frameId: 0}).catch(() => null);
     let mediaReply = await chrome.tabs.sendMessage(id, {type: 'PPT_GET_MEDIA'}, {frameId: 0}).catch(() => null);
     if (revision !== discoverySerial) return;
+    const currentTab = await chrome.tabs.get(id).catch(() => null);
+    if (revision !== discoverySerial) return;
+    if (currentTab?.url !== coursePage) { sources = []; updateSources(true); $('source-status').textContent = '来源页已切换，请刷新视频列表；跨站切换后请重新点击扩展图标。'; return; }
     const key = 'media-' + id, tabUrl = tabs.find(t => t.id === id)?.url;
     let entry = (await chrome.storage.session.get(key))[key];
     if (revision !== discoverySerial) return;
@@ -2274,20 +2301,26 @@ async function discover() {
         if (info && !combined.has(info.url)) combined.set(info.url, {...info, source: '页面 / 播放器', seen: Date.now()});
       }
     }
+    for (const {result} of frameReplies) {
+      for (const raw of Array.isArray(result?.urls) ? result.urls : []) {
+        const info = PPTCore.mediaInfo(raw, coursePage);
+        if (info && !combined.has(info.url)) combined.set(info.url, {...info, source: '页面 / 内嵌播放器', seen: Date.now()});
+      }
+    }
     sources = [...combined.values()];
     if (entry?.page === coursePage) acceptCourse(entry.course, coursePage);
     if (mediaReply?.page === coursePage) acceptCourse(mediaReply.course, coursePage);
     if (courseReply?.page === coursePage) acceptCourse(courseReply.course, coursePage);
     if (discovered?.page === coursePage) acceptCourse(discovered.course, coursePage);
     updateSources(true);
-    if (PPTBatch.courseId(coursePage) && batchPage !== coursePage) await discoverBatch(id, true);
-    $('source-status').textContent = sourceSummary();
+    if (PPTCore.isCoursePage(coursePage) && PPTBatch.courseId(coursePage) && batchPage !== coursePage) await discoverBatch(id, true);
+    $('source-status').textContent = injectionError && !sources.length ? '无法读取来源页，请点“授权来源页并刷新”，或回到视频页重新点击扩展图标。' : sourceSummary();
   } catch (e) { $('source-status').textContent = '发现视频失败：' + e.message + '。请刷新课程页，或使用手动地址 / 本地视频。'; }
 }
 function sourceSummary() {
   const context = sourceCoursePage === coursePage && sourceCourse.name ? `${lessonLabel({course: sourceCourse})} · ` : '';
   if (batchPage === coursePage && batchJobs.length) return `${context}批量目录 ${batchJobs.length} 节。单节视频候选 ${sources.length} 个，可在批量列表选择课次。`;
-  return context + (sources.length ? `已发现 ${sources.length} 个视频地址，选好后点击“加载选中视频”。` : '当前课次暂无单节视频候选。可刷新课程页并播放一次，再点“刷新视频列表”。');
+  return context + (sources.length ? `已发现 ${sources.length} 个视频地址，选好后点击“加载选中视频”。` : '暂未发现可读取的视频地址。请在来源页播放几秒再刷新列表；仍无结果时，可用“实时共享画面”随播放截取。');
 }
 function updateSources(reset = false) {
   sources = sources.map(item => ({...item, ...(sourceCandidates.find(candidate => candidate.url === item.url) || {}),
@@ -2296,6 +2329,14 @@ function updateSources(reset = false) {
   controls();
 }
 $('discover').onclick = discover; $('course').onchange = discover; $('sources').onchange = controls;
+$('source-authorize').onclick = () => {
+  if (busy() || !PPTCore.isWebPage(coursePage)) return;
+  // Request from the click turn, before awaiting, to retain the user gesture.
+  chrome.permissions.request({origins: [originPattern(coursePage)]}).then(granted => {
+    if (granted) return discover();
+    $('source-status').textContent = '未授予来源页权限。可回视频页点击扩展临时读取，或导入本地视频。';
+  }).catch(error => { $('source-status').textContent = '来源页授权未完成：' + error.message; });
+};
 $('page-limit').onchange = async () => {
   const next = {maxPages: PPTLibrary.pageLimit(Number($('page-limit').value))};
   $('page-limit').value = next.maxPages;

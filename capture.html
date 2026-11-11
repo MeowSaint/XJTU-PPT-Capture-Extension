@@ -14,7 +14,7 @@
       <div class="brand-block">
         <img class="app-mark" src="icons/icon-32.png" width="28" height="28" alt="">
         <h1>课程 PPT 截取</h1>
-        <span class="version">3.1.4</span>
+        <span class="version">3.2.0</span>
       </div>
       <p id="current-lesson" class="current-lesson">当前整理 · 尚未选择课次</p>
       <div class="header-tools">
@@ -47,16 +47,17 @@
             <button id="discover" class="button-quiet" type="button">刷新视频列表</button>
           </div>
           <label class="field-stack" for="course">
-            <span>课程标签页</span>
+            <span>来源标签页</span>
             <select id="course"></select>
           </label>
+          <button id="source-authorize" class="button-quiet" type="button" disabled>授权来源页并刷新</button>
           <label class="field-stack" for="sources">
             <span>已发现视频</span>
             <select id="sources"><option value="">等待发现视频</option></select>
           </label>
           <div class="selected-source" aria-live="polite">
             <p id="selected-source-name">尚未选择视频</p>
-            <p id="source-track-hint" class="note">选 2 路 PPT 视频；只有 0 路时，加载后先框选 PPT 区域。</p>
+            <p id="source-track-hint" class="note">加载后确认 PPT 画面，再开始提取。</p>
           </div>
           <div class="preflight-tools">
             <label class="check"><input id="source-show-all" type="checkbox"><span>显示无效地址</span></label>
@@ -64,7 +65,7 @@
           </div>
           <p id="preflight-status" class="note" role="status" aria-live="polite">发现视频后自动检测可用地址。</p>
           <button id="load" class="source-load" type="button" disabled>加载选中视频</button>
-          <p id="source-status" class="status-line">从课程页点扩展图标可自动找视频，也可以直接导入本地视频。</p>
+          <p id="source-status" class="status-line">从视频页点扩展图标可自动找视频，也可以直接导入本地视频。</p>
           <label class="field-stack local-file">
             <span>本地视频</span>
             <input id="file" type="file" accept="video/*,.mp4,.m4v,.webm,.mov">
@@ -95,7 +96,7 @@
             <details class="drawer help-drawer">
               <summary>使用说明</summary>
               <div class="drawer-body">
-                <p class="note">1. 在思源学堂打开课程并播放几秒，回这里点“刷新视频列表”。2. 选 2- 开头的 PPT 视频（或 0- 视频后框选 PPT 区域），点“开始快速提取”。3. 在截图区删掉多余页面、排好顺序，按本节全部或所选范围导出 PDF 或图片包。</p>
+                <p class="note">1. 在视频页播放几秒，点击扩展图标。2. 选择并加载视频，确认预览或框选 PPT 区域，开始快速提取。思源学堂可优先查看 2- 开头的视频。3. 校对截图后导出 PDF 或图片包。没有可读取的地址时，可使用实时共享画面。</p>
               </div>
             </details>
           </div>
@@ -106,9 +107,9 @@
           <label class="field-stack">
             <span>采样模式</span>
             <select id="mode">
-              <option value="0.5" selected>精细 · 每 0.5 秒（推荐）</option>
-              <option value="2">粗采样 · 每 2 秒</option>
-              <option value="8">粗采样 · 每 8 秒</option>
+              <option value="2" selected>均衡 · 每 2 秒</option>
+              <option value="0.5">细查 · 每 0.5 秒</option>
+              <option value="8">快速 · 每 8 秒</option>
             </select>
           </label>
           <label class="field-inline spaced-field">
@@ -212,7 +213,7 @@
               <button id="crop-select" type="button" aria-pressed="false" disabled>框选 PPT 区域</button>
               <button id="full" class="button-quiet" type="button" disabled>使用完整画面</button>
             </div>
-            <p class="note">2 路通常为 PPT 机位；0 路先确认截取区域，再开始提取。</p>
+            <p id="frame-source-hint" class="note">先确认视频中的 PPT 画面，必要时框选截取区域。</p>
             <div class="secondary-actions" role="group" aria-label="补页与重新提取">
               <button id="shot" type="button" disabled>保存当前页</button>
               <button id="restart-scan" class="button-quiet" type="button" disabled hidden>从头重扫</button>
@@ -358,7 +359,7 @@
     <h2 id="terms-title">课程资料使用约定</h2>
     <div class="dialog-copy">
       <p>这个小工具用来帮大家整理课堂笔记和考前复习，使用时也请尊重授课老师的劳动成果：</p>
-      <p>1. 请用本人账号登录思源学堂，只整理自己选修或有权观看的课程。</p>
+      <p>1. 请用本人账号登录课程网站，只整理自己选修或有权观看的课程。</p>
       <p>2. 课程视频与课件归授课教师及相关权利人所有，<strong>提取出的课件、截图和 PDF 严禁用于商业用途</strong>。</p>
       <p>项目代码按 <a href="https://github.com/MeowSaint/XJTU-PPT-Capture-Extension/blob/main/LICENSE" target="_blank" rel="noopener noreferrer">MIT 许可证</a>开源。祝学习顺利！</p>
     </div>
@@ -371,7 +372,7 @@
   </dialog>
   <dialog id="update-dialog" class="workspace-dialog" aria-labelledby="update-title" aria-describedby="update-status">
     <h2 id="update-title">扩展更新</h2>
-    <p>当前版本 <span id="update-current">3.1.4</span><span id="update-available" hidden> · 新版本 <strong id="update-version"></strong></span></p>
+    <p>当前版本 <span id="update-current">3.2.0</span><span id="update-available" hidden> · 新版本 <strong id="update-version"></strong></span></p>
     <p id="update-status" class="note" role="status" aria-live="polite"></p>
     <div class="dialog-actions">
       <a id="update-release" target="_blank" rel="noopener noreferrer" hidden>查看更新</a>

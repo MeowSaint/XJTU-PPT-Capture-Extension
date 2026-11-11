@@ -1,14 +1,15 @@
 {
   "name": "xjtu-ppt-capture-extension",
-  "version": "3.1.4",
+  "version": "3.2.0",
   "license": "MIT",
   "private": true,
-  "description": "Browser extension for capturing slides from XJTU lecture videos and exporting PDFs or image archives.",
+  "description": "Browser extension for capturing slides from web videos, with XJTU course batch support and PDF or image export.",
   "scripts": {
     "test": "node --test tests/discovery.test.cjs tests/core.test.cjs tests/course.test.cjs tests/scanner.test.cjs tests/export.test.cjs tests/preflight.test.cjs tests/extension-state.test.cjs tests/disk-cache.test.cjs tests/library.test.cjs tests/mp4-recovery.test.cjs",
     "release": "node scripts/release.cjs",
     "test:release": "node --test tests/release.test.cjs",
     "test:bridge": "node tests/bridge.cjs",
+    "test:generic": "node tests/generic.cjs",
     "test:integration": "node tests/integration.cjs",
     "test:review": "node tests/review.cjs",
     "test:features": "node tests/features.cjs",

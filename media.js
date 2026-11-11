@@ -3,6 +3,12 @@
   'use strict';
   const MEDIA_EXT = /\.(mp4|m4v|webm|mov|m3u8|mpd)$/i;
   const QUERY_KEYS = ['filename', 'file', 'name', 'path', 'url', 'response-content-disposition', 'key', 'file_key', 'download_url', 'video_url', 'src'];
+  function isWebPage(raw) {
+    try { const url = new URL(raw); return /^https?:$/.test(url.protocol) && !url.username && !url.password; } catch { return false; }
+  }
+  function isCoursePage(raw) {
+    try { return new URL(raw).origin === 'https://rms-v5.xjtu.edu.cn'; } catch { return false; }
+  }
   function decodePart(value) {
     let text = String(value || '');
     for (let i = 0; i < 2; i++) {
@@ -80,10 +86,10 @@
     for (let row = top; row < bottom; row++) mask.fill(1, row * width + left, row * width + right);
     return mask;
   }
-  function comparisonMetrics(a, b, mask) {
+  function comparisonMetrics(a, b, mask, checkDetails = false) {
     if (!a || !b || !a.length || a.length % 4 || a.length !== b.length || (mask && mask.length !== a.length / 4)) return {changed: 100, mean: 100, local: true};
     let total = 0, changed = 0, biasR = 0, biasG = 0, biasB = 0, pixels = 0, local = false;
-    const canonical = a.length === 192 * 108 * 4;
+    const checkLocal = checkDetails && a.length === 192 * 108 * 4;
     for (let i = 0; i < a.length; i += 4) {
       if (mask?.[i / 4]) continue;
       pixels++; biasR += a[i] - b[i]; biasG += a[i + 1] - b[i + 1]; biasB += a[i + 2] - b[i + 2];
@@ -99,7 +105,7 @@
       const maximum = Math.max(dr, dg, db);
       if (maximum >= 24) changed++;
       // A single strong pixel can be a small glyph; this deliberately also retains noise.
-      if (canonical && maximum >= 48) local = true;
+      if (checkLocal && maximum >= 48) local = true;
     }
     return {changed: changed * 100 / pixels, mean: total * 100 / (pixels * 765), local};
   }
@@ -108,11 +114,19 @@
     return {changed, mean};
   }
   function hasLocalChange(a, b, mask = null) {
-    return comparisonMetrics(a, b, mask).local;
+    return comparisonMetrics(a, b, mask, true).local;
   }
+  function withinThresholds(distance, threshold) {
+    return distance.changed < threshold && distance.mean < Math.max(0.25, threshold / 2);
+  }
+  // v2.4.0 page detection uses the two whole-frame thresholds.
   function similar(a, b, threshold = 1.2, mask = null) {
-    const d = comparisonMetrics(a, b, mask);
-    return !d.local && d.changed < threshold && d.mean < Math.max(0.25, threshold / 2);
+    return withinThresholds(comparisonMetrics(a, b, mask), threshold);
+  }
+  // Protect small annotations when suggesting removal of already-saved pages.
+  function similarForReview(a, b, threshold = 1.2, mask = null) {
+    const distance = comparisonMetrics(a, b, mask, true);
+    return !distance.local && withinThresholds(distance, threshold);
   }
   function sampleTimes(duration, step, start = 0) {
     const end = Math.max(0, duration - Math.min(0.05, duration / 2));
@@ -150,7 +164,7 @@
     const error = Error(`${phase === 'seek' ? '跳转' : '加载'}${source}${position}：${detail}${audioOmitted ? '本次已忽略音轨，此处理不代表已确诊原文件的故障原因。' : ''}`);
     return Object.assign(error, {code, phase, nativeCode, time: Number.isFinite(time) ? time : null});
   }
-  const api = {mediaError, mediaInfo, extractUrls, ignoreMask, frameDistance, hasLocalChange, similar, sampleTimes, postLocalMessage, isLocalMessage};
+  const api = {isWebPage, isCoursePage, mediaError, mediaInfo, extractUrls, ignoreMask, frameDistance, hasLocalChange, similar, similarForReview, sampleTimes, postLocalMessage, isLocalMessage};
   root.PPTCore = api;
   if (typeof module !== 'undefined') module.exports = api;
 })(globalThis);

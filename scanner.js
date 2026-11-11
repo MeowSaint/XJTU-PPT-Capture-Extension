@@ -128,7 +128,7 @@ class PPTScanner {
     if (framed) state.proof = reuse ? previous : {time, nativeTime: v.currentTime, source, counts: PPTScanner.quality(v)};
     return this.capture(time);
   }
-  async scan({step = 0.5, threshold, dedupe, signal, save, progress, previous = [], isDuplicate, compare = PPTCore.similar,
+  async scan({step = 2, threshold, dedupe, signal, save, progress, previous = [], isDuplicate, compare = PPTCore.similar,
     start = 0, end = this.video.duration, baselineTime = null, checkpoint = async () => {}, suspect = async () => {}}) {
     const duration = this.video.duration;
     if (!(duration > 0) || !Number.isFinite(duration) || !(step > 0) || !Number.isFinite(step) || duration + step === duration) throw Error('视频时长或采样间隔无效');

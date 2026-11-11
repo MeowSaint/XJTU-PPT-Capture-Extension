@@ -1,5 +1,4 @@
 importScripts('media.js', 'course.js', 'extension-state.js');
-const courseOrigin = 'https://rms-v5.xjtu.edu.cn';
 let queue = Promise.resolve(), updateQueue = Promise.resolve();
 async function updateBadge(tabId, count) {
   const update = (method, details) => new Promise(resolve => {
@@ -26,7 +25,7 @@ function clearTab(tabId) {
 function remember(tabId, urls, source, metadata, page) {
   queue = queue.catch(() => {}).then(async () => {
     const tab = await chrome.tabs.get(tabId).catch(() => null);
-    if (!tab?.url?.startsWith(courseOrigin + '/')) return;
+    if (!PPTCore.isWebPage(tab?.url)) return;
     if (page && page !== tab.url) return;
     const key = 'media-' + tabId;
     const old = (await chrome.storage.session.get(key))[key];
@@ -47,7 +46,15 @@ function remember(tabId, urls, source, metadata, page) {
   return queue;
 }
 chrome.action.onClicked.addListener(async tab => {
-  const suffix = tab.url?.startsWith(courseOrigin + '/') ? '?tab=' + tab.id : '';
+  const supported = PPTCore.isWebPage(tab.url);
+  // The toolbar click grants activeTab for this page; no all-sites access is needed.
+  if (supported) {
+    try {
+      await chrome.scripting.executeScript({target: {tabId: tab.id, allFrames: true}, world: 'MAIN', files: ['media.js', 'course.js', 'page-hook.js']});
+      await chrome.scripting.executeScript({target: {tabId: tab.id, allFrames: true}, files: ['media.js', 'course.js', 'batch.js', 'extension-state.js', 'content.js']});
+    } catch { /* Restricted pages still open the tool with manual import available. */ }
+  }
+  const suffix = supported ? '?tab=' + tab.id : '';
   await chrome.tabs.create({url: chrome.runtime.getURL('capture.html') + suffix});
 });
 chrome.webRequest.onBeforeRequest.addListener(details => {
@@ -63,14 +70,14 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     return true;
   }
   if (message.type === 'PPT_COURSE') {
-    if (!sender.tab || sender.frameId !== 0 || sender.url !== message.page || !sender.url?.startsWith(courseOrigin + '/')) return;
+    if (!sender.tab || sender.frameId !== 0 || sender.url !== message.page || !PPTCore.isWebPage(sender.url)) return;
     remember(sender.tab.id, [], '', message.course, message.page).then(() => respond({ok: true}), () => respond({ok: false}));
     return true;
   }
-  const courseFrame = sender.url?.startsWith(courseOrigin + '/') || /^about:(blank|srcdoc)$/.test(sender.url || '');
-  // remember() independently checks the current top-level course URL.
+  const courseFrame = PPTCore.isWebPage(sender.url) || /^about:(blank|srcdoc)$/.test(sender.url || '');
+  // remember() independently checks the current top-level page URL.
   if (message.type !== 'PPT_MEDIA' || !sender.tab || !courseFrame) return;
-  remember(sender.tab.id, Array.isArray(message.urls) ? message.urls.filter(x => typeof x === 'string') : [], '页面 / 播放器')
+  remember(sender.tab.id, Array.isArray(message.urls) ? message.urls.filter(x => typeof x === 'string') : [], '页面 / 播放器', null, sender.frameId === 0 ? message.page : null)
     .then(() => respond({ok: true}), () => respond({ok: false}));
   return true;
 });

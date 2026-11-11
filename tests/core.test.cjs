@@ -88,14 +88,15 @@ test('message bridge handles inherited and opaque origins, rejecting other windo
   assert.equal(core.isLocalMessage({source: {}, origin: 'null'}, frame), false);
   assert.equal(core.isLocalMessage({source: frame, origin: 'https://other.example'}, frame), false);
 });
-test('single strong pixels, formula and annotation changes defeat the old global thresholds', () => {
+test('extraction merges minor formula and annotation changes; manual review protects them', () => {
   const a = new Uint8ClampedArray(82944).fill(255);
   for (const [label, count, channels] of [['superscript', 2, 3], ['subscript', 1, 3], ['single digit', 1, 3], ['formula', 48, 3], ['annotation', 8, 1]]) {
     const b = a.slice();
     for (let p = 0; p < count; p++) for (let c = 0; c < channels; c++) b[p * 4 + c] = 0;
     const d = core.frameDistance(a, b);
     assert(d.changed < 1.2 && d.mean < .6, label + ' passes the old global rule');
-    assert.equal(core.similar(a, b), false, label);
+    assert.equal(core.similar(a, b), true, label);
+    assert.equal(core.similarForReview(a, b), false, label);
     assert.equal(core.hasLocalChange(a, b), true, label);
   }
 });
@@ -108,14 +109,15 @@ test('local protection uses exact floating bias, RGB maximum, edges and per-pixe
       b[((p + 1) % mask.length) * 4 + channel] -= 24;
       b[((p + 2) % mask.length) * 4 + channel] -= delta - 24;
       assert.equal(core.hasLocalChange(a, b), delta === 48, `${p}/${channel}/${delta}`);
-      assert.equal(core.similar(a, b), delta === 47);
+      assert.equal(core.similar(a, b), true);
+      assert.equal(core.similarForReview(a, b), delta === 47);
     }
     const b = a.slice(); b[p * 4 + channel] += 48;
     assert.equal(core.hasLocalChange(a, b), false, 'raw 48 falls below 48 after fractional bias');
     b[p * 4 + channel] = 255; mask.fill(0); mask[p] = 1;
-    assert.equal(core.similar(a, b, 1.2, mask), true, 'fully masked single pixel');
+    assert.equal(core.similarForReview(a, b, 1.2, mask), true, 'fully masked single pixel');
     b[((p + 1) % mask.length) * 4 + channel] = 255;
-    assert.equal(core.similar(a, b, 1.2, mask), false, 'partially masked change');
+    assert.equal(core.similarForReview(a, b, 1.2, mask), false, 'partially masked change');
   }
   for (const delta of [-8, 0, 8]) {
     const b = a.map((value, index) => index % 4 === 3 ? value : value + delta);
@@ -141,10 +143,10 @@ test('local protection uses exact floating bias, RGB maximum, edges and per-pixe
   assert.equal(core.similar(legacyA, legacyB), true, 'noncanonical lengths retain global-only logic');
   assert.equal(core.hasLocalChange(legacyA, legacyB), false);
 });
-test('small but substantive text changes are retained alongside brightness controls', () => {
+test('v2.4.0 detection tolerates isolated pixels and slight brightness changes but keeps larger edits', () => {
   const pixels = 192 * 108, a = new Uint8ClampedArray(pixels * 4).fill(255), b = a.slice();
   for (let i = 0; i < 8; i++) b[i * 4] = 0;
-  assert.equal(core.similar(a, b), false);
+  assert.equal(core.similar(a, b), true);
   b.set(a); for (let i = 0; i < b.length; i += 4) b[i] = b[i + 1] = b[i + 2] = 249;
   assert.equal(core.similar(a, b), true);
   for (let i = 0; i < 400; i++) b[i * 4] = b[i * 4 + 1] = b[i * 4 + 2] = 0;
@@ -163,13 +165,15 @@ function backgroundHarness() {
     });
   };
   const chrome = {
-    runtime: {onMessage: {addListener: fn => { listeners.message = fn; }}},
+    runtime: {getURL: file => 'chrome-extension://fixture/' + file, onMessage: {addListener: fn => { listeners.message = fn; }}},
     tabs: {
       get: async () => tab,
+      create: async details => { state.createdTab = details; },
       onRemoved: {addListener: fn => { listeners.removed = fn; }},
       onUpdated: {addListener: fn => { listeners.updated = fn; }}
     },
-    action: {onClicked: {addListener() {}}, setBadgeText: badge('text'), setBadgeBackgroundColor: badge('color')},
+    scripting: {executeScript: async details => { (state.injections ||= []).push(details); return []; }},
+    action: {onClicked: {addListener: fn => { listeners.clicked = fn; }}, setBadgeText: badge('text'), setBadgeBackgroundColor: badge('color')},
     webRequest: {onBeforeRequest: {addListener: fn => { listeners.request = fn; }}},
     storage: {session: {
       get: async k => ({[k]: storage[k]}),
@@ -192,6 +196,33 @@ test('simultaneous background discoveries survive; session cache is page-specifi
   assert.equal(storage['media-42'].items.length, 3);
   tab.url = 'https://rms-v5.xjtu.edu.cn/course/B'; await send('https://cdn.example/B_2.mp4');
   assert.equal(storage['media-42'].items.length, 1); assert.equal(storage['media-42'].items[0].name, 'B_2.mp4');
+});
+
+test('generic toolbar entry retains its tab and injects collectors; restricted pages open manual import', async () => {
+  const {listeners, state} = backgroundHarness();
+  await listeners.clicked({id: 17, url: 'https://lectures.example/watch?v=1'});
+  assert.equal(state.createdTab.url, 'chrome-extension://fixture/capture.html?tab=17');
+  assert.equal(state.injections.length, 2);
+  assert(state.injections.every(call => call.target.tabId === 17 && call.target.allFrames));
+  assert.equal(state.injections[0].world, 'MAIN');
+  await listeners.clicked({id: 18, url: 'chrome://extensions/'});
+  assert.equal(state.createdTab.url, 'chrome-extension://fixture/capture.html');
+  assert.equal(state.injections.length, 2);
+});
+
+test('generic background sources stay scoped to the current page and reject stale top-frame reports', async () => {
+  const {tab, storage, send, listeners} = backgroundHarness();
+  tab.url = 'https://lectures.example/watch?courseId=42';
+  await send('https://cdn.example/lesson.webm');
+  assert.equal(storage['media-42'].page, tab.url);
+  tab.url = 'https://lectures.example/next';
+  await new Promise(resolve => listeners.message({type: 'PPT_MEDIA', urls: ['https://cdn.example/stale.mp4'], page: 'https://lectures.example/watch?courseId=42'}, {tab: {id: 42}, url: tab.url, frameId: 0}, resolve));
+  assert.equal(storage['media-42'].items.length, 1);
+  await send('https://cdn.example/next.mp4');
+  assert.deepEqual(Array.from(storage['media-42'].items, item => item.name), ['next.mp4']);
+  assert.equal(core.isCoursePage('https://lectures.example/watch?courseId=42'), false);
+  assert.equal(core.isCoursePage('https://rms-v5.xjtu.edu.cn.evil.example/'), false);
+  for (const url of ['blob:https://lectures.example/id', 'javascript:alert(1)', 'chrome://settings', 'https://user:secret@example.org/']) assert.equal(core.isWebPage(url), false);
 });
 
 test('badge counts only unique valid sources for the current tab and clears zero', async () => {

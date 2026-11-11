@@ -95,7 +95,7 @@
       return {lessonId: id('lesson', lesson?.id), jobId: id('job', job?.id || source.batchJobId), excluded: job?.selected === false || job?.discovery?.state === 'skipped',
         discovery: discovery(job?.discovery), savedPages: raw.length,
         rawCount: requested.length, excludedCount: requested.length - retained.length, exportedCount: retained.length,
-        knowledgeReview, comparisonVersion: ['local-v1', 'mixed'].includes(task?.comparisonVersion) ? task.comparisonVersion : 'unknown',
+        knowledgeReview, comparisonVersion: ['local-v1', 'v2.4.0', 'mixed'].includes(task?.comparisonVersion) ? task.comparisonVersion : 'unknown',
         scan: {verified, reachedEnd, state: reachedEnd ? 'reached-end' : verified ? 'partial' : task ? 'legacy-unknown' : 'not-started',
           taskState: ['running', 'paused', 'failed', 'done'].includes(task?.state) ? task.state : null, duration, checkpoint: number(task?.checkpoint),
           coverage: coverage ? {version: 1, sourceKey: opaque('source', coverage.sourceKey), trackKey: opaque('track', coverage.trackKey),
