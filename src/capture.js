@@ -548,7 +548,7 @@ $('knowledge-review').onchange = async () => {
     else snapshot.knowledgeReviewEvidence = PPTLibrary.knowledgeEvidence(snapshot, pages);
     await persistLesson(snapshot); Object.assign(activeLesson, snapshot);
     if (state === 'unreviewed') delete activeLesson.knowledgeReviewEvidence;
-    status('本节内容复核已保存；新增页面或更换来源后需要重新复核。');
+    status('本节复核已保存；新增页面或更换来源后需要重新复核。');
   } catch (error) { status('内容复核保存失败：' + error.message); }
   finally { reviewBusy = false; controls(); }
 };
@@ -892,7 +892,7 @@ function controls() {
   $('ignore-clear').disabled = active || !sourceReady || !ignoreRect;
   $('ignore-select').textContent = selectionMode === 'ignore' ? '取消框选' : '框选忽略区';
   $('ignore-select').setAttribute('aria-pressed', String(selectionMode === 'ignore'));
-  $('ignore-status').textContent = (ignoreRect ? '已设置忽略区（导出保留原画面）' : '未设置忽略区（仅影响翻页判断）')
+  $('ignore-status').textContent = (ignoreRect ? '已设置忽略区（导出保留原画面）' : '未设置忽略区（只影响翻页和相似页判断）')
     + (selectionMode === 'ignore' ? ' · 方向键移动，Shift+方向键调大小，Enter 确认，Esc 取消' : '');
   $('run').disabled = active || !sourceReady || !ready;
   $('run').textContent = stream ? '开始实时截取' : canResume() ? `继续提取 · ${timecode(activeLesson.task.checkpoint)}` : '开始快速提取';

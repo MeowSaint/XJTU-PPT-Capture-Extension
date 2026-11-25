@@ -102,8 +102,9 @@ input[type="file"]::file-selector-button { min-height: 26px; margin-right: 6px; 
 #source-status { margin-top: 8px; font-size: 12px; }
 .local-file { margin-top: 14px; }
 .video-option { font-size: 13px; color: var(--muted); }
-#media-status:empty, #selected-source-name:empty, #source-track-hint:empty, #preflight-status:empty, #resume-status:empty { display: none; }
-.selected-source:has(> #selected-source-name:empty):has(> #source-track-hint:empty) { display: none; }
+#selected-source-name:empty, #source-track-hint:empty, #resume-status:empty { display: none; }
+/* Live regions keep their box so Chromium still announces them; when both lines are empty it takes no space. */
+.selected-source:has(> #selected-source-name:empty):has(> #source-track-hint:empty) { margin: 0; padding: 0; border-left: 0; }
 .secondary-tools { margin-top: 14px; padding-top: 4px; border-top: 1px solid var(--border); }
 summary { min-height: 36px; padding: 7px 0; font-size: 13px; font-weight: 500; cursor: pointer; overflow-wrap: anywhere; }
 summary::marker { color: var(--muted); font-size: 11px; }
@@ -144,7 +145,6 @@ summary::marker { color: var(--muted); font-size: 11px; }
 #overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; touch-action: none; cursor: crosshair; }
 .video-tools, .extraction-actions, .frame-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
 .video-tools { flex-direction: column; align-items: stretch; gap: 8px; margin-top: 12px; }
-.video-tools > .note { font-size: 12px; }
 .extraction-actions { position: sticky; bottom: 0; z-index: 3; flex-wrap: nowrap; padding: 10px 20px 10px 300px; border-top: 1px solid var(--border); background: var(--surface); }
 #run { flex: 0 1 360px; }
 #stop { flex: 0 0 auto; }

@@ -162,7 +162,7 @@
             <summary>导出范围与版式说明</summary>
             <div class="drawer-body">
               <p class="note">本节导出当前保留页，勾选后仅导出所选页；整课自动跳过空课次并提示未完成课次。</p>
-              <p class="note pane-note">合并 PDF 含三级书签；分课包每节一个 PDF；讲义为 A4 每页两张带横线；图片包保留原图 JPEG。</p>
+              <p class="note pane-note">合并 PDF 含三级书签；分课包每节一个 PDF；讲义为 A4 每页两张带横线，每节另起一页；图片包保留原图 JPEG。</p>
             </div>
           </details>
         </section>
@@ -207,10 +207,10 @@
               <button id="crop-select" type="button" aria-pressed="false" disabled>框选 PPT 区域</button>
               <button id="full" class="button-quiet" type="button" disabled>使用完整画面</button>
               <button id="shot" type="button" disabled>保存当前页</button>
-              <button id="restart-scan" class="button-quiet" type="button" disabled hidden>从头重扫</button>
             </div>
-            <div class="capture-maintenance" role="group" aria-label="裁剪复用与视频缓存">
+            <div class="capture-maintenance" role="group" aria-label="重扫、裁剪复用与视频缓存">
               <div class="bar">
+                <button id="restart-scan" class="button-quiet" type="button" disabled hidden>从头重扫</button>
                 <button id="crop-reuse" class="button-quiet" type="button" disabled title="将本节裁剪用于本课其他 0 路课次">复用裁剪到其他 0 路</button>
                 <button id="release-cache" class="button-quiet" type="button" disabled title="卸载当前视频，保留截图和命名信息">释放视频缓存</button>
               </div>

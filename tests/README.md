@@ -24,7 +24,7 @@ npm install
 npx playwright install chromium
 ```
 
-Windows 默认可直接使用已安装的 Edge；macOS 和 Linux 使用 Playwright 安装的 Chromium。已安装兼容浏览器时可跳过下载，通过环境变量 `PPT_TEST_BROWSER` 指定可执行文件路径；依赖位于其他目录时可设置 `PPT_TEST_NODE_MODULES`。`test:features`、`test:review`、`test:integration` 和 `test:library` 需要系统 PATH 中的 `ffmpeg`，`test:integration` 还需要 `pdftoppm`（Poppler）。`test:improvements` 使用浏览器内生成的画面，无需 FFmpeg。
+Windows 默认可直接使用已安装的 Edge；macOS 和 Linux 使用 Playwright 安装的 Chromium。已安装兼容浏览器时可跳过下载，通过环境变量 `PPT_TEST_BROWSER` 指定可执行文件路径；依赖位于其他目录时可设置 `PPT_TEST_NODE_MODULES`。`test:features`、`test:review`、`test:generic`、`test:integration` 和 `test:library` 需要系统 PATH 中的 `ffmpeg`，`test:integration` 还需要 `pdftoppm`（Poppler）。`test:improvements` 使用浏览器内生成的画面，无需 FFmpeg。
 
 完整回归请按以下顺序串行运行，避免浏览器和视频处理争抢资源。自定义浏览器路径时，将 `PPT_TEST_BROWSER` 导出到同一终端，使每个浏览器套件都能读取它。
 
