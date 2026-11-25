@@ -103,12 +103,13 @@ async function seed({version = 3, pages = [], lessons = [], activeId = lessons[0
 }
 // Run both real discovery producers on a synthetic page, then feed their reply through
 // the workspace's actual discovery/preflight/select/load/bind path. No injected course values.
+const COURSE_ORIGIN = 'https://rms-v5.xjtu.edu.cn';
 async function producerReply({base, payload, capture = {}, transport = 'fetch', extra = []}) {
   const producer = await context.newPage(), calls = []; let session;
   producer.on('pageerror', error => errors.push('producer: ' + error.message));
   try {
-    await producer.route(origin + '/study-capture-courses/**', route => route.fulfill({contentType: 'text/html', body: '<!doctype html><meta charset="utf-8"><title>资源管理平台</title><p>课程名称：A</p><p>开课时间：2026-09-14 00:00</p>'}));
-    await producer.route(origin + '/api/**', route => {
+    await producer.route(COURSE_ORIGIN + '/study-capture-courses/**', route => route.fulfill({contentType: 'text/html', body: '<!doctype html><meta charset="utf-8"><title>资源管理平台</title><p>课程名称：A</p><p>开课时间：2026-09-14 00:00</p>'}));
+    await producer.route(COURSE_ORIGIN + '/api/**', route => {
       const pathname = new URL(route.request().url()).pathname; calls.push(pathname);
       return route.fulfill({contentType: 'application/json', body: JSON.stringify(/\/captures\//.test(pathname) ? capture : payload)});
     });
@@ -146,7 +147,7 @@ async function discoverReply(base, reply, {storageFirst = false} = {}) {
     batchPage = base;
     chrome.permissions = {contains: async () => true, request: async () => true};
     chrome.scripting = {executeScript: async () => []};
-    chrome.tabs = {query: async () => [{id: 42, url: base, title: '资源管理平台'}], sendMessage: async () => reply};
+    chrome.tabs = {query: async () => [{id: 42, url: base, title: '资源管理平台'}], get: async () => ({id: 42, url: base}), sendMessage: async () => reply};
     chrome.storage = {...chrome.storage, session: {get: async key => storageFirst ? {[key]: {page: base, course: reply.course,
       items: reply.urls.map(url => ({...PPTCore.mediaInfo(url), source: 'synthetic observed', seen: 1}))}} : {}}};
     await discover();
@@ -265,7 +266,8 @@ function zipEntries(bytes, {utf8 = true} = {}) {
     context = await browser.newContext({viewport: {width: 1440, height: 900}, acceptDownloads: true, reducedMotion: 'reduce'});
     await context.route('**/*', route => {
       const url = route.request().url();
-      if (/^(blob|data):/.test(url) || new URL(url).origin === origin) return route.continue();
+      const requestOrigin = new URL(url).origin;
+      if (/^(blob|data):/.test(url) || requestOrigin === origin || requestOrigin === COURSE_ORIGIN) return route.continue();
       blocked.push(url); return route.abort();
     });
     page = await context.newPage(); page.setDefaultTimeout(10000);
@@ -399,7 +401,7 @@ function zipEntries(bytes, {utf8 = true} = {}) {
     });
 
     await test('learning export consumers share frozen filtered JPEGs, TOC, mappings and whole-lesson no-content evidence', async () => {
-      const base = origin + '/study-capture-courses/42/preview-detail/learning', a = lesson('learn-a', {page: base}), b = lesson('learn-b', {page: base, course: {...course, date: '2026-11-05'}});
+      const base = COURSE_ORIGIN + '/study-capture-courses/42/preview-detail/learning', a = lesson('learn-a', {page: base}), b = lesson('learn-b', {page: base, course: {...course, date: '2026-11-05'}});
       a.source = {...a.source, batchJobId: 'learn-job', page: base, duration: 3}; b.source = {...b.source, batchJobId: 'skip-job', page: base, duration: 3};
       await seed({lessons: [a, b], batches: [{page: base, jobs: [{id: 'learn-job', course, discovery: {state: 'ready'}}, {id: 'skip-job', course: b.course, discovery: {state: 'ready'}}]}], pages: [
         {id: 11, lessonId: a.id, image: 0, order: 1024, sourceTime: .25, learningExcluded: true},
@@ -484,7 +486,7 @@ function zipEntries(bytes, {utf8 = true} = {}) {
     });
 
     await test('learning native batch report file preserves batch scope, filtered mappings and public projection after reload', async () => {
-      const base = origin + '/study-capture-courses/42/preview-detail/native-report', currentPage = origin + '/study-capture-courses/99/preview-detail/current';
+      const base = COURSE_ORIGIN + '/study-capture-courses/42/preview-detail/native-report', currentPage = COURSE_ORIGIN + '/study-capture-courses/99/preview-detail/current';
       const privateURL = origin + '/private/native-report.mp4?signature=ROUND1_SIGNATURE&token=ROUND1_TOKEN';
       const privateName = 'ROUND1_PRIVATE_SOURCE.mp4', privateNote = 'ROUND1_PRIVATE_NOTE', privateCredential = 'ROUND1_PRIVATE_CREDENTIAL';
       const batchCourse = {...course, name: '批量原生报告'}, jobA = privateURL + '#job-a', jobB = privateURL + '#job-b';
@@ -939,7 +941,7 @@ function zipEntries(bytes, {utf8 = true} = {}) {
     });
 
     for (const transport of ['fetch', 'xhr']) await test(`acquisition boundary course opening stays absent through ${transport}, selection, binding and reload`, async () => {
-      const base = origin + '/study-capture-courses/42/preview-detail/a';
+      const base = COURSE_ORIGIN + '/study-capture-courses/42/preview-detail/a';
       const url = origin + '/' + path.relative(root, fixture).split(path.sep).join('/') + '?capture=a';
       await seed({naming: {course: {}, page: '', manual: false}});
       const reply = await producerReply({base, transport, payload: {data: {id: 42, courseName: 'A', capture_code: 'a', start_time: '2026-09-14 00:00'}},
@@ -953,7 +955,7 @@ function zipEntries(bytes, {utf8 = true} = {}) {
     });
 
     await test('acquisition boundary matched recording endpoints, latest aliases and schedules retain their selected time', async () => {
-      const directory = origin + '/study-capture-courses/42/preview-detail';
+      const directory = COURSE_ORIGIN + '/study-capture-courses/42/preview-detail';
       const url = origin + '/' + path.relative(root, fixture).split(path.sep).join('/') + '?capture=a';
       const wanted = {name: 'A', date: '2026-09-15', start: '16:40:00'};
       for (const variant of ['capture', 'latest_capture', 'latestCapture', 'schedules']) {
@@ -983,7 +985,7 @@ function zipEntries(bytes, {utf8 = true} = {}) {
     });
 
     await test('acquisition selection directory maps A and B separately and leaves unmapped time absent after preflight and reload', async () => {
-      const base = origin + '/study-capture-courses/42/preview-detail';
+      const base = COURSE_ORIGIN + '/study-capture-courses/42/preview-detail';
       const videoURL = origin + '/' + path.relative(root, fixture).split(path.sep).join('/');
       const urls = {a: videoURL + '?capture=a', b: videoURL + '?capture=b', unmapped: videoURL + '?capture=unknown'};
       const expected = {a: {name: 'A', date: '2026-09-15', start: '16:40:00'}, b: {name: 'A', date: '2026-09-16', start: '09:00:00'}, unmapped: {name: 'A'}};
@@ -1003,7 +1005,7 @@ function zipEntries(bytes, {utf8 = true} = {}) {
     });
 
     await test('acquisition selection corrects only selected automatic history and preserves manual identities, crop, scans and assets', async () => {
-      const base = origin + '/study-capture-courses/42/preview-detail', other = base.replace('/42/', '/99/');
+      const base = COURSE_ORIGIN + '/study-capture-courses/42/preview-detail', other = base.replace('/42/', '/99/');
       const videoURL = origin + '/' + path.relative(root, fixture).split(path.sep).join('/');
       const urls = {a: videoURL + '?capture=a', b: videoURL + '?capture=b'};
       const stale = {name: 'A', date: '2026-09-14', start: '00:00:00'}, wanted = {name: 'A', date: '2026-09-15', start: '16:40:00'};
@@ -1037,7 +1039,7 @@ function zipEntries(bytes, {utf8 = true} = {}) {
         window.chrome = window.chrome || {};
         chrome.storage = {onChanged: {addListener: listener => fixtureStorageListeners.push(listener)}};
       });
-      const base = origin + '/study-capture-courses/42/preview-detail';
+      const base = COURSE_ORIGIN + '/study-capture-courses/42/preview-detail';
       const videoURL = origin + '/' + path.relative(root, fixture).split(path.sep).join('/'), a = videoURL + '?capture=a', b = videoURL + '?capture=b';
       await seed({naming: {course: {}, page: '', manual: false}});
       const reply = await producerReply({base, payload: {id: 42, courseName: 'A', latest_capture_code: 'b', schedules: [
@@ -1057,7 +1059,7 @@ function zipEntries(bytes, {utf8 = true} = {}) {
     });
 
     await test('recording metadata first remote bind persists detected time and protects same-source manual edits on reopen', async () => {
-      const base = origin + '/study-capture-courses/42/preview-detail/a', url = origin + '/' + path.relative(root, fixture).split(path.sep).join('/');
+      const base = COURSE_ORIGIN + '/study-capture-courses/42/preview-detail/a', url = origin + '/' + path.relative(root, fixture).split(path.sep).join('/');
       const detected = {name: 'A', date: '2026-09-15', start: '16:40:00'};
       await seed({naming: {course: {name: 'A', date: '2026-09-14', start: '00:00:00'}, page: base, manual: false}});
       assert.equal(await page.evaluate(async ({base, url, detected}) => {
@@ -1089,7 +1091,7 @@ function zipEntries(bytes, {utf8 = true} = {}) {
     });
 
     await test('recording metadata batch binds job course over stale manual form and corrects automatic history only', async () => {
-      const base = origin + '/study-capture-courses/42/preview-detail', url = origin + '/' + path.relative(root, fixture).split(path.sep).join('/');
+      const base = COURSE_ORIGIN + '/study-capture-courses/42/preview-detail', url = origin + '/' + path.relative(root, fixture).split(path.sep).join('/');
       const detected = {name: 'A', date: '2026-09-15', start: '16:40:00'}, stale = {name: '旧手工课', date: '2026-09-14', start: '00:00:00'};
       await seed({naming: {course: stale, page: base, manual: true}});
       const job = {id: 'metadata-job', course: detected, url, sourceName: '2-recording.mp4', requiresCrop: false, selected: true, state: 'pending'};
@@ -1122,7 +1124,7 @@ function zipEntries(bytes, {utf8 = true} = {}) {
     });
 
     await test('recording metadata unknown times and course switches never inherit previous manual naming', async () => {
-      const base = origin + '/study-capture-courses/42/preview-detail/a', other = base.replace('/42/', '/99/');
+      const base = COURSE_ORIGIN + '/study-capture-courses/42/preview-detail/a', other = base.replace('/42/', '/99/');
       const url = origin + '/' + path.relative(root, fixture).split(path.sep).join('/');
       const old = lesson('metadata-old', {course: {...course, name: 'A 手工'}, page: base, source: {kind: 'remote', url, page: base, sourceKey: 'url:' + url}});
       await seed({lessons: [old]});
@@ -1147,7 +1149,7 @@ function zipEntries(bytes, {utf8 = true} = {}) {
     });
 
     await test('recording metadata directory refresh repairs automatic lessons only and explains zero single-source candidates', async () => {
-      const base = origin + '/study-capture-courses/42/preview-detail';
+      const base = COURSE_ORIGIN + '/study-capture-courses/42/preview-detail';
       const stale = {name: 'A', date: '2026-09-14', start: '00:00:00'}, detected = {name: 'A', date: '2026-09-15', start: '16:40:00'};
       const auto = lesson('metadata-refresh-auto', {course: stale, page: base, namingManual: false,
         source: {kind: 'remote', page: base, batchJobId: 'refresh-auto', url: origin + '/2-auto.mp4'},
@@ -1282,7 +1284,7 @@ function zipEntries(bytes, {utf8 = true} = {}) {
     });
 
     await test('saved zero-track batch exposes pending crop and manual preparation without loading media', async () => {
-      const batchPage = origin + '/study-capture-courses/72/preview-detail/zero';
+      const batchPage = COURSE_ORIGIN + '/study-capture-courses/72/preview-detail/zero';
       const job = {id: 'pending-zero', course: {...course, name: '待框选课程'}, url: origin + '/0-zero.mp4', sourceName: '0-' + '待确认的完整课堂录像名称'.repeat(5) + '.mp4',
         requiresCrop: true, cropConfirmed: false, state: 'needs-crop', selected: false, options: []};
       await seed({lessons: [lesson('zero-unloaded')], batches: [{page: batchPage, jobs: [job]}], pages: []});
@@ -1297,7 +1299,7 @@ function zipEntries(bytes, {utf8 = true} = {}) {
     });
 
     await test('discovery polling retains 26 rows, shows failures, retries and restores metadata', async () => {
-      const base = origin + '/study-capture-courses/42/preview-detail';
+      const base = COURSE_ORIGIN + '/study-capture-courses/42/preview-detail';
       await seed({lessons: [lesson('directory')]});
       await page.evaluate(base => {
         coursePage = base; $('course').replaceChildren(new Option('Synthetic course', '1'));
@@ -1368,7 +1370,7 @@ function zipEntries(bytes, {utf8 = true} = {}) {
     });
 
     await test('discovery Stop settles promptly, ignores late results and bounds stalled messages', async () => {
-      const base = origin + '/study-capture-courses/42/preview-detail';
+      const base = COURSE_ORIGIN + '/study-capture-courses/42/preview-detail';
       await seed({lessons: [lesson('cancel-directory')]});
       await page.evaluate(base => {
         coursePage = base; $('course').replaceChildren(new Option('Synthetic course', '1'));
@@ -1414,7 +1416,7 @@ function zipEntries(bytes, {utf8 = true} = {}) {
     });
 
     await test('stopped discovery persists partial rows, selection, sources and failure metadata', async () => {
-      const base = origin + '/study-capture-courses/42/preview-detail';
+      const base = COURSE_ORIGIN + '/study-capture-courses/42/preview-detail';
       const retained = {id: 'retained', captureCode: 'retained', url: origin + '/2-retained.mp4', sourceName: '2-retained.mp4', course: {name: 'Synthetic course'},
         state: 'stopped', selected: true, history: ['retained'], cropOverride: {manual: true}, discovery: {state: 'ready', code: '', message: '', attempts: 1}};
       await seed({lessons: [lesson('partial-directory')], batches: [{page: base, jobs: [retained]}]});
@@ -1446,7 +1448,7 @@ function zipEntries(bytes, {utf8 = true} = {}) {
 
     for (const mode of ['Stop', 'message failure']) {
       await test(`discovery recovery persistence failure remains visible after ${mode}`, async () => {
-        const base = origin + '/study-capture-courses/42/preview-detail';
+        const base = COURSE_ORIGIN + '/study-capture-courses/42/preview-detail';
         await seed({lessons: [lesson('recovery-save-failure')]});
         await page.evaluate(base => {
           coursePage = base; $('course').replaceChildren(new Option('Synthetic course', '1')); window.recoveryPolls = 0;
@@ -1951,7 +1953,7 @@ function zipEntries(bytes, {utf8 = true} = {}) {
     });
 
     await test('integrity duration reload retains historical pages and checkpoints but cannot certify the longer source or new receipt', async () => {
-      const base = origin + '/study-capture-courses/42/preview-detail/duration', url = origin + '/' + path.relative(root, fixture).split(path.sep).join('/');
+      const base = COURSE_ORIGIN + '/study-capture-courses/42/preview-detail/duration', url = origin + '/' + path.relative(root, fixture).split(path.sep).join('/');
       const job = {id: 'duration-job', course, url, sourceName: '2-duration.mp4', discovery: {state: 'ready'}};
       await seed({batches: [{page: base, jobs: [job], discovery: {complete: true, total: 1, eligible: 1}}]});
       const reload = () => page.evaluate(async ({base, job}) => {
@@ -1991,7 +1993,7 @@ function zipEntries(bytes, {utf8 = true} = {}) {
     });
 
     await test('integrity same-course directory pages retain all known rows and explicitly scope current and batch receipts', async () => {
-      const base = origin + '/study-capture-courses/42/preview-detail/a', other = base.replace('/a', '/b');
+      const base = COURSE_ORIGIN + '/study-capture-courses/42/preview-detail/a', other = base.replace('/a', '/b');
       const url = origin + '/' + path.relative(root, fixture).split(path.sep).join('/');
       const job = {id: 'shared-job', course, url, sourceName: '2-shared.mp4', discovery: {state: 'ready'}};
       const missing = {id: 'new-unscanned-job', course, url: url + '?recording=new', sourceName: '2-new.mp4', discovery: {state: 'ready'}};
@@ -2069,7 +2071,7 @@ function zipEntries(bytes, {utf8 = true} = {}) {
     });
 
     await test('integrity report buttons isolate A and B, export freezes after pending saves and retains only successful receipts', async () => {
-      const base = origin + '/study-capture-courses/42/preview-detail/a', other = base.replace('/42/', '/99/');
+      const base = COURSE_ORIGIN + '/study-capture-courses/42/preview-detail/a', other = base.replace('/42/', '/99/');
       const a = lesson('report-a', {page: base}), b = lesson('report-b', {page: other, course: {...course, name: '课程B'}});
       await seed({lessons: [a, b], activeId: a.id, batches: [{page: other, jobs: [{id: 'b-job', course: b.course, discovery: {state: 'ready'}}], discovery: {complete: true, total: 1}}], pages: [
         {id: 801, lessonId: a.id, order: 2048, sourceTime: 2}, {id: 802, lessonId: a.id, order: 1024, sourceTime: 1}, {id: 803, lessonId: b.id},
@@ -2235,7 +2237,7 @@ function zipEntries(bytes, {utf8 = true} = {}) {
       await page.locator('#library-close').click();
     });
     await test('management cancellation and transaction abort preserve disk, active source, selection and undo', async () => {
-      const base = origin + '/study-capture-courses/42/preview-detail/a', other = origin + '/study-capture-courses/99/preview-detail/a';
+      const base = COURSE_ORIGIN + '/study-capture-courses/42/preview-detail/a', other = COURSE_ORIGIN + '/study-capture-courses/99/preview-detail/a';
       const a = lesson('manage-active', {page: base}), b = lesson('manage-inactive', {page: base, source: {batchJobId: 'shared', page: base, sourceName: '2-b.mp4'}});
       const otherLesson = lesson('manage-other', {page: other, source: {batchJobId: 'shared', page: other, sourceName: '2-other.mp4'}});
       const jobs = [{id: 'shared', course, sourceName: '2-b.mp4', requiresCrop: false, selected: true, state: 'pending'}, {id: 'queued', course, requiresCrop: false, state: 'pending'}];
@@ -2303,7 +2305,7 @@ function zipEntries(bytes, {utf8 = true} = {}) {
       await page.locator('#library-close').click(); await page.reload(); await count(0); assert.equal(await page.locator('#library-manage').isDisabled(), false);
     });
     await test('whole-course deletion removes all lessons and course batch snapshots including queued references', async () => {
-      const base = origin + '/study-capture-courses/42/preview-detail/a', sibling = base.replace('/a', '/b'), other = base.replace('/42/', '/99/');
+      const base = COURSE_ORIGIN + '/study-capture-courses/42/preview-detail/a', sibling = base.replace('/a', '/b'), other = base.replace('/42/', '/99/');
       const jobs = [{id: 'queued', course, requiresCrop: false, state: 'pending', selected: true}];
       await seed({lessons: [lesson('course-a', {page: base}), lesson('course-b', {page: sibling}), lesson('course-empty', {page: base}), lesson('course-other', {page: other})],
         batches: [{page: base, jobs}, {page: sibling, jobs}, {page: other, jobs}], pages: [{id: 341, lessonId: 'course-a'}, {id: 342, lessonId: 'course-b'}, {id: 343, lessonId: 'course-other'}]});
@@ -2330,7 +2332,7 @@ function zipEntries(bytes, {utf8 = true} = {}) {
       await page.locator('#library-close').click(); await page.reload(); await count(1);
     });
     await test('crop reuse waits for pending naming before saving the source lesson and related batch', async () => {
-      const base = origin + '/study-capture-courses/42/preview-detail/naming', other = base.replace('/42/', '/99/');
+      const base = COURSE_ORIGIN + '/study-capture-courses/42/preview-detail/naming', other = base.replace('/42/', '/99/');
       const url = origin + '/' + path.relative(root, fixture).split(path.sep).join('/');
       const jobs = ['naming-source', 'naming-target'].map((id, index) => ({id, course: {...course, date: `2026-11-${10 + index}`},
         url: url + '?id=' + id, sourceName: '0-' + id + '.mp4', requiresCrop: true, selected: false, cropConfirmed: false,
@@ -2400,7 +2402,7 @@ function zipEntries(bytes, {utf8 = true} = {}) {
       assert.deepEqual(await stored(), after);
     });
     await test('same-camera confirmation atomically reuses crop only for unfinished unprepared zero-track lessons', async () => {
-      const base = origin + '/study-capture-courses/42/preview-detail/a', other = base.replace('/42/', '/99/');
+      const base = COURSE_ORIGIN + '/study-capture-courses/42/preview-detail/a', other = base.replace('/42/', '/99/');
       const url = origin + '/' + path.relative(root, fixture).split(path.sep).join('/');
       const jobs = ['source', 'target', 'stopped', 'failed', 'done', 'manual'].map((id, index) => ({id, course: {...course, date: `2026-11-${10 + index}`},
         url: url + '?id=' + id + '&token=old', sourceName: '0-' + id + '.mp4', requiresCrop: true, selected: false, cropConfirmed: false,
@@ -2518,7 +2520,7 @@ function zipEntries(bytes, {utf8 = true} = {}) {
     });
     await test('reopened crop adjustments belong to the saved batch independently of the displayed batch', async () => {
       for (const sameCourse of [false, true]) {
-        const a = origin + '/study-capture-courses/42/preview-detail/a', b = sameCourse ? a.replace('/a', '/b') : a.replace('/42/', '/99/');
+        const a = COURSE_ORIGIN + '/study-capture-courses/42/preview-detail/a', b = sameCourse ? a.replace('/a', '/b') : a.replace('/42/', '/99/');
         const url = origin + '/' + path.relative(root, fixture).split(path.sep).join('/');
         const oldCrop = {x: .1, y: .1, w: .7, h: .7}, adjusted = {x: .2, y: .2, w: .5, h: .5};
         const jobs = [a, b].map((page, index) => ({id: sameCourse ? 'job-' + index : 'shared', course, url: url + '?id=' + index, sourceName: '0-camera.mp4', requiresCrop: true,
@@ -2577,7 +2579,7 @@ function zipEntries(bytes, {utf8 = true} = {}) {
     });
     await test('final manual preparation save failure retains the loaded zero-track crop guard', async () => {
       for (const rejected of [false, true]) {
-        const base = origin + '/study-capture-courses/42/preview-detail/a';
+        const base = COURSE_ORIGIN + '/study-capture-courses/42/preview-detail/a';
         const job = {id: 'guard', course, url: origin + '/' + path.relative(root, fixture).split(path.sep).join('/'), sourceName: '0-guard.mp4',
           requiresCrop: true, cropConfirmed: false, state: 'needs-crop', selected: false, options: []};
         await seed({batches: [{page: base, jobs: [job]}]});

@@ -113,7 +113,7 @@ async function bindLesson(source, detectedCourse = sourceCourse, signal) {
   if (!lesson) {
     // A course-level form is not a manual override for a newly selected batch lesson.
     const manual = !source.batchJobId && !activeLesson && namingManual && namingPage === (source.page || '');
-    next = {id: crypto.randomUUID(), course: PPTCourse.forBinding(detected, namingInfo(), {manual, sameSource: manual}), page: source.page || '', source, crop: {x: 0,y: 0,w: 1,h: 1}, settings: {...scanSettings(), step: 2}, suspects: [], created: Date.now(), namingManual: manual};
+    next = {id: crypto.randomUUID(), course: PPTCourse.forBinding(detected, namingInfo(), {manual, sameSource: manual}), page: source.page || '', source, crop: {x: 0,y: 0,w: 1,h: 1}, settings: {...scanSettings()}, suspects: [], created: Date.now(), namingManual: manual};
   } else {
     const course = PPTCourse.forBinding(detected, lesson.course, {manual: lesson.namingManual, sameSource: true});
     next = {...lesson, course, source: {...lesson.source, ...source}, ...(changedChannel ? {crop: {x: 0,y: 0,w: 1,h: 1}, ignoreRect: null, task: null, suspects: []} : {})};
