@@ -18,14 +18,15 @@
     el('source-show-all').disabled = locked;
     el('check-updates').disabled = !studyAccepted || checkingUpdate;
     const source = items.find(item => item.url === el('sources').value);
-    el('selected-source-name').textContent = source ? source.name || source.url : '尚未选择视频';
+    el('selected-source-name').textContent = source ? source.name || source.url : '';
     const name = source ? source.name || new URL(source.url).pathname : '';
-    el('source-track-hint').textContent = !PPTCore.isCoursePage(pageURL) ? '加载后查看预览，确认选中 PPT 画面；多个视频请逐个选择确认。预检通过仅表示地址可用。' : /(?:^|\/)0-[^/]+/i.test(name) ? '0 路视频：加载后先框选 PPT 区域，确认画面后再提取。' :
-      /(?:^|\/)2-[^/]+/i.test(name) ? '2 路通常为 PPT 机位；加载后确认预览，再开始提取。' :
-      '选 2 路 PPT 视频；只有 0 路时，加载后先框选 PPT 区域。预检通过仅表示地址可用。';
-    el('frame-source-hint').textContent = PPTCore.isCoursePage(loadedIdentity?.coursePage || pageURL)
-      ? '2 路通常为 PPT 机位；0 路先确认截取区域，再开始提取。'
-      : '先确认视频中的 PPT 画面，必要时框选截取区域。';
+    // An empty pageURL (before any source page is known) must not switch the
+    // hint to generic wording: track names still describe the same video tracks.
+    el('source-track-hint').textContent = pageURL && !PPTCore.isCoursePage(pageURL)
+      ? (source ? '加载后确认画面，再开始提取。' : '')
+      : /(?:^|\/)0-[^/]+/i.test(name) ? '0 路视频：加载后先框选 PPT 区域。'
+      : /(?:^|\/)2-[^/]+/i.test(name) ? '2 路通常为 PPT 机位，加载后确认预览。'
+      : items.length ? '优先选 2 路；仅 0 路时需先框选 PPT 区域。' : '';
   }
   function renderSources() {
     const select = el('sources'), selected = select.value;
@@ -53,8 +54,8 @@
     const count = status => items.filter(source => states.get(source.url)?.status === status).length;
     const waiting = count('permission'), running = count('queued') + count('checking');
     el('preflight-authorize').textContent = waiting ? `授权并检测 (${waiting})` : '重新检测';
-    el('preflight-status').textContent = !studyAccepted ? '同意使用约定后自动检测视频地址。' : !items.length ? '发现视频后自动检测可用地址。' :
-      `${count('valid')} 个可用 · ${count('unknown')} 个待确认${waiting ? ` · ${waiting} 个待授权` : ''}${running ? ` · ${running} 个检测中` : ''}${count('invalid') ? ` · ${count('invalid')} 个已过滤` : ''}`;
+    el('preflight-status').textContent = (!studyAccepted || !items.length) ? '' :
+      `${count('valid')} 可用 · ${count('unknown')} 待确认${waiting ? ` · ${waiting} 待授权` : ''}${running ? ` · ${running} 检测中` : ''}${count('invalid') ? ` · ${count('invalid')} 已过滤` : ''}`;
     controls();
   }
   function cancelPreflight() {
@@ -116,7 +117,7 @@
     const before = revision, page = pageURL;
     Promise.resolve(permission).then(granted => {
       if (before !== revision || page !== pageURL || !studyAccepted) return;
-      if (!granted) { el('preflight-status').textContent = '未授予视频域名权限，也可以直接导入本地视频。'; return; }
+      if (!granted) { el('preflight-status').textContent = '未授予视频域名权限，可改用本地视频。'; return; }
       refreshSources(items, pageURL, {reset: true});
     }).catch(() => { if (before === revision) el('preflight-status').textContent = '域名授权未完成，请重试。'; });
   };
@@ -146,7 +147,7 @@
         el(id).hidden = !available;
         if (available) el(id).href = result.release[key]; else el(id).removeAttribute('href');
       }
-      el('update-status').textContent = available ? '下载解压后覆盖原扩展文件夹，再去扩展管理页点“重新加载”即可。' : result?.status === 'current' ? '当前已是最新版本。' : '暂时连不上 GitHub，请稍后再试。';
+      el('update-status').textContent = available ? '下载解压覆盖扩展目录，在扩展管理页点“重新加载”即可。' : result?.status === 'current' ? '当前已是最新版本。' : '暂时无法连接 GitHub，请稍后重试。';
       el('update-dialog').showModal();
     } catch {
       if (manual) {

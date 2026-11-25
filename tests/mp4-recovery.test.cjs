@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const {getEventListeners} = require('node:events');
-const mp4 = require('../mp4-recovery.js');
+const mp4 = require('../src/mp4-recovery.js');
 
 const u32 = n => { const b = Buffer.alloc(4); b.writeUInt32BE(n); return b; };
 const u64 = n => { const b = Buffer.alloc(8); b.writeBigUInt64BE(BigInt(n)); return b; };
@@ -127,7 +127,7 @@ async function rejected(blob, status = 'malformed') {
 test('exact CommonJS and classic-script APIs and public schema, duration seconds', async () => {
   assert.deepEqual(Object.keys(mp4).sort(), ['inspect', 'prepare']); assert.equal(globalThis.PPTMP4, mp4);
   const context = vm.createContext({Blob, DOMException, Uint8Array, DataView});
-  vm.runInContext(fs.readFileSync(require.resolve('../mp4-recovery.js'), 'utf8'), context);
+  vm.runInContext(fs.readFileSync(require.resolve('../src/mp4-recovery.js'), 'utf8'), context);
   assert.deepEqual(Object.keys(context.PPTMP4).sort(), ['inspect', 'prepare']);
   const r = await context.PPTMP4.inspect(fixture().blob);
   assert.deepEqual(Object.keys(r).sort(), ['code', 'format', 'inspectedBytes', 'movieDuration', 'movieTimescale', 'status', 'tracks', 'videoDuration']);
@@ -415,7 +415,7 @@ function instrumentedMP4() {
     clearTimeout(timer) { timers.delete(timer); clearTimeout(timer); }
   });
   vm.runInContext('const push = Array.prototype.push; Array.prototype.push = function (...values) { return Reflect.apply(push, this, values.map(wrapRange)); };', context);
-  vm.runInContext(fs.readFileSync(require.resolve('../mp4-recovery.js'), 'utf8'), context);
+  vm.runInContext(fs.readFileSync(require.resolve('../src/mp4-recovery.js'), 'utf8'), context);
   return {api: context.PPTMP4, metrics, timers, cleanup() { for (const timer of timers) clearTimeout(timer); timers.clear(); }};
 }
 

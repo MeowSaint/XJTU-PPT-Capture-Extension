@@ -7,11 +7,11 @@ const {createHash} = require('node:crypto');
 const {dependency} = require('./runtime.cjs');
 const {PDFDocument, PDFName} = dependency('pdf-lib');
 const sharp = dependency('sharp');
-const source = fs.readFileSync(path.join(__dirname, '../pdf.js'), 'utf8');
+const source = fs.readFileSync(path.join(__dirname, '../src/pdf.js'), 'utf8');
 
 for (const cacheKind of ['absent', 'successful', 'rejecting']) {
   test(`downloadBlob delayed cleanup handles ${cacheKind} cache without retaining URLs`, async () => {
-    const captureSource = fs.readFileSync(path.join(__dirname, '../capture.js'), 'utf8');
+    const captureSource = fs.readFileSync(path.join(__dirname, '../src/capture.js'), 'utf8');
     const start = captureSource.indexOf('const downloadURLs = new Set();');
     const end = captureSource.indexOf("window.addEventListener('pagehide'", start);
     assert(start >= 0 && end > start, 'exercise the production download helper');

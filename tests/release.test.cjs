@@ -14,9 +14,9 @@ assert.ok(fs.lstatSync(output).isDirectory() && !fs.lstatSync(output).isSymbolic
 assert.equal(fs.realpathSync(output), output, 'test output must stay inside the repository');
 const suite = fs.mkdtempSync(path.join(output, 'node-release-'));
 const files = [
-  'manifest.json', 'background.js', 'media.js', 'course.js', 'batch.js', 'content.js',
-  'page-hook.js', 'capture.html', 'capture.js', 'mp4-recovery.js', 'scanner.js', 'pdf.js', 'style.css',
-  'extension-state.js', 'preflight.js', 'workspace.js', 'disk-cache.js', 'page-store.js', 'library.js', 'appearance.js', 'motion.js',
+  'manifest.json', 'src/background.js', 'src/media.js', 'src/course.js', 'src/batch.js', 'src/content.js',
+  'src/page-hook.js', 'capture.html', 'src/capture.js', 'src/mp4-recovery.js', 'src/scanner.js', 'src/pdf.js', 'style.css',
+  'src/extension-state.js', 'src/preflight.js', 'src/workspace.js', 'src/disk-cache.js', 'src/page-store.js', 'src/library.js', 'src/appearance.js', 'src/motion.js',
   'README.md', 'THIRD_PARTY_NOTICES.md', 'LICENSE', 'vendor/hls.min.js', 'vendor/hls.LICENSE',
   'icons/icon-16.png', 'icons/icon-32.png', 'icons/icon-48.png', 'icons/icon-128.png',
   'icons/browsers/chrome.svg', 'icons/browsers/edge.svg', 'icons/browsers/brave.svg',
@@ -217,7 +217,7 @@ test('same-version collisions retain all historical ZIPs byte for byte', () => {
   fs.writeFileSync(path.join(root, 'legacy.zip'), incomingLegacy);
   const expected = [sentinel, legacy, incomingLegacy];
   for (let index = 0; index < 4; index++) {
-    fs.appendFileSync(path.join(root, 'course.js'), `\n// fixture build ${index}\n`);
+    fs.appendFileSync(path.join(root, 'src/course.js'), `\n// fixture build ${index}\n`);
     build(root);
     if (index < 3) expected.push(latest(root));
   }
@@ -254,9 +254,9 @@ test('preserves unreadable old ZIPs as unknown instead of discarding them', () =
 });
 
 test('missing input leaves all existing root and historical ZIPs untouched', () => {
-  const root = fixture('missing', 'course.js');
+  const root = fixture('missing', 'src/course.js');
   seedArchives(root);
-  failedWithoutChangingZips(root, /Missing release file: course\.js/);
+  failedWithoutChangingZips(root, /Missing release file: src\/course\.js/);
 });
 
 test('manifest and package version mismatch leaves every existing ZIP untouched', () => {
@@ -339,12 +339,12 @@ for (const directory of ['last-release', 'tmp']) {
 
 test('recovery asset loads before capture and stays out of school scripts', () => {
   const html = fs.readFileSync(path.join(project, 'capture.html'), 'utf8');
-  assert(html.indexOf('src="mp4-recovery.js"') >= 0);
-  assert(html.indexOf('src="mp4-recovery.js"') < html.indexOf('src="capture.js"'));
+  assert(html.indexOf('src="src/mp4-recovery.js"') >= 0);
+  assert(html.indexOf('src="src/mp4-recovery.js"') < html.indexOf('src="src/capture.js"'));
   assert.match(html, /id="video-only"[^>]*checked/);
   const manifest = JSON.parse(fs.readFileSync(path.join(project, 'manifest.json')));
   assert(!JSON.stringify(manifest.content_scripts).includes('mp4-recovery.js'));
-  for (const name of ['content.js', 'page-hook.js']) assert(!fs.readFileSync(path.join(project, name), 'utf8').includes('PPTMP4'));
-  const root = fixture('missing-recovery', 'mp4-recovery.js');
+  for (const name of ['src/content.js', 'src/page-hook.js']) assert(!fs.readFileSync(path.join(project, name), 'utf8').includes('PPTMP4'));
+  const root = fixture('missing-recovery', 'src/mp4-recovery.js');
   assert.notEqual(run(root).status, 0);
 });

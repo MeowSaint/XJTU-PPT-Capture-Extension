@@ -91,7 +91,8 @@ async function setup() {
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
   origin = `http://127.0.0.1:${server.address().port}`; alternate = `http://localhost:${server.address().port}`; updateOrigin = `http://updates.test:${server.address().port}`;
   temp = fs.mkdtempSync(path.join(os.tmpdir(), 'ppt-features-')); const ext = path.join(temp, 'extension'); fs.mkdirSync(ext);
-  for (const name of ['manifest.json', 'background.js', 'media.js', 'course.js', 'batch.js', 'page-hook.js', 'content.js', 'capture.html', 'capture.js', 'mp4-recovery.js', 'page-store.js', 'library.js', 'disk-cache.js', 'scanner.js', 'style.css', 'pdf.js', 'extension-state.js', 'preflight.js', 'workspace.js', 'motion.js', 'vendor', 'icons']) {
+  for (const name of ['manifest.json', 'src/background.js', 'src/media.js', 'src/course.js', 'src/batch.js', 'src/page-hook.js', 'src/content.js', 'capture.html', 'src/capture.js', 'src/mp4-recovery.js', 'src/page-store.js', 'src/library.js', 'src/disk-cache.js', 'src/scanner.js', 'style.css', 'src/pdf.js', 'src/extension-state.js', 'src/preflight.js', 'src/workspace.js', 'src/appearance.js', 'src/motion.js', 'vendor', 'icons']) {
+    fs.mkdirSync(path.dirname(path.join(ext, name)), {recursive: true});
     fs.cpSync(path.join(root, name), path.join(ext, name), {recursive: true});
     if (fs.statSync(path.join(ext, name)).isFile()) copiedHashes[name] = createHash('sha256').update(fs.readFileSync(path.join(ext, name))).digest('hex');
   }
@@ -99,7 +100,7 @@ async function setup() {
   manifest.host_permissions.push('http://127.0.0.1/*', 'http://localhost/*', 'http://updates.test/*'); fs.writeFileSync(path.join(ext, 'manifest.json'), JSON.stringify(manifest));
   // Only transport changes in the disposable copy: the real update parser, cache and queue still run.
   const prefix = `const fixtureFetch = globalThis.fetch.bind(globalThis); globalThis.fetch = (input, init) => fixtureFetch((typeof input === 'string' ? input : input.url) === ${JSON.stringify(github)} ? ${JSON.stringify(updateOrigin + '/__update')} : input, init);\n`;
-  fs.writeFileSync(path.join(ext, 'background.js'), prefix + fs.readFileSync(path.join(ext, 'background.js'), 'utf8'));
+  fs.writeFileSync(path.join(ext, 'src/background.js'), prefix + fs.readFileSync(path.join(ext, 'src/background.js'), 'utf8'));
   context = await chromium.launchPersistentContext(path.join(temp, 'profile'), {...browserOptions(), viewport: {width: 1440, height: 900}, reducedMotion: 'reduce',
     args: ['--disable-extensions-except=' + ext, '--load-extension=' + ext, '--disable-background-networking', '--host-resolver-rules=MAP updates.test 127.0.0.1, MAP * ~NOTFOUND, EXCLUDE localhost, EXCLUDE 127.0.0.1', '--no-proxy-server']});
   const track = page => page.on('pageerror', error => errors.push({url: page.url(), error: error.stack || error.message}));
@@ -123,7 +124,7 @@ async function setup() {
   });
   worker = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker');
   worker.on('console', message => { if (message.type() === 'error') errors.push({worker: true, error: message.text()}); });
-  extensionOrigin = worker.url().replace(/\/background\.js$/, '');
+  extensionOrigin = new URL('/', worker.url()).href.replace(/\/$/, '');
   await context.addCookies([origin, alternate, updateOrigin].map(url => ({name: 'ppt_fixture', value: 'local-only', url, sameSite: 'Lax'})));
   await worker.evaluate(record => new Promise((resolve, reject) => {
     const request = indexedDB.open('course-ppt', 2);

@@ -1,8 +1,8 @@
 'use strict';
 const test = require('node:test'), assert = require('node:assert/strict');
 const fs = require('node:fs'), vm = require('node:vm');
-global.PPTCourse = require('../course.js');
-const batch = require('../batch.js');
+global.PPTCourse = require('../src/course.js');
+const batch = require('../src/batch.js');
 const page = 'https://rms-v5.xjtu.edu.cn/study-capture-courses/42/preview-detail';
 const rows = n => Array.from({length: n}, (_, i) => ({id: String(i + 1), capture_code: 'c' + (i + 1), status: 'FINISHED', start_time: `2026-10-${String(i + 1).padStart(2, '0')}T08:00:00+08:00`, course: {name: 'Synthetic course'}}));
 const capture = id => ({data: {lesson_videos: [{file_key: `2-${id}.mp4`, download_url: `http://127.0.0.1/2-${id}.mp4`}]}});
@@ -150,13 +150,13 @@ function contentHarness(fetchImpl, {hasConsent = async () => true, initialPage =
   const context = vm.createContext({URL, AbortController, DOMException, structuredClone, setTimeout, clearTimeout, queueMicrotask,
     setInterval(fn) { ticks.push(fn); }, performance: {now: () => 0, getEntriesByType: () => []}, location,
     document: {baseURI: initialPage, title: '资源管理平台', body: {innerText: text}, querySelector: () => null, querySelectorAll: () => []}, fetch: fetchImpl,
-    PPTCore: {isCoursePage: require('../media.js').isCoursePage, mediaInfo: url => url ? {url} : null, extractUrls: payload => payload.urls || [], postLocalMessage() {}, isLocalMessage: () => false},
+    PPTCore: {isCoursePage: require('../src/media.js').isCoursePage, mediaInfo: url => url ? {url} : null, extractUrls: payload => payload.urls || [], postLocalMessage() {}, isLocalMessage: () => false},
     PPTState: {hasConsent},
     chrome: {runtime: {id: 'synthetic', sendMessage: async message => { messages.push(message); }, onMessage: {addListener: fn => { listener = fn; }}}}});
   context.window = context; context.top = context; context.addEventListener = (name, fn) => { events[name] = fn; };
-  vm.runInContext(fs.readFileSync(require.resolve('../course.js'), 'utf8'), context);
-  vm.runInContext(fs.readFileSync(require.resolve('../batch.js'), 'utf8'), context);
-  vm.runInContext(fs.readFileSync(require.resolve('../content.js'), 'utf8'), context);
+  vm.runInContext(fs.readFileSync(require.resolve('../src/course.js'), 'utf8'), context);
+  vm.runInContext(fs.readFileSync(require.resolve('../src/batch.js'), 'utf8'), context);
+  vm.runInContext(fs.readFileSync(require.resolve('../src/content.js'), 'utf8'), context);
   return {send: message => new Promise(resolve => listener(message, {}, resolve)), events, location, tick: () => ticks.forEach(fn => fn()), messages};
 }
 
@@ -209,13 +209,13 @@ async function acquisitionVM({transport, directory = false, recordingTime = fals
     }
     context.XMLHttpRequest = XHR;
     worlds.push({context, events});
-    for (const file of ['media.js', 'course.js']) vm.runInContext(fs.readFileSync(require.resolve('../' + file), 'utf8'), context);
+    for (const file of ['media.js', 'course.js']) vm.runInContext(fs.readFileSync(require.resolve('../src/' + file), 'utf8'), context);
     return context;
   }
   const main = world('main'), isolated = world('isolated');
-  vm.runInContext(fs.readFileSync(require.resolve('../page-hook.js'), 'utf8'), main);
-  vm.runInContext(fs.readFileSync(require.resolve('../batch.js'), 'utf8'), isolated);
-  vm.runInContext(fs.readFileSync(require.resolve('../content.js'), 'utf8'), isolated);
+  vm.runInContext(fs.readFileSync(require.resolve('../src/page-hook.js'), 'utf8'), main);
+  vm.runInContext(fs.readFileSync(require.resolve('../src/batch.js'), 'utf8'), isolated);
+  vm.runInContext(fs.readFileSync(require.resolve('../src/content.js'), 'utf8'), isolated);
   try {
     for (const url of [endpoint, endpoint + '/captures/' + (directory ? 'b' : 'a')]) {
       if (transport === 'fetch') await main.fetch(url);
@@ -245,9 +245,9 @@ async function selectedVMBinding(reply, url) {
     originPattern: raw => new URL(raw).origin + '/*', namingInfo: () => reply.course, scanSettings: () => ({step: .5}),
     syncAllPages: noop, forgetUndo: noop, applyLesson: noop, render: noop, renderLibrary: noop,
     releaseFailedSource: async error => error, acquisitionReason: () => 'VM_LOAD',
-    PPTLibrary: {...require('../library.js'), bind: async (_db, lesson) => saved.push(structuredClone(lesson))}});
-  for (const file of ['media.js', 'course.js']) vm.runInContext(fs.readFileSync(require.resolve('../' + file), 'utf8'), context);
-  const source = fs.readFileSync(require.resolve('../capture.js'), 'utf8');
+    PPTLibrary: {...require('../src/library.js'), bind: async (_db, lesson) => saved.push(structuredClone(lesson))}});
+  for (const file of ['media.js', 'course.js']) vm.runInContext(fs.readFileSync(require.resolve('../src/' + file), 'utf8'), context);
+  const source = fs.readFileSync(require.resolve('../src/capture.js'), 'utf8');
   for (const [start, end] of [['async function bindLesson(', 'async function switchLesson('], ['async function attachVideo(', 'function mediaFailure('], ['async function loadRemote(', "$('load').onclick"]]) {
     const first = source.indexOf(start), last = source.indexOf(end, first);
     assert(first >= 0 && last > first, 'exercise actual source loading and binding functions'); vm.runInContext(source.slice(first, last), context);

@@ -24,7 +24,7 @@ npm install
 npx playwright install chromium
 ```
 
-Windows 默认可直接使用已安装的 Edge；macOS 和 Linux 使用 Playwright 安装的 Chromium。已安装兼容浏览器时可跳过下载，通过环境变量 `PPT_TEST_BROWSER` 指定可执行文件路径；依赖位于其他目录时可设置 `PPT_TEST_NODE_MODULES`。`test:features`、`test:review`、`test:integration` 和 `test:library` 需要系统 PATH 中的 `ffmpeg`，`test:integration` 还需要 `pdftoppm`（Poppler）。`test:improvements` 使用浏览器内生成的画面，无需 FFmpeg。
+Windows 默认可直接使用已安装的 Edge；macOS 和 Linux 使用 Playwright 安装的 Chromium。已安装兼容浏览器时可跳过下载，通过环境变量 `PPT_TEST_BROWSER` 指定可执行文件路径；依赖位于其他目录时可设置 `PPT_TEST_NODE_MODULES`。`test:features`、`test:review`、`test:generic`、`test:integration` 和 `test:library` 需要系统 PATH 中的 `ffmpeg`，`test:integration` 还需要 `pdftoppm`（Poppler）。`test:improvements` 使用浏览器内生成的画面，无需 FFmpeg。
 
 完整回归请按以下顺序串行运行，避免浏览器和视频处理争抢资源。自定义浏览器路径时，将 `PPT_TEST_BROWSER` 导出到同一终端，使每个浏览器套件都能读取它。
 
@@ -32,6 +32,7 @@ Windows 默认可直接使用已安装的 Edge；macOS 和 Linux 使用 Playwrig
 npm test
 npm run test:release
 npm run test:bridge
+npm run test:generic
 npm run test:integration
 npm run test:review
 npm run test:features
@@ -57,9 +58,9 @@ npm run test:improvements
 - **`tests/improvements.cjs`**：在隔离上下文中验证 2 秒默认采样与旧设置保留、忽略区持久化及比较范围、原图与签名保留忽略区内容、签名缓存的复用/上限/失效，以及课次和批量状态原子保存与失败回滚；再检查所选 PDF / JPEG ZIP 的页序、默认全部导出、时间与书签设置保存、讲义标注、当前课次与批量列表的命名范围、两个整课入口的明确课程范围及异步导出快照（持有真实 IDB 事务）。PDF 用二进制结构和原始图片字节校验，当前导出证据保存在 `.test-output/v3.1.3/task4-*/`；既有 3.1.1 实测记录仍保留原版本。
 - **学习版整理回归**：`library.test` 检查当前来源 / 轨道 / 时长与完整原始页 ID 集合的核验有效性、签名续期、子集不能绕过整节无内容、计数和报告隐私。`library` 用真实 IndexedDB 检查仅改排除标记的整批提交 / 缺页、写异常及无效 ID 回滚、撤销和重开后的原 JPEG / 签名字节，新增页后课次保存失败也不能沿用旧核验；逐个校验本节、所选、课程和批量 PDF / ZIP 的图片字节、目录、ID / 时间 / 导出序号和冻结快照，另检报告内容。`improvements` 检查三类中性建议、局部新增内容、取消 / 重开 / 单独确认；`memory` 检查 1001 页建议每批最多 32 条、逐条释放、取消、仅选择可见页和减少动态效果。正常与低高度截图还检查新增控件、禁用状态、键盘操作及停止按钮。
 
-设置 `PPT_TEST_FILTER` 可只运行 `library`、`improvements`、`memory` 中名称匹配的分组；最终回归不设置该变量。`release`、`integration`、`review`、`features`、`library`、`improvements`、`memory` 均可用 `PPT_TEST_OUTPUT` 指定证据目录；3.1.3 本轮统一放在 `.test-output/learning-task-3/`。学习版实现的原始失败和最终检查按不同前缀保留命令、标准输出、错误输出、实际退出码与源文件摘要。原第二个连续同名 JSON、后续所选原始 PDF 曾未收到原生下载事件，原因仍未知；生产 Blob 内容校验不证明那两次原生下载成功。随后新增的独立用例在同一页面和上下文重载后点击真实批量报告入口，用原生下载保存并读回 JSON；它证明该入口与文件内容，不解释或治愈旧超时。具体来源与本轮结果见 [3.1.3 验证记录](../docs/superpowers/plans/2026-11-07-v3.1.3-validation.md)。
+设置 `PPT_TEST_FILTER` 可只运行 `library`、`improvements`、`memory` 中名称匹配的分组；最终回归不设置该变量。`release`、`integration`、`review`、`features`、`generic`、`library`、`improvements`、`memory` 均可用 `PPT_TEST_OUTPUT` 指定证据目录；3.1.3 本轮统一放在 `.test-output/learning-task-3/`。学习版实现的原始失败和最终检查按不同前缀保留命令、标准输出、错误输出、实际退出码与源文件摘要。原第二个连续同名 JSON、后续所选原始 PDF 曾未收到原生下载事件，原因仍未知；生产 Blob 内容校验不证明那两次原生下载成功。随后新增的独立用例在同一页面和上下文重载后点击真实批量报告入口，用原生下载保存并读回 JSON；它证明该入口与文件内容，不解释或治愈旧超时。具体来源与本轮结果见 [3.1.3 验证记录](../docs/superpowers/plans/2026-11-07-v3.1.3-validation.md)。
 
-- **`tests/release.test.cjs`**：在临时目录中验证 `npm run release` 打包出的 35 个文件内容（含 `motion.js` 与 `mp4-recovery.js`）、版本号一致性、`last-release/` 历史包归档，以及打包中途报错时原安装包不被破坏。
+- **`tests/release.test.cjs`**：在临时目录中验证 `npm run release` 打包出的 36 个文件内容（含 `src/` 下的运行脚本 `motion.js` 与 `mp4-recovery.js`）、版本号一致性、`last-release/` 历史包归档，以及打包中途报错时原安装包不被破坏。
 
 - **`tests/mp4-recovery.test.cjs` / 媒体接入用例**：Node 检查有界读取、索引和样本表、跨 4 GiB 偏移、时序、分组与加密负例、取消与本地读取失败，以及只改音轨 box type 的字节保留。`core` / `scanner` 检查原生错误的阶段、来源与时间、30 秒逐次读取期限、完整 206、编码 Content-Length、本地读取期限、跳转监听器清理和仅对实际改写结果生效的时长保护。
 

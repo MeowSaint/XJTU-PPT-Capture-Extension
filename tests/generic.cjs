@@ -46,20 +46,20 @@ async function main() {
   await new Promise(resolve => server.listen(0, resolve));
   const origin = `http://127.0.0.1:${server.address().port}`, other = `http://localhost:${server.address().port}`;
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'ppt-generic-')), ext = path.join(temp, 'extension'); fs.mkdirSync(ext);
-  for (const name of fs.readdirSync(root).filter(name => /\.(js|html|css)$/.test(name))) fs.copyFileSync(path.join(root, name), path.join(ext, name));
-  for (const name of ['icons', 'vendor']) fs.cpSync(path.join(root, name), path.join(ext, name), {recursive: true});
+  for (const name of ['capture.html', 'style.css']) fs.copyFileSync(path.join(root, name), path.join(ext, name));
+  for (const name of ['src', 'icons', 'vendor']) fs.cpSync(path.join(root, name), path.join(ext, name), {recursive: true});
   const manifest = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8'));
   // Static grants substitute for the browser's toolbar/permission UI in headless mode.
   manifest.host_permissions.push('http://127.0.0.1/*', 'http://localhost/*');
   fs.writeFileSync(path.join(ext, 'manifest.json'), JSON.stringify(manifest));
-  fs.writeFileSync(path.join(ext, 'background.js'), 'const registerClick = chrome.action.onClicked.addListener.bind(chrome.action.onClicked); chrome.action.onClicked.addListener = listener => { globalThis.fixtureClick = listener; registerClick(listener); };\n' + fs.readFileSync(path.join(root, 'background.js'), 'utf8'));
+  fs.writeFileSync(path.join(ext, 'src', 'background.js'), 'const registerClick = chrome.action.onClicked.addListener.bind(chrome.action.onClicked); chrome.action.onClicked.addListener = listener => { globalThis.fixtureClick = listener; registerClick(listener); };\n' + fs.readFileSync(path.join(root, 'src', 'background.js'), 'utf8'));
   let context;
   try {
     context = await chromium.launchPersistentContext(path.join(temp, 'profile'), {...browserOptions(), args: ['--load-extension=' + ext, '--disable-extensions-except=' + ext, '--disable-background-networking', '--no-proxy-server'], acceptDownloads: true});
     await context.route('https://**/*', route => route.abort());
     context.on('page', page => page.on('pageerror', error => errors.push(error.message)));
     const worker = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker');
-    const extension = worker.url().replace('/background.js', '');
+    const extension = new URL('/', worker.url()).href.replace(/\/$/, '');
     await worker.evaluate(() => chrome.storage.local.set({'ppt-study-consent': {version: 'course-materials-v1', acceptedAt: Date.now()}}));
     // Avoid update network traffic from the service worker (outside page routing).
     await worker.evaluate(() => { const fetchOriginal = fetch; globalThis.fetch = (input, options) => String(input).startsWith('https://api.github.com/') ? Promise.resolve(new Response('{}', {status: 404})) : fetchOriginal(input, options); });

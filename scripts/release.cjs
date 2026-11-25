@@ -4,9 +4,9 @@ const zlib = require('node:zlib');
 const { randomUUID } = require('node:crypto');
 
 const files = [
-  'manifest.json', 'background.js', 'media.js', 'course.js', 'batch.js', 'content.js',
-  'page-hook.js', 'capture.html', 'capture.js', 'mp4-recovery.js', 'scanner.js', 'pdf.js', 'style.css',
-  'extension-state.js', 'preflight.js', 'workspace.js', 'disk-cache.js', 'page-store.js', 'library.js', 'appearance.js', 'motion.js',
+  'manifest.json', 'src/background.js', 'src/media.js', 'src/course.js', 'src/batch.js', 'src/content.js',
+  'src/page-hook.js', 'capture.html', 'src/capture.js', 'src/mp4-recovery.js', 'src/scanner.js', 'src/pdf.js', 'style.css',
+  'src/extension-state.js', 'src/preflight.js', 'src/workspace.js', 'src/disk-cache.js', 'src/page-store.js', 'src/library.js', 'src/appearance.js', 'src/motion.js',
   'README.md', 'THIRD_PARTY_NOTICES.md', 'LICENSE', 'vendor/hls.min.js', 'vendor/hls.LICENSE',
   'icons/icon-16.png', 'icons/icon-32.png', 'icons/icon-48.png', 'icons/icon-128.png',
   'icons/browsers/chrome.svg', 'icons/browsers/edge.svg', 'icons/browsers/brave.svg',
