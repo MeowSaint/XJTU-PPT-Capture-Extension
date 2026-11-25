@@ -549,7 +549,7 @@ $('knowledge-review').onchange = async () => {
     await persistLesson(snapshot); Object.assign(activeLesson, snapshot);
     if (state === 'unreviewed') delete activeLesson.knowledgeReviewEvidence;
     status('本节复核已保存；新增页面或更换来源后需要重新复核。');
-  } catch (error) { status('内容复核保存失败：' + error.message); }
+  } catch (error) { status('本节复核保存失败：' + error.message); }
   finally { reviewBusy = false; controls(); }
 };
 function sameTimeline(a, b) {

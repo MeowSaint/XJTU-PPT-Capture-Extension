@@ -130,7 +130,7 @@
             <button id="ignore-select" type="button" aria-pressed="false" disabled>框选忽略区</button>
             <button id="ignore-clear" type="button" disabled>清除忽略区</button>
           </div>
-          <p id="ignore-status" class="note" aria-live="polite">未设置忽略区（仅影响翻页判断）</p>
+          <p id="ignore-status" class="note" aria-live="polite">未设置忽略区（只影响翻页和相似页判断）</p>
         </section>
 
         <section id="panel-export" class="setting-panel" role="tabpanel" aria-labelledby="tab-export" tabindex="0" hidden>
@@ -197,7 +197,7 @@
               <video id="video" muted controls playsinline preload="metadata"></video>
               <canvas id="overlay" tabindex="0" aria-label="框选截取范围或忽略区；方向键移动，Shift 加方向键调整大小，Enter 确认，Escape 取消"></canvas>
               <div id="preview-empty">
-                <p class="preview-empty-title">等待加载视频</p>
+                <p class="preview-empty-title">加载视频后这里显示预览</p>
                 <p>在左侧选视频或导入本地文件</p>
               </div>
             </div>
