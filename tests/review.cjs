@@ -143,6 +143,9 @@ function zipEntries(bytes) {
   try {
     const video = spawnSync(process.env.PPT_TEST_FFMPEG || 'ffmpeg', ['-y', '-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=duration=4:size=640x360:rate=10', '-an', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', fixture], {encoding: 'utf8'});
     assert.equal(video.status, 0, video.stderr || video.error?.message);
+    // Chromium reports File.lastModified as whole milliseconds; pin the fixture mtime to a whole
+    // second so comparison against fs.statSync().mtimeMs cannot drift by sub-millisecond rounding.
+    fs.utimesSync(fixture, 1793808000, 1793808000);
     const wrong = path.join(output, 'other', path.basename(fixture)); fs.mkdirSync(path.dirname(wrong));
     const differentPayload = Buffer.from('different file with the same name');
     const freeBox = Buffer.alloc(8 + differentPayload.length);
