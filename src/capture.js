@@ -158,7 +158,7 @@ function renderLibrary() {
   select.value = activeLesson?.id || '';
   const scan = activeLesson?.task;
   const evidence = scan && PPTLibrary.integrity({lessons: [activeLesson]}).lessons[0].scan;
-  $('resume-status').textContent = scan ? `${evidence.reachedEnd ? '已从头连续扫到尾部' : evidence.verified ? '尚无从头连续扫到尾部的证据' : '旧任务，需核对尾部'}；断点 ${timecode(scan.checkpoint || 0)}${!sourceReady ? '；重新加载原视频后可继续。' : canResume() ? '；可以继续提取。' : scan.state !== 'done' ? '；设置已变化，下次从头扫描。' : '。'}` : '每节截图、裁剪和提取设置会保存在本机。';
+  $('resume-status').textContent = scan ? `${evidence.reachedEnd ? '已扫至尾部' : evidence.verified ? '未确认扫至尾部' : '旧任务需核对尾部'} · 断点 ${timecode(scan.checkpoint || 0)}${!sourceReady ? ' · 重新加载原视频可继续' : canResume() ? ' · 可继续提取' : scan.state !== 'done' ? ' · 设置已变，将从头扫描' : ''}` : '';
   $('resume-load').hidden = sourceReady || !activeLesson?.source;
   $('resume-load').textContent = activeLesson?.source?.kind === 'file' ? '重新选择本地原视频' : '加载本节原视频';
   const list = $('suspect-ranges'); list.replaceChildren();
@@ -351,7 +351,7 @@ function singleFilename(info, page) {
 }
 function previewName() {
   const name = singleFilename(namingInfo(), activeLesson?.page || namingPage || coursePage);
-  $('filename-preview').textContent = name ? `下载文件名：${name}` : '填好课程名称、上课日期和开始时间后，这里会显示导出文件名。';
+  $('filename-preview').textContent = name ? `下载文件名：${name}` : '未填写导出命名';
   syncWorkspace();
 }
 function setNaming(info, page) {
@@ -482,7 +482,7 @@ async function deletePages(ids) {
     removed.forEach(item => selectedPages.delete(item.page.id));
     if (wanted.has(previewPageId)) previewPageId = pages[Math.min(previewIndex, pages.length - 1)]?.id ?? null;
     render(); if (batchJobs.length) renderBatchJobs();
-    status(`已删除 ${removed.length} 页，可点击“撤销删除”恢复。`);
+    status(`已删除 ${removed.length} 页，可点“撤销”恢复。`);
   } catch (e) { status('删除失败：' + e.message); }
   finally { reviewBusy = false; controls(); }
 }
@@ -771,7 +771,7 @@ function updateSelection() {
   const visible = visiblePages(), visibleIds = new Set(visible.map(page => page.id));
   selectedPages = new Set([...selectedPages].filter(id => visibleIds.has(id)));
   if (!visibleIds.has(selectionAnchor)) selectionAnchor = null;
-  $('lightbox-select').textContent = selectedPages.has(previewPageId) ? '取消选中 (S)' : '选中此页 (S)';
+  $('lightbox-select').textContent = selectedPages.has(previewPageId) ? '取消选中 (S)' : '选中 (S)';
   $('lightbox-select').setAttribute('aria-pressed', String(selectedPages.has(previewPageId)));
   $('selected-count').textContent = `已选 ${selectedPages.size} 页`;
   $('select-all').checked = visible.length > 0 && selectedPages.size === visible.length;
@@ -880,7 +880,8 @@ function controls() {
   $('learning-exclude').disabled = active || !pages.some(page => selectedPages.has(page.id) && page.learningExcluded !== true);
   $('learning-restore').disabled = active || !pages.some(page => selectedPages.has(page.id) && page.learningExcluded === true);
   $('learning-suggest').disabled = active || !pages.length;
-  $('undo').textContent = undoState?.flags ? '撤销排除/恢复' : '撤销删除';
+  $('undo').textContent = undoState?.flags ? '撤销排除' : '撤销';
+  $('undo').title = undoState?.flags ? '撤销上一步排除或恢复' : '撤销上一步删除';
   for (const id of ['load-url', 'url', 'file', 'share', 'sources', 'course', 'discover', 'mode', 'diff', 'dedupe', 'stable', 'page-limit', 'video-only', 'full', 'course-name', 'course-date', 'course-start', 'pdf-layout', 'pdf-timestamps', 'pdf-bookmarks']) $(id).disabled = active;
   $('load').disabled = active || !$('sources').value;
   $('full').disabled = active || !sourceReady;
@@ -889,9 +890,10 @@ function controls() {
   $('crop-select').setAttribute('aria-pressed', String(selectionMode === 'crop'));
   $('ignore-select').disabled = active || !sourceReady;
   $('ignore-clear').disabled = active || !sourceReady || !ignoreRect;
-  $('ignore-select').textContent = selectionMode === 'ignore' ? '取消忽略区框选' : '框选忽略区';
+  $('ignore-select').textContent = selectionMode === 'ignore' ? '取消框选' : '框选忽略区';
   $('ignore-select').setAttribute('aria-pressed', String(selectionMode === 'ignore'));
-  $('ignore-status').textContent = `${ignoreRect ? '已设置忽略区，虚线内不参与比较。' : '未设置忽略区。'}截图和导出保留完整内容。框选时方向键移动，Shift+方向键调整大小，Enter 确认，Esc 取消。`;
+  $('ignore-status').textContent = (ignoreRect ? '已设置忽略区（导出保留原画面）' : '未设置忽略区（仅影响翻页判断）')
+    + (selectionMode === 'ignore' ? ' · 方向键移动，Shift+方向键调大小，Enter 确认，Esc 取消' : '');
   $('run').disabled = active || !sourceReady || !ready;
   $('run').textContent = stream ? '开始实时截取' : canResume() ? `继续提取 · ${timecode(activeLesson.task.checkpoint)}` : '开始快速提取';
   $('lesson-select').disabled = active || !ready || !lessons.length;
@@ -2229,7 +2231,7 @@ $('end').onclick = endSharing;
 async function discover() {
   if (busy()) return;
   window.PPTWorkspace?.cancelPreflight();
-  if (!window.chrome?.tabs) { $('source-status').textContent = '从课程页点扩展图标可自动找视频，也可以直接导入本地视频。'; return; }
+  if (!window.chrome?.tabs) { $('source-status').textContent = '点扩展图标自动找视频，或直接导入本地视频。'; return; }
   const revision = ++discoverySerial;
   try {
     const selected = $('course').value || new URLSearchParams(location.search).get('tab');
@@ -2247,7 +2249,7 @@ async function discover() {
       }
       if (sourceReady) await releaseSource();
       coursePage = ''; acceptCourse({}, ''); sources = []; updateSources(true);
-      $('source-status').textContent = '来源页已关闭或访问权限已失效。请回到视频页重新点击扩展图标；也可以导入本地视频。'; return;
+      $('source-status').textContent = '来源页已关闭或访问权限已失效，请回视频页重新点扩展图标，或导入本地视频。'; return;
     }
     const id = Number($('course').value), nextPage = tabs.find(t => t.id === id)?.url || '';
     if (coursePage !== nextPage) { invalidateUndo(); updateSelection(); }
@@ -2272,7 +2274,7 @@ async function discover() {
     if (revision !== discoverySerial) return;
     const currentTab = await chrome.tabs.get(id).catch(() => null);
     if (revision !== discoverySerial) return;
-    if (currentTab?.url !== coursePage) { sources = []; updateSources(true); $('source-status').textContent = '来源页已切换，请刷新视频列表；跨站切换后请重新点击扩展图标。'; return; }
+    if (currentTab?.url !== coursePage) { sources = []; updateSources(true); $('source-status').textContent = '来源页已切换，请点“刷新列表”；跨站请回视频页重新点扩展图标。'; return; }
     const key = 'media-' + id, tabUrl = tabs.find(t => t.id === id)?.url;
     let entry = (await chrome.storage.session.get(key))[key];
     if (revision !== discoverySerial) return;
@@ -2314,13 +2316,13 @@ async function discover() {
     if (discovered?.page === coursePage) acceptCourse(discovered.course, coursePage);
     updateSources(true);
     if (PPTCore.isCoursePage(coursePage) && PPTBatch.courseId(coursePage) && batchPage !== coursePage) await discoverBatch(id, true);
-    $('source-status').textContent = injectionError && !sources.length ? '无法读取来源页，请点“授权来源页并刷新”，或回到视频页重新点击扩展图标。' : sourceSummary();
-  } catch (e) { $('source-status').textContent = '发现视频失败：' + e.message + '。请刷新课程页，或使用手动地址 / 本地视频。'; }
+    $('source-status').textContent = injectionError && !sources.length ? '无法读取来源页，请点“授权来源页”或回视频页重新点扩展图标。' : sourceSummary();
+  } catch (e) { $('source-status').textContent = '发现视频失败：' + e.message + '。可刷新来源页，或改用手动地址 / 本地视频。'; }
 }
 function sourceSummary() {
   const context = sourceCoursePage === coursePage && sourceCourse.name ? `${lessonLabel({course: sourceCourse})} · ` : '';
-  if (batchPage === coursePage && batchJobs.length) return `${context}批量目录 ${batchJobs.length} 节。单节视频候选 ${sources.length} 个，可在批量列表选择课次。`;
-  return context + (sources.length ? `已发现 ${sources.length} 个视频地址，选好后点击“加载选中视频”。` : '暂未发现可读取的视频地址。请在来源页播放几秒再刷新列表；仍无结果时，可用“实时共享画面”随播放截取。');
+  if (batchPage === coursePage && batchJobs.length) return `${context}批量目录 ${batchJobs.length} 节 · 候选 ${sources.length} 个。`;
+  return context + (sources.length ? `已发现 ${sources.length} 个视频，选好后点“加载视频”。` : '暂未发现视频：请在原页播放几秒后刷新，或用“实时共享画面”。');
 }
 function updateSources(reset = false) {
   sources = sources.map(item => ({...item, ...(sourceCandidates.find(candidate => candidate.url === item.url) || {}),
@@ -2334,7 +2336,7 @@ $('source-authorize').onclick = () => {
   // Request from the click turn, before awaiting, to retain the user gesture.
   chrome.permissions.request({origins: [originPattern(coursePage)]}).then(granted => {
     if (granted) return discover();
-    $('source-status').textContent = '未授予来源页权限。可回视频页点击扩展临时读取，或导入本地视频。';
+    $('source-status').textContent = '未授予来源页权限，可回视频页点扩展临时读取，或导入本地视频。';
   }).catch(error => { $('source-status').textContent = '来源页授权未完成：' + error.message; });
 };
 $('page-limit').onchange = async () => {

@@ -44,28 +44,28 @@
         <section id="panel-source" class="setting-panel" role="tabpanel" aria-labelledby="tab-source" tabindex="0">
           <div class="section-heading">
             <h2>视频来源</h2>
-            <button id="discover" class="button-quiet" type="button">刷新视频列表</button>
+            <button id="discover" class="button-quiet" type="button">刷新列表</button>
           </div>
           <label class="field-stack" for="course">
             <span>来源标签页</span>
             <select id="course"></select>
           </label>
-          <button id="source-authorize" class="button-quiet" type="button" disabled>授权来源页并刷新</button>
+          <button id="source-authorize" class="button-quiet" type="button" disabled>授权来源页</button>
           <label class="field-stack" for="sources">
             <span>已发现视频</span>
             <select id="sources"><option value="">等待发现视频</option></select>
           </label>
           <div class="selected-source" aria-live="polite">
-            <p id="selected-source-name">尚未选择视频</p>
-            <p id="source-track-hint" class="note">加载后确认 PPT 画面，再开始提取。</p>
+            <p id="selected-source-name"></p>
+            <p id="source-track-hint" class="note"></p>
           </div>
           <div class="preflight-tools">
             <label class="check"><input id="source-show-all" type="checkbox"><span>显示无效地址</span></label>
             <button id="preflight-authorize" class="button-quiet" type="button" disabled>重新检测</button>
           </div>
-          <p id="preflight-status" class="note" role="status" aria-live="polite">发现视频后自动检测可用地址。</p>
-          <button id="load" class="source-load" type="button" disabled>加载选中视频</button>
-          <p id="source-status" class="status-line">从视频页点扩展图标可自动找视频，也可以直接导入本地视频。</p>
+          <p id="preflight-status" class="note" role="status" aria-live="polite"></p>
+          <button id="load" class="source-load" type="button" disabled>加载视频</button>
+          <p id="source-status" class="status-line">点扩展图标自动找视频，或直接导入本地视频。</p>
           <label class="field-stack local-file">
             <span>本地视频</span>
             <input id="file" type="file" accept="video/*,.mp4,.m4v,.webm,.mov">
@@ -80,7 +80,7 @@
               </div>
             </details>
             <details id="share-panel" class="drawer">
-              <summary>备用方式：实时共享画面</summary>
+              <summary>实时共享画面</summary>
               <div class="drawer-body bar">
                 <button id="share" type="button">选择共享画面</button>
                 <button id="end" type="button" disabled>停止共享并保留截图</button>
@@ -91,12 +91,6 @@
                     <span>秒后记为新页</span>
                   </span>
                 </label>
-              </div>
-            </details>
-            <details class="drawer help-drawer">
-              <summary>使用说明</summary>
-              <div class="drawer-body">
-                <p class="note">1. 在视频页播放几秒，点击扩展图标。2. 选择并加载视频，确认预览或框选 PPT 区域，开始快速提取。思源学堂可优先查看 2- 开头的视频。3. 校对截图后导出 PDF 或图片包。没有可读取的地址时，可使用实时共享画面。</p>
               </div>
             </details>
           </div>
@@ -127,16 +121,16 @@
             <span>每节页数上限</span>
             <input id="page-limit" type="number" min="100" max="20000" step="1" value="5000" aria-describedby="page-limit-note">
           </label>
-          <p id="page-limit-note" class="note">可设置 100–20000 页，默认 5000 页。达到上限后保留截图和进度，调高上限即可继续；本机剩余空间不足时也会暂停。</p>
+          <p id="page-limit-note" class="note">100–20000 页；达上限或空间不足时暂停并保留进度</p>
           <details class="drawer secondary-tools">
             <summary>采样与漏页</summary>
-            <div class="drawer-body"><p class="note">2 秒、8 秒粗采样可能漏掉短暂翻页。精细采样也可能漏过短于采样间隔或稳定确认窗口的画面；漏页时可细查对应时间段。动画过渡帧可在“清理相似页”中逐对确认后删除。</p></div>
+            <div class="drawer-body"><p class="note">粗采样可能漏过短暂翻页，可针对时间段细查；动画过渡帧可在“清理相似页”中逐对确认。</p></div>
           </details>
           <div class="bar">
             <button id="ignore-select" type="button" aria-pressed="false" disabled>框选忽略区</button>
             <button id="ignore-clear" type="button" disabled>清除忽略区</button>
           </div>
-          <p id="ignore-status" class="note" aria-live="polite">未设置忽略区。仅影响画面比较，截图和导出保留完整内容。框选时可用方向键移动，Shift+方向键调整大小，Enter 确认，Esc 取消。</p>
+          <p id="ignore-status" class="note" aria-live="polite">未设置忽略区（仅影响翻页判断）</p>
         </section>
 
         <section id="panel-export" class="setting-panel" role="tabpanel" aria-labelledby="tab-export" tabindex="0" hidden>
@@ -167,8 +161,8 @@
           <details class="drawer secondary-tools">
             <summary>导出范围与版式说明</summary>
             <div class="drawer-body">
-              <p class="note">“本节”包含当前课次的保留页；勾选截图后可只导出所选页。“整课”包含当前课程所有课次，空课次会跳过，未完成课次会提示。</p>
-              <p class="note pane-note">合并 PDF 按“课程 → 课次 → 页码与时间”生成目录；分课包每节一个 PDF。笔记讲义为 A4 每页两张，带手写横线，每节另起一页。图片包保留原图 JPEG，按页序命名。</p>
+              <p class="note">本节导出当前保留页，勾选后仅导出所选页；整课自动跳过空课次并提示未完成课次。</p>
+              <p class="note pane-note">合并 PDF 含三级书签；分课包每节一个 PDF；讲义为 A4 每页两张带横线；图片包保留原图 JPEG。</p>
             </div>
           </details>
         </section>
@@ -189,7 +183,7 @@
             <button id="batch-course-report" type="button" disabled>课程完整性报告</button>
           </div>
           <div id="batch-jobs" class="batch-jobs" role="list"></div>
-          <p id="batch-status" class="note" aria-live="polite">在课程录像列表页打开工具，点“读取课程课次”即可加载全部课次。</p>
+          <p id="batch-status" class="note" aria-live="polite">在思源课程列表页点“读取课程课次”加载全部课次。</p>
         </div>
       </details>
         <section id="panel-capture" aria-label="视频预览与提取">
@@ -203,8 +197,8 @@
               <video id="video" muted controls playsinline preload="metadata"></video>
               <canvas id="overlay" tabindex="0" aria-label="框选截取范围或忽略区；方向键移动，Shift 加方向键调整大小，Enter 确认，Escape 取消"></canvas>
               <div id="preview-empty">
-                <p class="preview-empty-title">加载视频后预览画面</p>
-                <p>选择课程，或导入本地视频</p>
+                <p class="preview-empty-title">等待加载视频</p>
+                <p>在左侧选视频或导入本地文件</p>
               </div>
             </div>
           </div>
@@ -212,15 +206,12 @@
             <div class="frame-actions" role="group" aria-label="确认截取画面">
               <button id="crop-select" type="button" aria-pressed="false" disabled>框选 PPT 区域</button>
               <button id="full" class="button-quiet" type="button" disabled>使用完整画面</button>
-            </div>
-            <p id="frame-source-hint" class="note">先确认视频中的 PPT 画面，必要时框选截取区域。</p>
-            <div class="secondary-actions" role="group" aria-label="补页与重新提取">
               <button id="shot" type="button" disabled>保存当前页</button>
               <button id="restart-scan" class="button-quiet" type="button" disabled hidden>从头重扫</button>
             </div>
             <div class="capture-maintenance" role="group" aria-label="裁剪复用与视频缓存">
               <div class="bar">
-                <button id="crop-reuse" type="button" disabled>将本节裁剪用于本课其他 0 路课次</button>
+                <button id="crop-reuse" class="button-quiet" type="button" disabled title="将本节裁剪用于本课其他 0 路课次">复用裁剪到其他 0 路</button>
                 <button id="release-cache" class="button-quiet" type="button" disabled title="卸载当前视频，保留截图和命名信息">释放视频缓存</button>
               </div>
             </div>
@@ -228,12 +219,12 @@
           <div class="capture-feedback">
             <progress id="progress" max="1" value="0" aria-label="提取进度"></progress>
             <p id="status" class="status-line" role="status" aria-live="polite">尚未加载视频</p>
-            <p id="resume-status" class="note">每节截图、裁剪和提取设置会保存在本机。</p>
+            <p id="resume-status" class="note"></p>
           </div>
           <details id="suspects-panel" class="drawer">
             <summary id="suspects-count">待复核时间段 · 0</summary>
             <div class="drawer-body">
-              <p class="note">过渡画面可能漏页，加载原视频后可回看或只细查这一段。细查仍不稳定时会继续保留记录。</p>
+              <p class="note">加载原视频后可回看或单独细查以下过渡时段。</p>
               <div id="suspect-ranges"></div>
             </div>
           </details>
@@ -254,7 +245,7 @@
                 <button id="export-zip" type="button" disabled>本节图片包</button>
               </div>
             </div>
-            <p id="filename-preview" class="status-line" aria-live="polite">请填写课程信息以预览文件名。</p>
+            <p id="filename-preview" class="status-line" aria-live="polite">未填写导出命名</p>
             <div class="export-row">
               <p id="export-options-summary" class="note">原始页面 · 每页一张</p>
               <button id="export-settings" class="button-quiet" type="button">导出设置</button>
@@ -265,29 +256,28 @@
                 <button id="course-pdf" type="button" disabled>合并整课 PDF</button>
                 <button id="course-zip" type="button" disabled>分课 PDF 包</button>
                 <button id="course-report" type="button" disabled>课程完整性报告</button>
-                <span class="note">整课全部保留页</span>
               </div>
             </div>
           </div>
           <div class="learning-tools" role="group" aria-label="学习整理">
             <label>显示 <select id="learning-view"><option value="all">全部页</option><option value="kept">保留页</option><option value="excluded">已排除页</option></select></label>
-            <label>本节内容复核 <select id="knowledge-review" disabled><option value="unreviewed">尚未核验</option><option value="has-content">有独立知识内容</option><option value="no-content">无独立知识内容（学习版跳过本节）</option></select></label>
-            <button id="learning-suggest" type="button" disabled>查看整理建议</button>
+            <label>本节复核 <select id="knowledge-review" disabled><option value="unreviewed">未复核</option><option value="has-content">有独立内容</option><option value="no-content">无独立内容（跳过）</option></select></label>
+            <button id="learning-suggest" type="button" disabled>整理建议</button>
           </div>
           <div class="review-tools" role="group" aria-label="页面筛选">
             <button id="learning-exclude" type="button" disabled>排除所选</button>
             <button id="learning-restore" type="button" disabled>恢复所选</button>
             <label class="select-all"><input id="select-all" type="checkbox" disabled><span>全选</span></label>
             <span id="selected-count" aria-live="polite">已选 0 页</span>
-            <button id="clear-selection" class="button-quiet" type="button" disabled>取消选择</button>
-            <button id="selected-pdf" type="button" disabled>导出所选 PDF</button>
-            <button id="selected-zip" type="button" disabled>导出所选图片包</button>
-            <button id="delete-selected" class="button-quiet button-danger" type="button" disabled>删除所选</button>
-            <button id="undo" type="button" disabled>撤销删除</button>
+            <button id="clear-selection" class="button-quiet" type="button" disabled>取消</button>
+            <button id="selected-pdf" type="button" disabled>所选 PDF</button>
+            <button id="selected-zip" type="button" disabled>所选图片包</button>
+            <button id="delete-selected" class="button-quiet button-danger" type="button" disabled>删除</button>
+            <button id="undo" type="button" disabled>撤销</button>
             <button id="clean-similar" class="button-quiet" type="button" disabled>清理相似页</button>
           </div>
-          <p id="review-notice" class="note" hidden>拖动卡片调序，Shift+勾选可连续选择或取消；点缩略图放大，点时间回看视频。</p>
-          <section id="pages" tabindex="0" aria-label="幻灯片列表" data-empty-hint="加载视频后，点击“开始快速提取”或“保存当前页”。"></section>
+          <p id="review-notice" class="note" hidden>拖拽调序 · Shift 连选 · 点图放大 · 点时间回看</p>
+          <section id="pages" tabindex="0" aria-label="幻灯片列表" data-empty-hint="加载视频后点“开始快速提取”或“保存当前页”。"></section>
         </section>
       </main>
     </div>
@@ -298,34 +288,34 @@
   </div>
   <dialog id="library-dialog" class="workspace-dialog" aria-labelledby="library-title">
     <h2 id="library-title">管理本机课次</h2>
-    <p class="note">估算仅含截图、缩略图和比较签名，不含视频缓存及浏览器存储开销。删除课次或整课后不可撤销。</p>
+    <p class="note">仅估算截图、缩略图和签名（不含视频缓存）；删除不可撤销。</p>
     <p id="library-status" role="status" aria-live="polite"></p>
     <div id="library-list"></div>
     <div id="library-confirm" hidden>
       <p id="library-confirm-text"></p>
       <div class="dialog-actions"><button id="library-cancel-delete" type="button">取消删除</button><button id="library-delete" class="button-danger" type="button">永久删除</button></div>
     </div>
-    <div class="dialog-actions"><button id="library-close" type="button" autofocus>关闭管理</button></div>
+    <div class="dialog-actions"><button id="library-close" type="button" autofocus>关闭</button></div>
   </dialog>
   <dialog id="crop-reuse-dialog" class="workspace-dialog" aria-labelledby="crop-reuse-title">
     <h2 id="crop-reuse-title">复用本节 PPT 裁剪</h2>
     <p id="crop-reuse-summary"></p>
-    <p class="note">仅用于本课程尚未完成、未单独框选的 0 路课次。载入时会核对视频轨道和宽高比；不匹配的课次仍需手动框选。</p>
-    <label class="check"><input id="crop-reuse-agree" type="checkbox"><span>我确认这些课次使用相同机位，PPT 在画面中的位置相同。</span></label>
+    <p class="note">仅应用于本课未完成、未框选的 0 路课次；轨道或比例不匹配时仍需手动框选。</p>
+    <label class="check"><input id="crop-reuse-agree" type="checkbox"><span>确认这些课次机位与 PPT 位置相同</span></label>
     <p id="crop-reuse-status" role="status" aria-live="polite"></p>
     <div class="dialog-actions"><button id="crop-reuse-cancel" type="button" autofocus>取消</button><button id="crop-reuse-apply" type="button" disabled>应用到这些课次</button></div>
   </dialog>
   <dialog id="lightbox" aria-labelledby="lightbox-meta">
     <div class="lightbox-heading">
       <h2 id="lightbox-meta"></h2>
-      <button id="lightbox-close" type="button" autofocus>关闭预览</button>
+      <button id="lightbox-close" type="button" autofocus>关闭</button>
     </div>
     <div class="lightbox-canvas"><img id="lightbox-img" alt=""></div>
     <div class="lightbox-tools" role="group" aria-label="预览操作">
       <button id="lightbox-prev" type="button">上一页</button>
       <button id="lightbox-next" type="button">下一页</button>
-      <button id="lightbox-select" type="button" aria-pressed="false">选中此页 (S)</button>
-      <button id="lightbox-seek" type="button">回看视频 (V)</button>
+      <button id="lightbox-select" type="button" aria-pressed="false">选中 (S)</button>
+      <button id="lightbox-seek" type="button">回看 (V)</button>
       <button id="lightbox-delete" class="button-danger" type="button">删除</button>
       <span class="note">← → 翻页 · Delete 删除 · Esc 关闭</span>
     </div>
@@ -333,7 +323,7 @@
   </dialog>
   <dialog id="learning-dialog" class="workspace-dialog" aria-labelledby="learning-title" aria-describedby="learning-status">
     <h2 id="learning-title">整理建议</h2>
-    <p class="note">按画面差异和保存时间提供线索，请逐页查看。建议不判断知识内容，也不会自动排除页面。</p>
+    <p class="note">仅按画面与时间线索提示，不会自动排除，请逐页确认。</p>
     <p id="learning-status" role="status" aria-live="polite"></p>
     <div id="learning-suggestions"></div>
     <div class="dialog-actions"><button id="learning-cancel" type="button" autofocus>取消</button><button id="learning-confirm" type="button" disabled>确认排除勾选页</button></div>
