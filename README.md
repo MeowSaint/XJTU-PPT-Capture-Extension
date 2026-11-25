@@ -4,7 +4,7 @@
 
 把课程录播里的幻灯片自动截下来，去重整理后导出成 PDF 或图片包。西安交通大学思源学堂能提取单节回放，也能批量提取整门课；其他网站的网页视频、本地视频文件和实时共享的画面同样可以提取。
 
-当前版本：**3.2.0** · [下载扩展](https://github.com/MeowSaint/XJTU-PPT-Capture-Extension/releases/latest) · [版本记录](https://github.com/MeowSaint/XJTU-PPT-Capture-Extension/releases)
+当前版本：**3.2.1** · [下载扩展](https://github.com/MeowSaint/XJTU-PPT-Capture-Extension/releases/latest) · [版本记录](https://github.com/MeowSaint/XJTU-PPT-Capture-Extension/releases)
 
 > [!WARNING]
 > **仅供学习复习，请尊重老师的劳动。**
