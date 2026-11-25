@@ -165,7 +165,7 @@ function page(store, locks, overrides = {}) {
     setInterval() { throw Error('the cache must not expire files on its own'); },
     ...overrides
   };
-  vm.runInNewContext(fs.readFileSync(require.resolve('../disk-cache.js'), 'utf8'), context);
+  vm.runInNewContext(fs.readFileSync(require.resolve('../src/disk-cache.js'), 'utf8'), context);
   return {
     owner, api: context.PPTDiskCache, context, wrappers,
     hide() { for (const listener of listeners.get('pagehide') || []) listener({type: 'pagehide'}); }

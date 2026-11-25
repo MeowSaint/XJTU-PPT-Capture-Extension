@@ -23,10 +23,10 @@
     }
   },
   "background": {
-    "service_worker": "background.js"
+    "service_worker": "src/background.js"
   },
   "content_scripts": [
-    {"matches": ["https://rms-v5.xjtu.edu.cn/*"], "js": ["media.js", "course.js", "page-hook.js"], "run_at": "document_start", "all_frames": true, "world": "MAIN"},
-    {"matches": ["https://rms-v5.xjtu.edu.cn/*"], "js": ["media.js", "course.js", "batch.js", "extension-state.js", "content.js"], "run_at": "document_start", "all_frames": true}
+    {"matches": ["https://rms-v5.xjtu.edu.cn/*"], "js": ["src/media.js", "src/course.js", "src/page-hook.js"], "run_at": "document_start", "all_frames": true, "world": "MAIN"},
+    {"matches": ["https://rms-v5.xjtu.edu.cn/*"], "js": ["src/media.js", "src/course.js", "src/batch.js", "src/extension-state.js", "src/content.js"], "run_at": "document_start", "all_frames": true}
   ]
 }

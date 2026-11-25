@@ -2259,8 +2259,8 @@ async function discover() {
     acceptCourse({}, coursePage);
     let injectionError = '';
     try {
-      await chrome.scripting.executeScript({target: {tabId: id, allFrames: true}, world: 'MAIN', files: ['media.js', 'course.js', 'page-hook.js']});
-      await chrome.scripting.executeScript({target: {tabId: id, allFrames: true}, files: ['media.js', 'course.js', 'batch.js', 'extension-state.js', 'content.js']});
+      await chrome.scripting.executeScript({target: {tabId: id, allFrames: true}, world: 'MAIN', files: ['src/media.js', 'src/course.js', 'src/page-hook.js']});
+      await chrome.scripting.executeScript({target: {tabId: id, allFrames: true}, files: ['src/media.js', 'src/course.js', 'src/batch.js', 'src/extension-state.js', 'src/content.js']});
     } catch (error) { injectionError = error.message; }
     // Collect accessible child frames directly; the top frame cannot see their DOM.
     const frameReplies = await chrome.scripting.executeScript({target: {tabId: id, allFrames: true},

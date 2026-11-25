@@ -2,7 +2,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const vm = require('node:vm');
 const fs = require('node:fs');
-const core = require('../media.js');
+const path = require('node:path');
+const core = require('../src/media.js');
 test('ignore masks rasterize edges and reject invalid or fully covered comparison images', () => {
   assert.equal(core.ignoreMask(null), null);
   assert.deepEqual([...core.ignoreMask({x: .26, y: 0, w: .25, h: .5}, 4, 2)], [0, 1, 1, 0, 0, 0, 0, 0]);
@@ -22,8 +23,8 @@ test('masked comparison excludes ignored pixels from bias and both denominators 
   assert.deepEqual([a, b, mask], original);
   assert.equal(core.similar(a, b), false);
 });
-global.PPTCourse = require('../course.js');
-const batch = require('../batch.js');
+global.PPTCourse = require('../src/course.js');
+const batch = require('../src/batch.js');
 test('parses video URLs equally without filename preference; excludes segments', () => {
   const a = core.mediaInfo('https://cdn.example/course_1.mp4?sign=abc');
   const b = core.mediaInfo('https://cdn.example/course_2.mp4?sign=xyz');
@@ -182,7 +183,7 @@ function backgroundHarness() {
     }}
   };
   const context = vm.createContext({chrome, PPTCore: core, importScripts() {}, URL, Date});
-  vm.runInContext(fs.readFileSync(require.resolve('../background.js'), 'utf8'), context);
+  vm.runInContext(fs.readFileSync(require.resolve('../src/background.js'), 'utf8'), context);
   const send = (...urls) => new Promise(resolve => listeners.message({type: 'PPT_MEDIA', urls}, {tab: {id: 42}, url: tab.url}, resolve));
   const flush = () => vm.runInContext('queue', context);
   return {listeners, storage, badges, tab, state, send, flush};
@@ -204,6 +205,7 @@ test('generic toolbar entry retains its tab and injects collectors; restricted p
   assert.equal(state.createdTab.url, 'chrome-extension://fixture/capture.html?tab=17');
   assert.equal(state.injections.length, 2);
   assert(state.injections.every(call => call.target.tabId === 17 && call.target.allFrames));
+  assert(state.injections.every(call => Array.isArray(call.files) && call.files.length > 0 && call.files.every(file => file.startsWith('src/') && fs.existsSync(path.join(__dirname, '..', file)))));
   assert.equal(state.injections[0].world, 'MAIN');
   await listeners.clicked({id: 18, url: 'chrome://extensions/'});
   assert.equal(state.createdTab.url, 'chrome-extension://fixture/capture.html');
@@ -302,7 +304,7 @@ test('media errors retain stage and native uncertainty with source-aware guidanc
 });
 
 function mediaHarness(extra = {}) {
-  const source = fs.readFileSync(require.resolve('../capture.js'), 'utf8');
+  const source = fs.readFileSync(require.resolve('../src/capture.js'), 'utf8');
   const nodes = new Map();
   const video = Object.assign(new EventTarget(), {readyState: 0, error: null, duration: 8, videoWidth: 640, videoHeight: 360, currentTime: 0, getVideoPlaybackQuality: () => ({totalVideoFrames: 1, droppedVideoFrames: 0})});
   const sandbox = {PPTCore: core, DOMException, AbortController, Blob, URL, setTimeout, clearTimeout, video,
@@ -426,7 +428,7 @@ test('local parser reads reject by actual source, enforce per-read deadlines, an
   for (const stalled of [false, true]) {
     const file = new Blob(['0123456789']), original = file.slice.bind(file); let release;
     file.slice = (...args) => { const part = original(...args); part.arrayBuffer = stalled ? () => new Promise(resolve => { release = resolve; }) : async () => { throw Error('disk offline'); }; return part; };
-    const h = mediaHarness({PPTMP4: require('../mp4-recovery.js')});
+    const h = mediaHarness({PPTMP4: require('../src/mp4-recovery.js')});
     await assert.rejects(h.prepareMedia(file, undefined, {timeoutMs: 10}), error => {
       assert.equal(error.code, 'LOCAL_READ_FAILED'); assert.equal(error.phase, 'local-read');
       assert.doesNotMatch(error.message, /moov|索引|刷新/); return true;
@@ -444,7 +446,7 @@ test('local parser reads reject by actual source, enforce per-read deadlines, an
 
 
 test('screenshot time seeks use the same cancellable native diagnostics', async () => {
-  const source = fs.readFileSync(require.resolve('../capture.js'), 'utf8'); let message = '', seeks = 0;
+  const source = fs.readFileSync(require.resolve('../src/capture.js'), 'utf8'); let message = '', seeks = 0;
   const h = {AbortController, sourceReady: true, stream: null, loadedIdentity: {sourceKey: 'original'}, mediaContext: {local: true}, task: null,
     busy: () => false, controls: () => {}, status: text => { message = text; }, timecode: String, $: () => ({open: false}),
     PPTLibrary: {key: value => value.sourceKey}, video: {duration: 8, currentTime: 0, pause() {}, seekable: {length: 1, start: () => 0, end: () => 8}},

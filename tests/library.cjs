@@ -113,7 +113,7 @@ async function producerReply({base, payload, capture = {}, transport = 'fetch', 
       return route.fulfill({contentType: 'application/json', body: JSON.stringify(/\/captures\//.test(pathname) ? capture : payload)});
     });
     await producer.goto(base);
-    for (const script of ['media.js', 'course.js', 'page-hook.js']) await producer.addScriptTag({content: fs.readFileSync(path.join(root, script), 'utf8')});
+    for (const script of ['media.js', 'course.js', 'page-hook.js']) await producer.addScriptTag({content: fs.readFileSync(path.join(root, 'src', script), 'utf8')});
     session = await context.newCDPSession(producer);
     const {frameTree} = await session.send('Page.getFrameTree');
     const {executionContextId} = await session.send('Page.createIsolatedWorld', {frameId: frameTree.frame.id, worldName: 'acquisition-isolated'});
@@ -124,7 +124,7 @@ async function producerReply({base, payload, capture = {}, transport = 'fetch', 
     await isolated(`window.fixtureMessages = []; window.chrome = {runtime: {id: 'producer-fixture',
       sendMessage: async message => fixtureMessages.push(message), onMessage: {addListener: fn => { window.fixtureDiscover = fn; }}}};
       window.PPTState = {hasConsent: async () => true};`);
-    for (const script of ['media.js', 'course.js', 'batch.js', 'content.js']) await isolated(fs.readFileSync(path.join(root, script), 'utf8'));
+    for (const script of ['media.js', 'course.js', 'batch.js', 'content.js']) await isolated(fs.readFileSync(path.join(root, 'src', script), 'utf8'));
     await producer.evaluate(async ({transport, extra}) => {
       const endpoint = '/api/v1/rms-service/study-capture-courses/42';
       if (transport === 'xhr') await new Promise((resolve, reject) => {
@@ -629,7 +629,7 @@ function zipEntries(bytes, {utf8 = true} = {}) {
       const results = {fixtureHashes: Object.fromEntries(Object.entries(media).map(([name, file]) => [name, require('node:crypto').createHash('sha256').update(fs.readFileSync(file)).digest('hex')]))};
       try {
         await probe.goto(origin + '/fixture.html');
-        for (const name of ['media.js', 'scanner.js', 'mp4-recovery.js']) await probe.addScriptTag({url: origin + '/' + name});
+        for (const name of ['media.js', 'scanner.js', 'mp4-recovery.js']) await probe.addScriptTag({url: origin + '/src/' + name});
         const decode = (file, prepare = false) => probe.evaluate(async ({url, prepare, initial}) => {
           const original = await (await fetch(url)).blob(), v = document.createElement('video'); v.muted = true; v.preload = 'auto'; document.body.append(v);
           let objectURL, timer, initialPresentation, listeners = [], inspection, mode = 'original';

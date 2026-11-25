@@ -721,7 +721,7 @@ async function main() {
   server = http.createServer(async (request, response) => {
     try {
       const pathname = decodeURIComponent(new URL(request.url, 'http://localhost').pathname);
-      if (pathname === '/__storage.html') { response.writeHead(200, {'content-type': 'text/html'}); response.end('<!doctype html><meta charset="utf-8"><title>Synthetic storage test</title><script src="/disk-cache.js"></script><script src="/page-store.js"></script>'); return; }
+      if (pathname === '/__storage.html') { response.writeHead(200, {'content-type': 'text/html'}); response.end('<!doctype html><meta charset="utf-8"><title>Synthetic storage test</title><script src="/src/disk-cache.js"></script><script src="/src/page-store.js"></script>'); return; }
       const filename = path.resolve(root, '.' + pathname);
       if (!filename.startsWith(root + path.sep)) { response.writeHead(403); response.end(); return; }
       const mime = {'.html': 'text/html', '.js': 'application/javascript', '.css': 'text/css', '.png': 'image/png', '.svg': 'image/svg+xml'};

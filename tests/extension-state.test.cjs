@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
-const state = require('../extension-state.js');
+const state = require('../src/extension-state.js');
 
 const REPOSITORY = 'https://github.com/MeowSaint/XJTU-PPT-Capture-Extension';
 const ENDPOINT = 'https://api.github.com/repos/MeowSaint/XJTU-PPT-Capture-Extension/releases/latest';
@@ -52,7 +52,7 @@ function json(value, status = 200) {
 
 function browserModule(extra = {}) {
   const sandbox = {AbortController, URL, setTimeout, clearTimeout, ...extra};
-  vm.runInNewContext(fs.readFileSync(require.resolve('../extension-state.js'), 'utf8'), sandbox);
+  vm.runInNewContext(fs.readFileSync(require.resolve('../src/extension-state.js'), 'utf8'), sandbox);
   return sandbox.PPTState;
 }
 

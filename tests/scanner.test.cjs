@@ -3,12 +3,12 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 
-const Scanner = vm.runInNewContext(fs.readFileSync(require.resolve('../scanner.js'), 'utf8') + '\nPPTScanner', {
-  PPTCore: {...require('../media.js'), similar: (a, b) => a === b},
+const Scanner = vm.runInNewContext(fs.readFileSync(require.resolve('../src/scanner.js'), 'utf8') + '\nPPTScanner', {
+  PPTCore: {...require('../src/media.js'), similar: (a, b) => a === b},
 });
 test('isolated pixel noise never creates a slide, and a large unstable transition is flagged', async () => {
-  const core = require('../media.js');
-  const RealScanner = vm.runInNewContext(fs.readFileSync(require.resolve('../scanner.js'), 'utf8') + '\nPPTScanner', {PPTCore: core});
+  const core = require('../src/media.js');
+  const RealScanner = vm.runInNewContext(fs.readFileSync(require.resolve('../src/scanner.js'), 'utf8') + '\nPPTScanner', {PPTCore: core});
   const a = new Uint8ClampedArray(82944).fill(255), b = a.slice(); b[400] = b[401] = b[402] = 0;
   for (const dedupe of [false, true]) for (const masked of [false, true]) {
     const saved = [], mask = new Uint8Array(20736); if (masked) mask[100] = 1;
@@ -60,7 +60,7 @@ test('balanced default checks two-second endpoints and refines changed intervals
   assert.deepEqual(saved, [.25, .75, 1.75]);
 });
 test('optional comparator masks animation in transitions, confirmations and fallback dedupe', async () => {
-  const core = require('../media.js'), mask = core.ignoreMask({x: .5, y: 0, w: .5, h: 1}, 4, 2);
+  const core = require('../src/media.js'), mask = core.ignoreMask({x: .5, y: 0, w: .5, h: 1}, 4, 2);
   const scanner = new Scanner({duration: 3}, null), saved = [], thresholds = new Set();
   scanner.seek = async time => {
     const sig = new Uint8ClampedArray(4 * 2 * 4);
@@ -462,8 +462,8 @@ test('native seek shares source-aware diagnostics, cleans listeners and retains 
     v.addEventListener = (type, fn, opts) => { listeners.add(fn); add(type, fn, opts); };
     v.removeEventListener = (type, fn) => { listeners.delete(fn); remove(type, fn); };
     Object.defineProperty(v, 'currentTime', {get: () => 0, set() { if (mode === 'setter') throw Error('setter failed'); }});
-    const Seek = vm.runInNewContext(fs.readFileSync(require.resolve('../scanner.js'), 'utf8') + '\nPPTScanner', {
-      PPTCore: require('../media.js'), DOMException,
+    const Seek = vm.runInNewContext(fs.readFileSync(require.resolve('../src/scanner.js'), 'utf8') + '\nPPTScanner', {
+      PPTCore: require('../src/media.js'), DOMException,
       setTimeout(fn, ms) { timeout = fn; milliseconds = ms; timers.add(fn); return fn; },
       clearTimeout(fn) { timers.delete(fn); cleared++; },
     });
@@ -490,7 +490,7 @@ test('seek at the same time still decodes when loadeddata came only from audio',
   let sought = 0;
   const v = Object.assign(new EventTarget(), {readyState: 2, seeking: false, getVideoPlaybackQuality: () => ({totalVideoFrames: 0})});
   Object.defineProperty(v, 'currentTime', {get: () => 0, set() { sought++; queueMicrotask(() => v.dispatchEvent(new Event('seeked'))); }});
-  const Seek = vm.runInNewContext(fs.readFileSync(require.resolve('../scanner.js'), 'utf8') + '\nPPTScanner', {PPTCore: require('../media.js'), DOMException, setTimeout, clearTimeout});
+  const Seek = vm.runInNewContext(fs.readFileSync(require.resolve('../src/scanner.js'), 'utf8') + '\nPPTScanner', {PPTCore: require('../src/media.js'), DOMException, setTimeout, clearTimeout});
   await new Seek(v, () => {}).seek(0);
   assert.equal(sought, 1);
 });
@@ -506,8 +506,8 @@ function presentedVideo({time = 0, frames = 1, normalize = value => value} = {})
   v.addEventListener = (type, fn, opts) => { listeners.add(fn); add(type, fn, opts); };
   v.removeEventListener = (type, fn) => { listeners.delete(fn); remove(type, fn); };
   Object.defineProperty(v, 'currentTime', {get: () => clock, set(value) { sets++; if (setterError) throw Error('setter failed'); clock = normalize(value); now++; v.seeking = true; }});
-  const Seek = vm.runInNewContext(fs.readFileSync(require.resolve('../scanner.js'), 'utf8') + '\nPPTScanner', {
-    PPTCore: require('../media.js'), DOMException, performance: {now: () => now},
+  const Seek = vm.runInNewContext(fs.readFileSync(require.resolve('../src/scanner.js'), 'utf8') + '\nPPTScanner', {
+    PPTCore: require('../src/media.js'), DOMException, performance: {now: () => now},
     setTimeout(fn, ms) { assert.ok(ms === 30000 || ms === 45000); timeout = fn; timers.add(fn); return fn; }, clearTimeout(fn) { timers.delete(fn); },
   });
   const scanner = new Seek(v, requested => { const frame = {requested, nativeTime: clock, pixel: v.pixel}; captures.push(frame); return frame; }, {local: true, audioOmitted: true});

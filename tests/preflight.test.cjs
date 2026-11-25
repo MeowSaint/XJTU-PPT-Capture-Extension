@@ -4,7 +4,7 @@ const http = require('node:http');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const {getEventListeners} = require('node:events');
-const preflight = require('../preflight.js');
+const preflight = require('../src/preflight.js');
 
 const MP4 = Buffer.from([0, 0, 0, 24, ...Buffer.from('ftypisom'), 0, 0, 0, 0, ...Buffer.from('isommp42')]);
 const WEBM = Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0x87, 0x42, 0x82, 0x84, ...Buffer.from('webm')]);
@@ -66,7 +66,7 @@ function browserModule(observed = {}) {
     },
     clearTimeout(timer) { timers.delete(timer); clearTimeout(timer); }
   });
-  vm.runInContext(fs.readFileSync(require.resolve('../preflight.js'), 'utf8'), context);
+  vm.runInContext(fs.readFileSync(require.resolve('../src/preflight.js'), 'utf8'), context);
   return {api: context.PPTPreflight, timers};
 }
 

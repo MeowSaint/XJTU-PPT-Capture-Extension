@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const library = require('../library.js');
-const batch = require('../batch.js');
+const library = require('../src/library.js');
+const batch = require('../src/batch.js');
 
 function integrityLesson(id, extra = {}) {
   const source = {batchJobId: id, page: 'https://school.invalid/?courseId=42', sourceKey: 'url:https://cdn.invalid/2-' + id + '.mp4?access_token=secret'};
@@ -308,7 +308,7 @@ function actualBindingHarness() {
   const vm = require('node:vm'), fs = require('node:fs'), prior = oldBindingLesson();
   const h = heldBindingDB({'lesson:old': prior, activeLesson: 'old'}), calls = [];
   const context = vm.createContext({db: h.db, dbReady: Promise.resolve(), lessonSave: Promise.resolve(),
-    PPTLibrary: library, PPTCourse: require('../course.js'), sourceCourse: {}, activeBatchJob: null,
+    PPTLibrary: library, PPTCourse: require('../src/course.js'), sourceCourse: {}, activeBatchJob: null,
     crypto: {randomUUID: () => 'new'}, namingManual: true, namingPage: '', Date,
     lessons: [structuredClone(prior)], activeLesson: null, pages: [{id: 1, lessonId: 'old', bytes: [1, 2, 3]}],
     allPages: [{id: 1, lessonId: 'old', bytes: [1, 2, 3]}], undoState: {ids: [2]},
@@ -318,7 +318,7 @@ function actualBindingHarness() {
     applyLesson: () => { context.pages = context.allPages.filter(page => page.lessonId === context.activeLesson.id); calls.push('apply'); },
     render: () => calls.push('render'), renderLibrary: () => calls.push('library'), draw: () => calls.push('draw')});
   context.activeLesson = context.lessons[0];
-  const source = fs.readFileSync(require.resolve('../capture.js'), 'utf8');
+  const source = fs.readFileSync(require.resolve('../src/capture.js'), 'utf8');
   const start = source.indexOf('async function bindLesson('), end = source.indexOf('async function switchLesson(', start);
   assert(start >= 0 && end > start); vm.runInContext(source.slice(start, end), context);
   const snapshot = () => structuredClone({saved: Object.fromEntries(h.saved), lessons: context.lessons,

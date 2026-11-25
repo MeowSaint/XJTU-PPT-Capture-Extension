@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const vm = require('node:vm'), fs = require('node:fs');
-const course = require('../course.js'), core = require('../media.js');
+const course = require('../src/course.js'), core = require('../src/media.js');
 global.PPTCore = core;
 const page = 'https://rms-v5.xjtu.edu.cn/my-capture-courses/16220/preview-detail/477014';
 const expected = {name: '传感网络与大数据技术', date: '2026-09-07', start: '15:30:00'};
@@ -150,7 +150,7 @@ test('background stores only normalized top-frame metadata and isolates navigati
     webRequest: {onBeforeRequest: {addListener() {}}},
     storage: {session: {get: async k => ({[k]: storage[k]}), set: async v => Object.assign(storage, v), remove() {}}}
   };
-  vm.runInNewContext(fs.readFileSync(require.resolve('../background.js'), 'utf8'), {chrome, PPTCore: core, PPTCourse: course, importScripts() {}, URL, Date});
+  vm.runInNewContext(fs.readFileSync(require.resolve('../src/background.js'), 'utf8'), {chrome, PPTCore: core, PPTCourse: course, importScripts() {}, URL, Date});
   const message = {type: 'PPT_COURSE', course: {...expected, token: 'never-store'}, page};
   await new Promise(resolve => listener(message, {url: page, frameId: 0, tab: {id: 42}}, resolve));
   assert.deepEqual(JSON.parse(JSON.stringify(storage['media-42'].course)), expected);

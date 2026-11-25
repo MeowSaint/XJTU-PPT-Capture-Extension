@@ -50,8 +50,8 @@ chrome.action.onClicked.addListener(async tab => {
   // The toolbar click grants activeTab for this page; no all-sites access is needed.
   if (supported) {
     try {
-      await chrome.scripting.executeScript({target: {tabId: tab.id, allFrames: true}, world: 'MAIN', files: ['media.js', 'course.js', 'page-hook.js']});
-      await chrome.scripting.executeScript({target: {tabId: tab.id, allFrames: true}, files: ['media.js', 'course.js', 'batch.js', 'extension-state.js', 'content.js']});
+      await chrome.scripting.executeScript({target: {tabId: tab.id, allFrames: true}, world: 'MAIN', files: ['src/media.js', 'src/course.js', 'src/page-hook.js']});
+      await chrome.scripting.executeScript({target: {tabId: tab.id, allFrames: true}, files: ['src/media.js', 'src/course.js', 'src/batch.js', 'src/extension-state.js', 'src/content.js']});
     } catch { /* Restricted pages still open the tool with manual import available. */ }
   }
   const suffix = supported ? '?tab=' + tab.id : '';
