@@ -32,6 +32,7 @@ Windows 默认可直接使用已安装的 Edge；macOS 和 Linux 使用 Playwrig
 npm test
 npm run test:release
 npm run test:bridge
+npm run test:generic
 npm run test:integration
 npm run test:review
 npm run test:features
@@ -59,7 +60,7 @@ npm run test:improvements
 
 设置 `PPT_TEST_FILTER` 可只运行 `library`、`improvements`、`memory` 中名称匹配的分组；最终回归不设置该变量。`release`、`integration`、`review`、`features`、`library`、`improvements`、`memory` 均可用 `PPT_TEST_OUTPUT` 指定证据目录；3.1.3 本轮统一放在 `.test-output/learning-task-3/`。学习版实现的原始失败和最终检查按不同前缀保留命令、标准输出、错误输出、实际退出码与源文件摘要。原第二个连续同名 JSON、后续所选原始 PDF 曾未收到原生下载事件，原因仍未知；生产 Blob 内容校验不证明那两次原生下载成功。随后新增的独立用例在同一页面和上下文重载后点击真实批量报告入口，用原生下载保存并读回 JSON；它证明该入口与文件内容，不解释或治愈旧超时。具体来源与本轮结果见 [3.1.3 验证记录](../docs/superpowers/plans/2026-11-07-v3.1.3-validation.md)。
 
-- **`tests/release.test.cjs`**：在临时目录中验证 `npm run release` 打包出的 35 个文件内容（含 `motion.js` 与 `mp4-recovery.js`）、版本号一致性、`last-release/` 历史包归档，以及打包中途报错时原安装包不被破坏。
+- **`tests/release.test.cjs`**：在临时目录中验证 `npm run release` 打包出的 36 个文件内容（含 `src/` 下的运行脚本 `motion.js` 与 `mp4-recovery.js`）、版本号一致性、`last-release/` 历史包归档，以及打包中途报错时原安装包不被破坏。
 
 - **`tests/mp4-recovery.test.cjs` / 媒体接入用例**：Node 检查有界读取、索引和样本表、跨 4 GiB 偏移、时序、分组与加密负例、取消与本地读取失败，以及只改音轨 box type 的字节保留。`core` / `scanner` 检查原生错误的阶段、来源与时间、30 秒逐次读取期限、完整 206、编码 Content-Length、本地读取期限、跳转监听器清理和仅对实际改写结果生效的时长保护。
 
