@@ -129,6 +129,18 @@
       : PPTState.claimNotification(message.version, storage);
   }
   function canShowUpdate(manual) { return studyAccepted && (manual || (ready && !busy())) && !document.querySelector('dialog[open]'); }
+  // checkUpdate() only reaches this point when the tab was showable a moment
+  // ago, so a tab that is busy now is racing a short page write, not doing the
+  // work the user asked for. The claim is exclusive and one-shot, so ride the
+  // race out instead of dropping the only automatic offer this tab will get.
+  async function updateIdle(manual, timeout = 2000) {
+    const start = Date.now();
+    while (!canShowUpdate(manual)) {
+      if (document.querySelector('dialog[open]') || Date.now() - start > timeout) return false;
+      await new Promise(resolve => setTimeout(resolve, 40));
+    }
+    return true;
+  }
   async function checkUpdate(manual) {
     if (!studyAccepted || checkingUpdate) return;
     checkingUpdate = true; syncControls();
@@ -139,7 +151,7 @@
       el('check-updates').textContent = available ? '发现新版' : '检查更新';
       if (!canShowUpdate(manual) || (!manual && !available)) return;
       if (!manual && !await updateMessage({type: 'PPT_CLAIM_UPDATE', version: result.release.version})) return;
-      if (!canShowUpdate(manual)) return;
+      if (!await updateIdle(manual)) return;
       el('update-current').textContent = currentVersion;
       el('update-available').hidden = !available;
       el('update-version').textContent = available ? result.release.version : '';

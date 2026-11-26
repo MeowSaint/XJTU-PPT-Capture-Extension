@@ -298,7 +298,11 @@ async function closeTools() { for (const page of context.pages()) if (page.url()
           record('refresh', {reset: !!args[2]?.reset, page: args[1], urls: args[0].map(source => source.url)});
           return refresh.apply(this, args);
         };
-        preflight.probe = function (...args) { record('probe', {url: args[0]}); return probe.apply(this, args); };
+        // The fixture holds the first two responses on purpose, so the real 8 s
+        // probe budget would abort them on a slow runner and free a concurrency
+        // slot, letting the third URL start. Give the held probes room to stay
+        // queued: this test is about queue order, not about timeout policy.
+        preflight.probe = function (...args) { record('probe', {url: args[0]}); return probe.call(this, args[0], {...args[1], timeoutMs: 60000}); };
         observation.restore = () => {
           button.onclick = handler; workspace.refreshSources = refresh; preflight.probe = probe;
           return button.onclick === handler && workspace.refreshSources === refresh && preflight.probe === probe;

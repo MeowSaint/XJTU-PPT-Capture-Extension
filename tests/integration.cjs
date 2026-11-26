@@ -194,7 +194,10 @@ async function main() {
     assert.equal(await page.locator('#terms-dialog').isVisible(), true);
     assert.equal(await page.locator('#pages article').count(), 1, 'declining consent preserves the migrated legacy screenshot');
     await page.locator('#terms-agree').check(); await page.locator('#terms-accept').click();
-    await page.waitForFunction(() => !document.querySelector('.app-shell').inert);
+    // Consent unlocks the shell, but the source controls stay disabled until the
+    // migrated lesson finishes its restore writes, so wait for the control that
+    // this step is about to click instead of only for the shell to unlock.
+    await page.waitForFunction(() => !document.querySelector('.app-shell').inert && !document.querySelector('#source-show-all').disabled);
     await page.locator('#source-show-all').check().catch(async error => {
       await page.screenshot({path: path.join(output, 'source-checkbox-failure.png'), fullPage: true});
       console.error('Source checkbox diagnostics:', await page.locator('#source-show-all').evaluate(node => {
