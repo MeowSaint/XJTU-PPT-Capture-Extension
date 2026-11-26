@@ -388,10 +388,30 @@ async function closeTools() { for (const page of context.pages()) if (page.url()
       assert.equal(await page.locator('#terms-decline').textContent(), '关闭', 'the only remaining button reads 关闭');
       assert.equal(await page.locator('#terms-agree').isVisible(), false, 'the checkbox is hidden once consent is recorded');
       assert.equal(await page.locator('.dialog-copy p:not(#terms-accepted)').count(), 4, 'the four rule paragraphs stay readable after consent');
+      const readOnlyTab = [await page.locator('#terms-dialog').evaluate(node => ({tag: document.activeElement.tagName, id: document.activeElement.id,
+        inside: node.contains(document.activeElement), hasFocus: document.hasFocus()}))];
+      for (let i = 0; i < 4; i++) {
+        await page.keyboard.press('Tab');
+        readOnlyTab.push(await page.locator('#terms-dialog').evaluate(node => ({tag: document.activeElement.tagName, id: document.activeElement.id,
+          inside: node.contains(document.activeElement), hasFocus: document.hasFocus()})));
+      }
+      assert.equal(readOnlyTab[0].inside, true, 'opening the read-only dialog moves focus into it: ' + JSON.stringify(readOnlyTab));
+      assert(readOnlyTab.some(entry => entry.id === 'terms-decline'), 'read-only terms keep 关闭 reachable by keyboard: ' + JSON.stringify(readOnlyTab));
+      assert.equal(readOnlyTab.some(entry => entry.id === 'terms-agree' || entry.id === 'terms-accept'), false, 'read-only terms never focus the hidden checkbox or accept button: ' + JSON.stringify(readOnlyTab));
+      assert(readOnlyTab.every(entry => entry.inside || (entry.tag === 'BODY' && !entry.hasFocus)), 'read-only terms never move focus outside the dialog except the native browser-chrome transition: ' + JSON.stringify(readOnlyTab));
       await page.screenshot({path: path.join(output, 'terms-during-load.png')});
       await page.locator('#terms-decline').click();
       assert.equal(await page.locator('#terms-dialog').evaluate(node => node.open), false, 'the 关闭 button closes the read-only dialog');
       assert.equal(await page.locator('.app-shell').evaluate(node => node.inert), false, 'closing the read-only dialog keeps the workspace unlocked');
+      await page.evaluate(() => {
+        window.termsStatusWrites = 0;
+        new MutationObserver(records => { window.termsStatusWrites += records.length; })
+          .observe(document.querySelector('#terms-status'), {childList: true, characterData: true, subtree: true});
+      });
+      await page.locator('#terms-open').click(); await page.locator('#terms-dialog[open]').waitFor();
+      assert.equal(await page.evaluate(() => window.termsStatusWrites), 0, 'reopening an unchanged status line does not rewrite the live region');
+      await page.locator('#terms-decline').click();
+      assert.equal(await page.locator('#terms-dialog').evaluate(node => node.open), false, 'the read-only dialog closes again');
       updateMode = 'available'; holdUpdate = true;
       await page.locator('#check-updates').click(); await until(() => pending.update.length === 1, 'manual update GET did not start');
       assert.equal(await page.locator('#check-updates').isDisabled(), true, 'only the duplicate update request is disabled');

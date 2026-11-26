@@ -173,8 +173,12 @@
     el('terms-decline').disabled = accepting;
     el('terms-decline').textContent = studyAccepted ? '关闭' : '暂不同意';
     el('terms-accepted').hidden = !studyAccepted;
-    el('terms-status').textContent = notice || (studyAccepted ? '同意状态已保存在本机，可以继续使用工具。'
+    // #terms-status is a live region: writing an identical string would make a
+    // screen reader announce it again on every reopen, so only write changes.
+    const status = el('terms-status');
+    const message = notice || (studyAccepted ? '同意状态已保存在本机，可以继续使用工具。'
       : agree.checked ? '已勾选，点「同意并继续」即可开始使用。' : '勾选同意后即可开始使用。');
+    if (status.textContent !== message) status.textContent = message;
   }
   function openTerms() {
     renderTerms();
