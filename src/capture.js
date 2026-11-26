@@ -2325,19 +2325,38 @@ async function switchToolSource(tabId) {
   if (!Number.isInteger(id) || id <= 0) { $('source-status').textContent = '来源页不可用，仍使用当前来源。'; return; }
   // Never interrupt a running extraction, capture, batch, review or export.
   if (busy()) { $('source-status').textContent = '正在处理当前课次，完成后再点扩展图标切换来源。'; return; }
-  // discover() keeps the selected tab, so select the clicked one first; a page
-  // opened after this one has no option yet, so add a placeholder for it.
-  if (![...$('course').options].some(option => option.value === String(id))) {
-    const option = document.createElement('option');
-    option.value = String(id); option.textContent = '正在切换来源…';
-    $('course').append(option);
+  // discover() only lists tabs whose url Chrome exposes here, so a tab it cannot see
+  // looks like a closed source: it would release the current one and empty the list.
+  // The same url test decides in advance whether the switch can go through.
+  let sourceUrl = '';
+  if (chrome.tabs?.get) {
+    const source = await chrome.tabs.get(id).catch(() => null);
+    sourceUrl = source?.url || '';
+    if (!PPTCore.isWebPage(sourceUrl)) { $('source-status').textContent = '来源页不可用，仍使用当前来源。'; return; }
   }
-  $('course').value = String(id);
+  const previous = $('course').value, previousPage = coursePage;
+  // discover() keeps the selected tab, so select the clicked one first; a page opened
+  // after this one has no option yet, so add a placeholder for it.
+  let placeholder = null;
+  if (![...$('course').options].some(option => option.value === String(id))) {
+    placeholder = document.createElement('option');
+    placeholder.value = String(id); placeholder.textContent = '正在切换来源…';
+    $('course').append(placeholder);
+  }
   // Keep ?tab= in step with the switch; a later reload must not restore the old source.
-  const url = new URL(location.href);
+  const url = new URL(location.href), target = url.pathname + url.search;
   url.searchParams.set('tab', String(id));
+  $('course').value = String(id);
   history.replaceState(history.state, '', url.pathname + url.search + url.hash);
-  await discover();
+  try { await discover(); } catch { /* discover() reports its own failure in #source-status. */ }
+  // discover() can leave before adopting the tab (busy again, no chrome.tabs) or fail
+  // mid-way; the panel still describes the old source then, so undo the selection and
+  // the address bar rather than leave a phantom tab selected for batch/retry actions.
+  if (coursePage === previousPage && coursePage !== sourceUrl) {
+    placeholder?.remove();
+    $('course').value = previous;
+    history.replaceState(history.state, '', target);
+  }
 }
 // The toolbar focuses this page instead of opening a second one, then names the tab
 // it was clicked from; extension pages have no sender.tab, content scripts always do.

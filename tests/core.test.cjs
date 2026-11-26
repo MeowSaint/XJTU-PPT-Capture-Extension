@@ -290,21 +290,34 @@ test('a failing tool page lookup keeps the create path working', async () => {
   assert.equal(state.toolMessages, undefined);
 });
 
-function switchHarness({busy = false, options = ['23'], value = '23', href = 'chrome-extension://fixture/capture.html?tab=23'} = {}) {
-  const source = fs.readFileSync(require.resolve('../src/capture.js'), 'utf8');
-  const start = source.indexOf('async function switchToolSource('), end = source.indexOf('function sourceSummary()', start);
+function switchHarness({busy = false, adopt = true, fail = false, options = ['23'], value = '23',
+  href = 'chrome-extension://fixture/capture.html?tab=23', sourceUrl = 'https://lectures.example/watch?v=1',
+  sourceGone = false, tabsApi = true, page = 'https://lectures.example/old'} = {}) {
+  const file = fs.readFileSync(require.resolve('../src/capture.js'), 'utf8');
+  const start = file.indexOf('async function switchToolSource('), end = file.indexOf('function sourceSummary()', start);
   assert(start >= 0 && end > start, 'exercise the production toolbar switch handler');
-  const listeners = {}, calls = {discover: 0, replaced: []};
-  const course = {options: options.map(value => ({value, textContent: value})), value, append(option) { this.options.push(option); }};
+  const listeners = {}, calls = {discover: 0, replaced: [], gets: []};
+  const course = {options: options.map(value => ({value, textContent: value})), value,
+    append(option) { this.options.push(option); option.parentNode = this; }};
   const nodes = new Map([['course', course], ['source-status', {textContent: ''}]]);
   const chrome = {runtime: {id: 'fixture', onMessage: {addListener: fn => { listeners.message = fn; }}}};
-  const context = vm.createContext({chrome, window: {chrome}, URL,
-    $: id => nodes.get(id), busy: () => busy, discover: async () => { calls.discover++; },
-    document: {createElement: () => ({})}, location: {href},
-    history: {state: null, replaceState: (state, _title, url) => calls.replaced.push(url)}});
-  vm.runInContext(source.slice(start, end), context);
+  if (tabsApi) chrome.tabs = {get: async id => {
+    calls.gets.push(id);
+    if (sourceGone) throw new Error('No tab with id: ' + id);
+    // Chrome omits url for a tab this page may not read; discover() cannot switch to it.
+    return sourceUrl ? {id, url: sourceUrl} : {id};
+  }};
+  const context = vm.createContext({chrome, PPTCore: core, window: {chrome}, URL, coursePage: page,
+    $: id => nodes.get(id), busy: () => busy,
+    // The real discover() adopts the clicked tab by pointing coursePage at its url;
+    // a bail (busy again, no tabs API) or a failure leaves the previous page there.
+    discover: async () => { calls.discover++; if (fail) throw new Error('boom'); if (adopt && tabsApi) context.coursePage = sourceUrl; },
+    document: {createElement: () => ({textContent: '', parentNode: null,
+      remove() { const at = course.options.indexOf(this); if (at >= 0) course.options.splice(at, 1); this.parentNode = null; }})},
+    location: {href}, history: {state: null, replaceState: (state, _title, url) => calls.replaced.push(url)}});
+  vm.runInContext(file.slice(start, end), context);
   const settle = () => new Promise(setImmediate);
-  return {listeners, calls, nodes, course, settle};
+  return {listeners, calls, nodes, course, page: () => context.coursePage, settle};
 }
 
 test('an open tool page switches to the clicked source and keeps the address bar in step', async () => {
@@ -338,6 +351,46 @@ test('a busy tool page refuses the switch and says why', async () => {
   assert.equal(h.course.value, '23', 'the running extraction keeps its source');
   assert.equal(h.calls.discover, 0);
   assert.deepEqual(h.calls.replaced, []);
+});
+
+test('an unreadable source tab is refused so the working source survives', async () => {
+  // Chrome withholds the url of a tab this page may not read; discover() would treat
+  // it as a closed source and release the lesson the user is working on.
+  for (const failure of [{sourceUrl: ''}, {sourceGone: true}, {sourceUrl: 'chrome://extensions/'}]) {
+    const h = switchHarness(failure);
+    h.listeners.message({type: 'PPT_SWITCH_SOURCE', tabId: 17}, {id: 'fixture'});
+    await h.settle();
+    assert.equal(h.nodes.get('source-status').textContent, '来源页不可用，仍使用当前来源。');
+    assert.equal(h.course.value, '23', 'the current source stays selected');
+    assert.deepEqual(h.course.options.map(option => option.value), ['23'], 'no placeholder is left behind');
+    assert.equal(h.calls.discover, 0, 'discovery never runs for a tab it cannot see');
+    assert.deepEqual(h.calls.replaced, [], 'the address bar keeps the source the page was opened with');
+    assert.equal(h.page(), 'https://lectures.example/old');
+  }
+});
+
+test('a switch that discover() never adopts rolls back the selection and the address bar', async () => {
+  // discover() leaves early when it turns busy, when chrome.tabs is gone, and it can
+  // fail mid-way; each leaves coursePage on the previous source.
+  for (const failure of [{adopt: false}, {fail: true}, {tabsApi: false}]) {
+    const h = switchHarness(failure);
+    h.listeners.message({type: 'PPT_SWITCH_SOURCE', tabId: 17}, {id: 'fixture'});
+    await h.settle();
+    assert.equal(h.course.value, '23', 'the previous selection comes back');
+    assert.deepEqual(h.course.options.map(option => option.value), ['23'], 'the placeholder is removed on rollback');
+    // The switch was announced, then undone: a reload must land on the source still shown.
+    assert.deepEqual(h.calls.replaced, ['/capture.html?tab=17', '/capture.html?tab=23']);
+    assert.equal(h.page(), 'https://lectures.example/old');
+  }
+});
+
+test('a listed source that discover() cannot adopt goes back to the previous selection', async () => {
+  const h = switchHarness({adopt: false, options: ['23', '17'], value: '23'});
+  h.listeners.message({type: 'PPT_SWITCH_SOURCE', tabId: 17}, {id: 'fixture'});
+  await h.settle();
+  assert.equal(h.course.value, '23');
+  assert.deepEqual(h.course.options.map(option => option.value), ['23', '17']);
+  assert.deepEqual(h.calls.replaced, ['/capture.html?tab=17', '/capture.html?tab=23']);
 });
 
 test('an unusable source keeps the current source and says so', async () => {
