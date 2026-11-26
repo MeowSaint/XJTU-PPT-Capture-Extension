@@ -209,6 +209,12 @@ async function closeTools() { for (const page of context.pages()) if (page.url()
       await page.locator('#terms-dialog[open]').waitFor(); await page.waitForFunction(() => document.querySelectorAll('#pages article').length === 1);
       assert.equal(await page.locator('#terms-accept').isDisabled(), true); await page.keyboard.press('Escape');
       assert.equal(await page.locator('#terms-dialog').evaluate(node => node.open), true); await screenshots(page, 'terms', '#terms-dialog');
+      assert.equal(await page.locator('#terms-status').textContent(), '勾选同意后即可开始使用。', 'idle status line before the box is ticked');
+      assert.equal(await page.locator('#terms-accepted').isVisible(), false, 'accepted wording stays hidden before consent');
+      await page.locator('#terms-agree').check();
+      assert.equal(await page.locator('#terms-status').textContent(), '已勾选，点「同意并继续」即可开始使用。', 'ticking the box updates the status line immediately');
+      await page.locator('#terms-agree').uncheck();
+      assert.equal(await page.locator('#terms-status').textContent(), '勾选同意后即可开始使用。', 'unticking the box restores the idle status line');
       await page.locator('#terms-decline').click(); assert.equal(await page.locator('.app-shell').evaluate(node => node.inert), true);
       assert.deepEqual(await storedPages(), [retained]);
       await page.evaluate(key => { const native = chrome.storage.local.set.bind(chrome.storage.local); window.restoreConsentWrite = () => { chrome.storage.local.set = native; }; chrome.storage.local.set = values => key in values ? Promise.reject(Error('Fixture storage write failed')) : native(values); }, consentKey);
@@ -218,6 +224,7 @@ async function closeTools() { for (const page of context.pages()) if (page.url()
       assert.equal(requests.length, 0, 'no course API or media probes before successful consent'); assert.equal(updateRequests.length, 0);
       assert.equal(await worker.evaluate(key => chrome.storage.local.get(key).then(value => value[key] || null), consentKey), null);
       await page.evaluate(() => window.restoreConsentWrite()); await page.locator('#terms-agree').uncheck(); await accepted(page);
+      assert.equal(await page.locator('#terms-dialog').evaluate(node => node.open), false, 'accepting the terms closes the dialog');
       const record = await worker.evaluate(key => chrome.storage.local.get(key).then(value => value[key]), consentKey);
       assert.equal(record.version, 'course-materials-v1'); assert(Number.isSafeInteger(record.acceptedAt));
     });
@@ -376,8 +383,15 @@ async function closeTools() { for (const page of context.pages()) if (page.url()
       assert.equal(await page.locator('#check-updates').isEnabled(), true, 'manual update must not depend on an extraction task');
       await page.locator('#terms-open').click(); await page.locator('#terms-dialog[open]').waitFor();
       assert.equal(await page.locator('#terms-accept').isVisible(), false, 'accepted terms reopen read-only');
+      assert.equal(await page.locator('#terms-accepted').isVisible(), true, 'reopened dialog states the recorded consent');
+      assert.match(await page.locator('#terms-status').textContent(), /已保存/, 'reopened status line confirms the saved state');
+      assert.equal(await page.locator('#terms-decline').textContent(), '关闭', 'the only remaining button reads 关闭');
+      assert.equal(await page.locator('#terms-agree').isVisible(), false, 'the checkbox is hidden once consent is recorded');
+      assert.equal(await page.locator('.dialog-copy p:not(#terms-accepted)').count(), 4, 'the four rule paragraphs stay readable after consent');
       await page.screenshot({path: path.join(output, 'terms-during-load.png')});
       await page.locator('#terms-decline').click();
+      assert.equal(await page.locator('#terms-dialog').evaluate(node => node.open), false, 'the 关闭 button closes the read-only dialog');
+      assert.equal(await page.locator('.app-shell').evaluate(node => node.inert), false, 'closing the read-only dialog keeps the workspace unlocked');
       updateMode = 'available'; holdUpdate = true;
       await page.locator('#check-updates').click(); await until(() => pending.update.length === 1, 'manual update GET did not start');
       assert.equal(await page.locator('#check-updates').isDisabled(), true, 'only the duplicate update request is disabled');

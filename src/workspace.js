@@ -159,12 +159,25 @@
   el('check-updates').onclick = () => checkUpdate(true);
   el('update-later').onclick = () => el('update-dialog').close();
 
-  function openTerms() {
-    el('terms-agree').checked = studyAccepted;
-    el('terms-agree').parentElement.hidden = studyAccepted;
+  // The rules stay readable in every state; only the controls and the status
+  // line change, so reopening the dialog shows whether consent was recorded.
+  // `notice` carries a one-off message (refusal, storage failure) that must not
+  // be recomputed from the checkbox, so it is passed in rather than stored.
+  function renderTerms(notice = '') {
+    const agree = el('terms-agree');
+    if (studyAccepted) agree.checked = true;
+    agree.disabled = accepting;
+    agree.parentElement.hidden = studyAccepted;
     el('terms-accept').hidden = studyAccepted;
-    el('terms-accept').disabled = !el('terms-agree').checked || accepting;
+    el('terms-accept').disabled = accepting || !agree.checked;
+    el('terms-decline').disabled = accepting;
     el('terms-decline').textContent = studyAccepted ? '关闭' : '暂不同意';
+    el('terms-accepted').hidden = !studyAccepted;
+    el('terms-status').textContent = notice || (studyAccepted ? '同意状态已保存在本机，可以继续使用工具。'
+      : agree.checked ? '已勾选，点「同意并继续」即可开始使用。' : '勾选同意后即可开始使用。');
+  }
+  function openTerms() {
+    renderTerms();
     if (!terms.open) terms.showModal();
   }
   function unlock() {
@@ -173,20 +186,18 @@
     refreshSources(sources, coursePage); discover();
     if (globalThis.chrome?.runtime?.id) dbReady.then(() => checkUpdate(false)).catch(() => {});
   }
-  el('terms-agree').onchange = () => { el('terms-accept').disabled = !el('terms-agree').checked || accepting; };
+  el('terms-agree').onchange = () => renderTerms();
   el('terms-accept').onclick = async () => {
     if (!el('terms-agree').checked || accepting) return;
-    accepting = true; el('terms-accept').disabled = true; el('terms-agree').disabled = true; el('terms-decline').disabled = true;
+    accepting = true; renderTerms();
+    let failure = '';
     try { await PPTState.acceptConsent(storage); unlock(); }
-    catch { el('terms-status').textContent = '无法保存确认状态，工具保持锁定，请检查浏览器存储权限后重试。'; }
-    finally {
-      accepting = false; el('terms-agree').disabled = false; el('terms-decline').disabled = false;
-      el('terms-accept').disabled = !el('terms-agree').checked;
-    }
+    catch { failure = '无法保存确认状态，工具保持锁定，请检查浏览器存储权限后重试。'; }
+    finally { accepting = false; renderTerms(failure); }
   };
   el('terms-decline').onclick = () => {
     if (studyAccepted) { terms.close(); return; }
-    el('terms-status').textContent = '同意使用约定后才能使用工具；如暂不使用，直接关闭此页即可。';
+    renderTerms('同意使用约定后才能使用工具；如暂不使用，直接关闭此页即可。');
   };
   el('terms-open').onclick = openTerms;
   terms.addEventListener('cancel', event => { if (!studyAccepted) event.preventDefault(); });
