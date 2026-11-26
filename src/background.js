@@ -54,6 +54,22 @@ chrome.action.onClicked.addListener(async tab => {
       await chrome.scripting.executeScript({target: {tabId: tab.id, allFrames: true}, files: ['src/media.js', 'src/course.js', 'src/batch.js', 'src/extension-state.js', 'src/content.js']});
     } catch { /* Restricted pages still open the tool with manual import available. */ }
   }
+  // Reuse the tool page that is already open rather than stacking a second one.
+  // chrome.tabs.query exposes this extension's own pages with their URLs, so the
+  // lookup needs no `tabs` permission; a failure keeps the create path intact.
+  let tool = null;
+  try { [tool] = await chrome.tabs.query({url: chrome.runtime.getURL('capture.html') + '*'}); } catch {}
+  if (tool) {
+    try { await chrome.windows.update(tool.windowId, {focused: true}); } catch {}
+    try { await chrome.tabs.update(tool.id, {active: true}); } catch {}
+    // A supported page names a new source; a restricted page expresses none, so the
+    // tool page keeps the source it already has. Sending fails while the tool page's
+    // scripts are still loading — the focus above already did the visible work.
+    if (supported) {
+      try { await chrome.tabs.sendMessage(tool.id, {type: 'PPT_SWITCH_SOURCE', tabId: tab.id}); } catch {}
+    }
+    return;
+  }
   const suffix = supported ? '?tab=' + tab.id : '';
   await chrome.tabs.create({url: chrome.runtime.getURL('capture.html') + suffix});
 });

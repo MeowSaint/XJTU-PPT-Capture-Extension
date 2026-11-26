@@ -63,16 +63,37 @@ async function main() {
     await worker.evaluate(() => chrome.storage.local.set({'ppt-study-consent': {version: 'course-materials-v1', acceptedAt: Date.now()}}));
     // Avoid update network traffic from the service worker (outside page routing).
     await worker.evaluate(() => { const fetchOriginal = fetch; globalThis.fetch = (input, options) => String(input).startsWith('https://api.github.com/') ? Promise.resolve(new Response('{}', {status: 404})) : fetchOriginal(input, options); });
-    async function openFrom(source) {
-      const created = context.waitForEvent('page', {predicate: page => page !== source});
-      await worker.evaluate(async url => {
+    async function clickToolbar(source) {
+      return worker.evaluate(async url => {
         const tab = (await chrome.tabs.query({})).find(tab => tab.url === url);
         await globalThis.fixtureClick(tab);
+        return tab.id;
       }, source.url());
+    }
+    async function openFrom(source) {
+      const created = context.waitForEvent('page', {predicate: page => page !== source});
+      await clickToolbar(source);
       const tool = await created;
       await tool.waitForURL(extension + '/capture.html?tab=*');
       await tool.waitForFunction(() => studyAccepted && ready);
       await tool.waitForFunction(() => sources.length > 0);
+      return tool;
+    }
+    // Clicking the icon while a tool page is open must focus that page and switch
+    // its source instead of stacking a second tool page.
+    async function reuseFrom(source, tool) {
+      const opened = context.pages().length, tabId = await clickToolbar(source);
+      await tool.waitForFunction(url => coursePage === url, source.url());
+      await tool.waitForFunction(id => document.getElementById('course').value === String(id), tabId);
+      // The address bar follows the switch, so a reload keeps the new source.
+      await tool.waitForFunction(id => new URLSearchParams(location.search).get('tab') === String(id), tabId);
+      // The stale source list carried an HLS entry the new page never fetched; its
+      // disappearance proves discover() rebuilt the list for the new source.
+      await tool.waitForFunction(() => sources.length > 0 && sources.every(item => item.kind !== 'm3u8'));
+      const tools = context.pages().filter(page => page.url().includes('/capture.html'));
+      assert.equal(tools.length, 1, 'the second click reuses the open tool page instead of opening another one');
+      assert.equal(tools[0], tool);
+      assert.equal(context.pages().length, opened, 'no page was added by the second click');
       return tool;
     }
     async function extract(tool, url, label) {
@@ -116,7 +137,7 @@ async function main() {
     assert.match(await toolA.locator('#status').innerText(), /未加密/);
     await toolA.screenshot({path: path.join(output, 'generic-desktop.png'), fullPage: true});
     const sourceB = await context.newPage(); await sourceB.goto(other + '/watch');
-    const toolB = await openFrom(sourceB);
+    const toolB = await reuseFrom(sourceB, toolA);
     const webm = await extract(toolB, origin + '/lesson.webm', 'generic-webm');
     assert.equal(webm.page, sourceB.url()); assert.notEqual(webm.id, mp4.id);
     // Same media URL on another route gets a separate durable lesson.

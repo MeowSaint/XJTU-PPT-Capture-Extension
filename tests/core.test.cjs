@@ -170,9 +170,26 @@ function backgroundHarness() {
     tabs: {
       get: async () => tab,
       create: async details => { state.createdTab = details; },
+      // The toolbar looks for a tool page it can reuse; default to none so the
+      // pre-existing create path stays the default behaviour.
+      query: async query => {
+        // Record plain copies: the arguments are built inside the vm realm, whose
+        // prototypes differ from this test file's, which deepEqual would flag.
+        (state.tabQueries ||= []).push({...query});
+        if (state.tabQueryFailure) throw new Error('No matching window');
+        return state.toolTabs || [];
+      },
+      update: async (tabId, details) => { (state.tabUpdates ||= []).push({tabId, ...details}); },
+      sendMessage: async (tabId, message) => {
+        (state.toolMessages ||= []).push({tabId, message: {...message}});
+        // An open tool page whose scripts have not loaded has no receiver yet.
+        if (state.toolMessageFailure) throw new Error('Could not establish connection. Receiving end does not exist.');
+        return {ok: true};
+      },
       onRemoved: {addListener: fn => { listeners.removed = fn; }},
       onUpdated: {addListener: fn => { listeners.updated = fn; }}
     },
+    windows: {update: async (windowId, details) => { (state.windowUpdates ||= []).push({windowId, ...details}); }},
     scripting: {executeScript: async details => { (state.injections ||= []).push(details); return []; }},
     action: {onClicked: {addListener: fn => { listeners.clicked = fn; }}, setBadgeText: badge('text'), setBadgeBackgroundColor: badge('color')},
     webRequest: {onBeforeRequest: {addListener: fn => { listeners.request = fn; }}},
@@ -210,6 +227,139 @@ test('generic toolbar entry retains its tab and injects collectors; restricted p
   await listeners.clicked({id: 18, url: 'chrome://extensions/'});
   assert.equal(state.createdTab.url, 'chrome-extension://fixture/capture.html');
   assert.equal(state.injections.length, 2);
+});
+
+test('toolbar entry asks for an existing tool page before creating one', async () => {
+  const {listeners, state} = backgroundHarness();
+  await listeners.clicked({id: 17, url: 'https://lectures.example/watch?v=1'});
+  assert.deepEqual(state.tabQueries, [{url: 'chrome-extension://fixture/capture.html*'}]);
+});
+
+test('an open tool page is focused and switched to the clicked video page', async () => {
+  const {listeners, state} = backgroundHarness();
+  state.toolTabs = [{id: 91, windowId: 3, url: 'chrome-extension://fixture/capture.html'}];
+  await listeners.clicked({id: 17, url: 'https://lectures.example/watch?v=1'});
+  // The click still grants activeTab: collectors are injected before the reuse decision.
+  assert.equal(state.injections.length, 2);
+  // Collectors go into the clicked page only; the extension's own page rejects injection.
+  assert(state.injections.every(call => call.target.tabId === 17));
+  assert.equal(state.createdTab, undefined, 'no second tool page is opened');
+  assert.deepEqual(state.windowUpdates, [{windowId: 3, focused: true}]);
+  assert.deepEqual(state.tabUpdates, [{tabId: 91, active: true}]);
+  assert.deepEqual(state.toolMessages, [{tabId: 91, message: {type: 'PPT_SWITCH_SOURCE', tabId: 17}}]);
+});
+
+test('reusing an open tool page from a restricted page only focuses it', async () => {
+  const {listeners, state} = backgroundHarness();
+  state.toolTabs = [{id: 91, windowId: 3, url: 'chrome-extension://fixture/capture.html'}];
+  await listeners.clicked({id: 18, url: 'chrome://extensions/'});
+  assert.equal(state.createdTab, undefined);
+  assert.deepEqual(state.windowUpdates, [{windowId: 3, focused: true}]);
+  assert.deepEqual(state.tabUpdates, [{tabId: 91, active: true}]);
+  // A restricted click names no new source, so nothing is sent to the tool page.
+  assert.equal(state.toolMessages, undefined);
+  assert.equal((state.injections || []).length, 0);
+});
+
+test('a tool page that cannot receive the switch message still gets focused', async () => {
+  const {listeners, state} = backgroundHarness();
+  state.toolTabs = [{id: 91, windowId: 3, url: 'chrome-extension://fixture/capture.html'}];
+  state.toolMessageFailure = true;
+  await listeners.clicked({id: 17, url: 'https://lectures.example/watch?v=1'});
+  assert.equal(state.createdTab, undefined);
+  assert.deepEqual(state.windowUpdates, [{windowId: 3, focused: true}]);
+  assert.deepEqual(state.tabUpdates, [{tabId: 91, active: true}]);
+  assert.equal(state.toolMessages.length, 1);
+});
+
+test('the first open tool page wins when several are open', async () => {
+  const {listeners, state} = backgroundHarness();
+  state.toolTabs = [{id: 91, windowId: 3, url: 'chrome-extension://fixture/capture.html'},
+    {id: 92, windowId: 4, url: 'chrome-extension://fixture/capture.html?tab=17'}];
+  await listeners.clicked({id: 17, url: 'https://lectures.example/watch?v=1'});
+  assert.deepEqual(state.windowUpdates, [{windowId: 3, focused: true}]);
+  assert.deepEqual(state.tabUpdates, [{tabId: 91, active: true}]);
+  assert.deepEqual(state.toolMessages, [{tabId: 91, message: {type: 'PPT_SWITCH_SOURCE', tabId: 17}}]);
+});
+
+test('a failing tool page lookup keeps the create path working', async () => {
+  const {listeners, state} = backgroundHarness();
+  state.tabQueryFailure = true;
+  await listeners.clicked({id: 17, url: 'https://lectures.example/watch?v=1'});
+  assert.equal(state.createdTab.url, 'chrome-extension://fixture/capture.html?tab=17');
+  assert.equal(state.toolMessages, undefined);
+});
+
+function switchHarness({busy = false, options = ['23'], value = '23', href = 'chrome-extension://fixture/capture.html?tab=23'} = {}) {
+  const source = fs.readFileSync(require.resolve('../src/capture.js'), 'utf8');
+  const start = source.indexOf('async function switchToolSource('), end = source.indexOf('function sourceSummary()', start);
+  assert(start >= 0 && end > start, 'exercise the production toolbar switch handler');
+  const listeners = {}, calls = {discover: 0, replaced: []};
+  const course = {options: options.map(value => ({value, textContent: value})), value, append(option) { this.options.push(option); }};
+  const nodes = new Map([['course', course], ['source-status', {textContent: ''}]]);
+  const chrome = {runtime: {id: 'fixture', onMessage: {addListener: fn => { listeners.message = fn; }}}};
+  const context = vm.createContext({chrome, window: {chrome}, URL,
+    $: id => nodes.get(id), busy: () => busy, discover: async () => { calls.discover++; },
+    document: {createElement: () => ({})}, location: {href},
+    history: {state: null, replaceState: (state, _title, url) => calls.replaced.push(url)}});
+  vm.runInContext(source.slice(start, end), context);
+  const settle = () => new Promise(setImmediate);
+  return {listeners, calls, nodes, course, settle};
+}
+
+test('an open tool page switches to the clicked source and keeps the address bar in step', async () => {
+  const h = switchHarness();
+  h.listeners.message({type: 'PPT_SWITCH_SOURCE', tabId: 17}, {id: 'fixture'});
+  await h.settle();
+  // The clicked tab becomes the selection discover() must keep.
+  assert.equal(h.course.value, '17');
+  assert.deepEqual(h.course.options.map(option => option.value), ['23', '17']);
+  assert.equal(h.course.options[1].textContent, '正在切换来源…');
+  assert.equal(h.calls.discover, 1, 'the switch reuses the existing discovery flow');
+  // A later reload must restore the new source, not the one the page was opened with.
+  // The path stays relative so the extension origin is untouched.
+  assert.deepEqual(h.calls.replaced, ['/capture.html?tab=17']);
+});
+
+test('a source that is already listed is selected without adding a placeholder', async () => {
+  const h = switchHarness({options: ['23', '17'], value: '23'});
+  h.listeners.message({type: 'PPT_SWITCH_SOURCE', tabId: 17}, {id: 'fixture'});
+  await h.settle();
+  assert.equal(h.course.value, '17');
+  assert.deepEqual(h.course.options.map(option => option.value), ['23', '17']);
+  assert.equal(h.calls.discover, 1);
+});
+
+test('a busy tool page refuses the switch and says why', async () => {
+  const h = switchHarness({busy: true});
+  h.listeners.message({type: 'PPT_SWITCH_SOURCE', tabId: 17}, {id: 'fixture'});
+  await h.settle();
+  assert.equal(h.nodes.get('source-status').textContent, '正在处理当前课次，完成后再点扩展图标切换来源。');
+  assert.equal(h.course.value, '23', 'the running extraction keeps its source');
+  assert.equal(h.calls.discover, 0);
+  assert.deepEqual(h.calls.replaced, []);
+});
+
+test('an unusable source keeps the current source and says so', async () => {
+  const h = switchHarness();
+  h.listeners.message({type: 'PPT_SWITCH_SOURCE', tabId: null}, {id: 'fixture'});
+  await h.settle();
+  assert.equal(h.nodes.get('source-status').textContent, '来源页不可用，仍使用当前来源。');
+  assert.equal(h.course.value, '23');
+  assert.equal(h.calls.discover, 0);
+});
+
+test('switches are only accepted from this extension page, never from content scripts', async () => {
+  const h = switchHarness();
+  // Content scripts always carry sender.tab; other extensions carry another sender.id.
+  h.listeners.message({type: 'PPT_SWITCH_SOURCE', tabId: 17}, {id: 'fixture', tab: {id: 5}});
+  h.listeners.message({type: 'PPT_SWITCH_SOURCE', tabId: 17}, {id: 'other-extension'});
+  h.listeners.message({type: 'PPT_SWITCH_SOURCE', tabId: 17}, {tab: {id: 5}});
+  h.listeners.message({type: 'PPT_OTHER', tabId: 17}, {id: 'fixture'});
+  await h.settle();
+  assert.equal(h.calls.discover, 0);
+  assert.equal(h.course.value, '23');
+  assert.equal(h.nodes.get('source-status').textContent, '');
 });
 
 test('generic background sources stay scoped to the current page and reject stale top-frame reports', async () => {

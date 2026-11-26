@@ -2319,6 +2319,32 @@ async function discover() {
     $('source-status').textContent = injectionError && !sources.length ? '无法读取来源页，请点“授权来源页”或回视频页重新点扩展图标。' : sourceSummary();
   } catch (e) { $('source-status').textContent = '发现视频失败：' + e.message + '。可刷新来源页，或改用手动地址 / 本地视频。'; }
 }
+async function switchToolSource(tabId) {
+  const id = Number(tabId);
+  // A null id means the click named no usable source; keep the current one.
+  if (!Number.isInteger(id) || id <= 0) { $('source-status').textContent = '来源页不可用，仍使用当前来源。'; return; }
+  // Never interrupt a running extraction, capture, batch, review or export.
+  if (busy()) { $('source-status').textContent = '正在处理当前课次，完成后再点扩展图标切换来源。'; return; }
+  // discover() keeps the selected tab, so select the clicked one first; a page
+  // opened after this one has no option yet, so add a placeholder for it.
+  if (![...$('course').options].some(option => option.value === String(id))) {
+    const option = document.createElement('option');
+    option.value = String(id); option.textContent = '正在切换来源…';
+    $('course').append(option);
+  }
+  $('course').value = String(id);
+  // Keep ?tab= in step with the switch; a later reload must not restore the old source.
+  const url = new URL(location.href);
+  url.searchParams.set('tab', String(id));
+  history.replaceState(history.state, '', url.pathname + url.search + url.hash);
+  await discover();
+}
+// The toolbar focuses this page instead of opening a second one, then names the tab
+// it was clicked from; extension pages have no sender.tab, content scripts always do.
+if (window.chrome?.runtime?.onMessage) chrome.runtime.onMessage.addListener((message, sender) => {
+  if (message?.type !== 'PPT_SWITCH_SOURCE' || sender?.id !== chrome.runtime.id || sender.tab) return;
+  switchToolSource(message.tabId).catch(() => {});
+});
 function sourceSummary() {
   const context = sourceCoursePage === coursePage && sourceCourse.name ? `${lessonLabel({course: sourceCourse})} · ` : '';
   if (batchPage === coursePage && batchJobs.length) return `${context}批量目录 ${batchJobs.length} 节 · 候选 ${sources.length} 个。`;
